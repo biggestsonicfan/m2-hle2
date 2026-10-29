@@ -95,6 +95,7 @@ static inline void m2lua_ui_make_tex(int i, const m2lua_surface_t *s) {
 
 /* Upload what the script loaded since, let go of what it released. */
 static inline void m2lua_ui_sync_surfaces(void) {
+    m2lua_init_once();
     emu_mutex_lock(&g_m2lua.draw_mutex);
     for (int i = 0; i < M2LUA_SURFACE_MAX; i++) {
         m2lua_surface_t *s = &g_m2lua.surfaces[i];

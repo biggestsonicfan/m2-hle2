@@ -37,6 +37,9 @@ const REGIONS = [
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex').slice(0, 16);
 process.env.M2HLE_UNTHROTTLE = '1';
 const SOUND = args.bool('sound');
+/* The sound board itself, so a build from before the C driver became the default compares
+ * with one after (older builds ignore it and run the 68000 anyway). */
+if (SOUND) process.env.M2HLE_SOUND_HLE = '0';
 
 async function soundBoard(emu) {
     const ram = [], regs = [];

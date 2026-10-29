@@ -2,7 +2,8 @@
  * comm_local_test.c — a Versus's link between two cabinets on one machine
  * (src/net/comm_local.h, Pinboard #987): the SLAVE's hello pins the MASTER's
  * other end, messages pass both ways over 127.0.0.1, and a datagram from
- * anyone else (a wrong token, a second hello, another port) is dropped. No ROM.
+ * anyone else (a wrong token, a second hello, another port) is dropped. A
+ * SLAVE started again takes the pin once the old one is quiet (#1632). No ROM.
  */
 #include <stdio.h>
 #include <string.h>
@@ -68,6 +69,15 @@ int main(void) {
     CHECK(g_m.to_port == g_s.port, "a second hello does not move the pin");
     CHECK(g_m.strangers > before && !comm_link_pending(&g_m.link), "the stranger's datagrams are dropped");
     CHECK(passes(&g_s, &g_m, 5), "the SLAVE still gets through");
+
+    /* The SLAVE closes and starts again, on a new port, with the token: once
+     * the old one has been quiet COMM_LOCAL_GONE_MS, its hello moves the pin. */
+    comm_local_close(&g_s);
+    for (uint64_t until = net_now_ms() + COMM_LOCAL_GONE_MS + 100u; net_now_ms() < until; ) drain_some(&g_m);
+    comm_local__hello(&g_x);
+    drain_some(&g_m);
+    CHECK(g_m.to_port == g_x.port, "the SLAVE started again takes the pin");
+    CHECK(passes(&g_x, &g_m, 6) && passes(&g_m, &g_x, 7), "and the two pass both ways");
 
     comm_local_close(&g_x);
     comm_local_close(&g_s);

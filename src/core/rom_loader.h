@@ -202,6 +202,39 @@ static inline uint8_t *zip_extract_by_crc(const char *zippath, uint32_t crc, siz
 #endif
 }
 
+/* While > 0, a file not found is no error: a caller trying a chip that has a
+ * stand-in (rom_recipe.h, an older revision's) says so itself if both miss. */
+static int g_rl_quiet_missing;
+
+/* The file of that CRC in the child zip, else the parent's; NULL if neither has it. */
+static inline uint8_t *zip__by_crc_in_set(const char *child_zip, const char *parent_zip,
+                                          uint32_t crc, size_t *out_size) {
+    uint8_t *data = NULL;
+    if (child_zip)           data = zip_extract_by_crc(child_zip,  crc, out_size);
+    if (!data && parent_zip) data = zip_extract_by_crc(parent_zip, crc, out_size);
+    return data;
+}
+
+/* filename from the child zip or the parent, by name and then by CRC; *actual
+ * its CRC. */
+static inline uint8_t *zip__find_in_set(const char *child_zip, const char *parent_zip,
+                                        const char *filename, size_t *out_size,
+                                        uint32_t expected_crc, uint32_t *actual) {
+    uint8_t *data = NULL;
+    if (child_zip)  data = zip_extract(child_zip,  filename, out_size, actual);
+    if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size, actual);
+    if (!data && (data = zip__by_crc_in_set(child_zip, parent_zip, expected_crc, out_size))) *actual = expected_crc;
+    /* A file under the right name with the wrong CRC: the set may hold the
+     * right one under another name (daytonagtx.zip has bank0.bin and bank1.bin
+     * the other way round from MAME's list). Take that one if it is there. */
+    if (data && *actual != expected_crc) {
+        size_t n2 = 0;
+        uint8_t *by_crc = zip__by_crc_in_set(child_zip, parent_zip, expected_crc, &n2);
+        if (by_crc) { free(data); data = by_crc; *out_size = n2; *actual = expected_crc; }
+    }
+    return data;
+}
+
 /* Try the child zip first (e.g. sfight.zip), fall back to the parent
  * (e.g. schamp.zip) for files shared via MAME's clone mechanism.
  * Verifies CRC32 — mismatches log a warning but the buffer is still
@@ -211,19 +244,18 @@ static inline uint8_t *zip_extract_from_set(const char *child_zip, const char *p
                                             uint32_t expected_crc) {
     if (g_rl_mem_zip.count > 0) {
         uint8_t *mem = zip_extract_mem(filename, out_size, expected_crc);
-        if (!mem) {
+        if (!mem && !g_rl_quiet_missing) {
             rl_mem_zip_note_missing(filename);
             LOG_ERROR("ROM not in the zip: %s (CRC %08X)", filename, expected_crc);
         }
         return mem;
     }
-    uint8_t *data = NULL;
     uint32_t actual = 0;
-    if (child_zip)  data = zip_extract(child_zip,  filename, out_size, &actual);
-    if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size, &actual);
-    if (!data && child_zip  && (data = zip_extract_by_crc(child_zip,  expected_crc, out_size))) actual = expected_crc;
-    if (!data && parent_zip && (data = zip_extract_by_crc(parent_zip, expected_crc, out_size))) actual = expected_crc;
-    if (!data) { LOG_ERROR("ROM not found: %s", filename); return NULL; }
+    uint8_t *data = zip__find_in_set(child_zip, parent_zip, filename, out_size, expected_crc, &actual);
+    if (!data) {
+        if (!g_rl_quiet_missing) LOG_ERROR("ROM not found: %s", filename);
+        return NULL;
+    }
 
     if (actual != expected_crc) {
         LOG_WARN("CRC mismatch: %s (expected %08X, got %08X)", filename, expected_crc, actual);
@@ -282,6 +314,8 @@ typedef struct romset {
     uint8_t *samples;     size_t samples_size;
     /* The CPU board's coprocessor tables (Model 2 / 2A TGP: opr-14742a/43a). */
     uint8_t *tgp_tables;  size_t tgp_tables_size;
+    /* An I/O board's own CPU program (the Model 1 I/O board's Z80: epr-14869c). */
+    uint8_t *iocpu;       size_t iocpu_size;
     bool     loaded;
 } romset_t;
 
@@ -294,6 +328,7 @@ static inline void romset_free(romset_t *rs) {
     free(rs->audiocpu);
     free(rs->samples);
     free(rs->tgp_tables);
+    free(rs->iocpu);
     memset(rs, 0, sizeof(*rs));
 }
 
@@ -304,18 +339,20 @@ static inline void romset_free(romset_t *rs) {
  * interleave or byte swap, no CRC pass. `--export-roms DIR` writes one from a
  * zip. The directory's name picks the profile, as the zip's basename does. A
  * region whose file is missing stays NULL, as it does for a set without it. */
-#define ROMSET_FILES 8
+#define ROMSET_FILES 9
 static const char *const k_romset_files[ROMSET_FILES] = {
     "maincpu.bin", "main_data.bin", "copro_data.bin", "polygons.bin",
-    "textures.bin", "audiocpu.bin", "samples.bin", "tgp_tables.bin",
+    "textures.bin", "audiocpu.bin", "samples.bin", "tgp_tables.bin", "iocpu.bin",
 };
 
 static inline uint8_t **romset_region(romset_t *rs, int i, size_t **size) {
     uint8_t **r[ROMSET_FILES] = { &rs->maincpu, &rs->main_data, &rs->copro_data, &rs->polygons,
-                                  &rs->textures, &rs->audiocpu, &rs->samples, &rs->tgp_tables };
+                                  &rs->textures, &rs->audiocpu, &rs->samples, &rs->tgp_tables,
+                                  &rs->iocpu };
     size_t *z[ROMSET_FILES] = { &rs->maincpu_size, &rs->main_data_size, &rs->copro_data_size,
                                 &rs->polygons_size, &rs->textures_size, &rs->audiocpu_size,
-                                &rs->samples_size, &rs->tgp_tables_size };
+                                &rs->samples_size, &rs->tgp_tables_size,
+                                &rs->iocpu_size };
     *size = z[i];
     return r[i];
 }

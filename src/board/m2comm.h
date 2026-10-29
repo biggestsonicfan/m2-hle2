@@ -54,6 +54,25 @@
  *   - No VSYNC frames (0xFC): MAME sends them only for its frame-sync option.
  *   - FG reads take nothing (MAME's read_fg): frames come only at the pass.
  *   - Two nodes, no relay.
+ *   - MAME ships the whole frame size, and Power Sled reads all of it
+ *     (m2comm_set_whole_frame): its ROM keeps a ring of 0x180-byte node slots,
+ *     the frame received landing one slot up from the sender's, so slot k
+ *     holds the node k hops back. It counts the Rides from slots 1..count
+ *     (FUN_14F50; the Main is ID 0x200), and with only the window an empty
+ *     slot 2 reads as a second Ride: rider 1 gets no slot and its objects NaN
+ *     positions (black 3D). The whole frame does not pack into a datagram
+ *     once the race fills it, so the window still goes over, and the receiver
+ *     makes the rest: past its window the sender's frame is what it last took
+ *     from this node, this node's own frame two slots down.
+ * A board set to be the MASTER with nobody on the link waits for a ring that
+ * never comes up: Daytona's NETWORK CHECKING ends in CANCELLED and a reboot,
+ * forever. Each start of the board as a master alone is counted
+ * (lone_masters) for the host to ask about (core/link_check.h, Pinboard
+ * #1449), and the host can plug in a virtual TOSlink cable (m2comm_set_cable):
+ * the board's output wired to its own input, as a loopback cable on a real
+ * comm board. The master then hears its own token and makes a ring of one
+ * (Daytona: "1 player can race"), MAME's ring code unchanged. A session's
+ * peer, when there is one, takes the cable's place.
  * The link state is g_m2comm_link, not g_m2comm: what the board reads there
  * is the other cabinet's, outside savestates, rewind and det_digest, and
  * nothing in it is board state a savestate could bring back.
@@ -89,12 +108,14 @@ typedef struct {
  * recv returns the next one's length (at most cap bytes) or 0 if none has
  * come. pending (may be NULL) is how many are waiting: the host's link clock
  * reads it (core/link_pace.h). The link session owns it; it outlives the
- * board's resets. */
+ * board's resets. twin: the other cabinet is a board this process runs too
+ * (core/emu_twin.h, a GGPO match of a linked game). */
 typedef struct {
     void     *ctx;
     void     (*send)(void *ctx, const uint8_t *msg, uint32_t len);
     uint32_t (*recv)(void *ctx, uint8_t *msg, uint32_t cap);
     uint32_t (*pending)(void *ctx);
+    bool      twin;
 } m2comm_peer_t;
 
 enum { M2COMM_LINK_DOWN = 0, M2COMM_LINK_UP = 1 };
@@ -106,11 +127,53 @@ typedef struct {
     uint32_t timer;                 /* the master's countdown to the token */
     uint32_t quiet;                 /* passes the master has gone unanswered */
     uint32_t sent, taken;           /* data frames out and in, for diagnostics */
+    bool     whole_frame;           /* MAME's whole frame from the window (m2comm_set_whole_frame) */
+    bool     cable;                 /* the virtual TOSlink: output into input, with no peer */
+    bool     lone_seen;             /* this start of the board is counted in lone_masters */
+    uint32_t lone_masters;          /* starts as a master with nobody on the link (core/link_check.h) */
     uint8_t  msg[M2COMM_MSG_MAX];
 } m2comm_link_t;
 
 static m2comm_state_t g_m2comm;
 static m2comm_link_t  g_m2comm_link;
+
+/* ---- the virtual TOSlink cable: what a node sends, it takes ---- */
+
+#define M2COMM_LOOP_DEPTH 4u                 /* a pass sends at most two; the next takes them */
+
+typedef struct {
+    uint8_t  msg[M2COMM_LOOP_DEPTH][M2COMM_MSG_MAX];
+    uint32_t len[M2COMM_LOOP_DEPTH];
+    uint32_t head, n;
+} m2comm_loop_t;
+
+static m2comm_loop_t g_m2comm_loop;
+
+static void m2comm__loop_send(void *ctx, const uint8_t *msg, uint32_t len) {
+    m2comm_loop_t *q = (m2comm_loop_t *)ctx;
+    if (q->n == M2COMM_LOOP_DEPTH) { q->head = (q->head + 1u) % M2COMM_LOOP_DEPTH; q->n--; }
+    uint32_t at = (q->head + q->n) % M2COMM_LOOP_DEPTH;
+    memcpy(q->msg[at], msg, len);
+    q->len[at] = len;
+    q->n++;
+}
+
+static uint32_t m2comm__loop_recv(void *ctx, uint8_t *msg, uint32_t cap) {
+    m2comm_loop_t *q = (m2comm_loop_t *)ctx;
+    if (!q->n) return 0;
+    uint32_t len = q->len[q->head] < cap ? q->len[q->head] : cap;
+    memcpy(msg, q->msg[q->head], len);
+    q->head = (q->head + 1u) % M2COMM_LOOP_DEPTH;
+    q->n--;
+    return len;
+}
+
+static const m2comm_peer_t g_m2comm_loop_peer = { &g_m2comm_loop, m2comm__loop_send, m2comm__loop_recv, NULL, false };
+
+/* Who the board talks to: the session's peer, else the cable, else nobody. */
+static inline const m2comm_peer_t *m2comm__peer(const m2comm_link_t *l) {
+    return l->peer ? l->peer : l->cable ? &g_m2comm_loop_peer : NULL;
+}
 
 /* ---- the link (Pinboard #959): MAME's comm_tick for two nodes ---- */
 
@@ -123,8 +186,19 @@ static inline uint32_t m2comm__window(const m2comm_state_t *s) {
     return n < M2COMM_WINDOW_MAX ? n : M2COMM_WINDOW_MAX;
 }
 
+/* The peer's window n taken: MAME's whole frame from it, the rest of the
+ * sender's frame being this node's own two slots down (two nodes). */
+static inline void m2comm__take_whole(m2comm_state_t *s, uint32_t n) {
+    uint32_t size = (uint32_t)s->shared[0x12] | (uint32_t)s->shared[0x13] << 8;
+    uint32_t room = M2COMM_RAM_SIZE - M2COMM_FRAME_START - n;
+    if (size > room) size = room;
+    if (size > n)
+        memmove(s->shared + M2COMM_FRAME_START + 2u * n, s->shared + M2COMM_FRAME_START, size - n);
+}
+
 static inline void m2comm__send(m2comm_link_t *l, uint32_t len) {
-    l->peer->send(l->peer->ctx, l->msg, len);
+    const m2comm_peer_t *p = m2comm__peer(l);
+    p->send(p->ctx, l->msg, len);
 }
 
 static inline void m2comm__send_data(m2comm_state_t *s, m2comm_link_t *l) {
@@ -182,8 +256,9 @@ static inline void m2comm__pass_down(m2comm_state_t *s, m2comm_link_t *l) {
     s->shared[2] = 0xFF;
     s->shared[3] = 0xFF;
     s->zfg ^= 1u;
+    const m2comm_peer_t *p = m2comm__peer(l);
     uint32_t len;
-    while (l->alive == M2COMM_LINK_DOWN && (len = l->peer->recv(l->peer->ctx, l->msg, sizeof l->msg)) > 0)
+    while (l->alive == M2COMM_LINK_DOWN && (len = p->recv(p->ctx, l->msg, sizeof l->msg)) > 0)
         m2comm__ring_msg(s, l, len);
     if (l->alive == M2COMM_LINK_DOWN && m2comm__is_master(s)) m2comm__master_up(s, l);
 }
@@ -192,9 +267,11 @@ static inline void m2comm__pass_down(m2comm_state_t *s, m2comm_link_t *l) {
  * send this pass's own (the master). */
 static inline void m2comm__pass_up(m2comm_state_t *s, m2comm_link_t *l) {
     bool master = m2comm__is_master(s);
+    const m2comm_peer_t *p = m2comm__peer(l);
     uint32_t n = m2comm__window(s), len;
-    while ((len = l->peer->recv(l->peer->ctx, l->msg, sizeof l->msg)) > 0) {
+    while ((len = p->recv(p->ctx, l->msg, sizeof l->msg)) > 0) {
         if (l->msg[0] > l->count || len != 1u + n) continue;   /* the ring's own traffic, or torn */
+        if (l->whole_frame) m2comm__take_whole(s, n);
         memcpy(s->shared + M2COMM_FRAME_START + n, l->msg + 1, n);
         s->zfg ^= 1u;
         l->taken++;
@@ -221,12 +298,19 @@ static inline void m2comm__link_reset(m2comm_link_t *l) {
     l->id = l->count = 0;
     l->timer = M2COMM_LINK_DELAY;
     l->quiet = 0;
+    l->lone_seen = false;
+    g_m2comm_loop.head = g_m2comm_loop.n = 0;
 }
 
 /* ---- the board ---- */
 
-/* n Z80 passes with nobody on the link: never a message. */
+/* n Z80 passes with nobody on the link: never a message. A master here waits
+ * for nobody; each start of the board as one is counted once. */
 static inline void m2comm__ticks(uint64_t n) {
+    if (!g_m2comm_link.lone_seen && m2comm__is_master(&g_m2comm)) {
+        g_m2comm_link.lone_seen = true;
+        g_m2comm_link.lone_masters++;
+    }
     if (n & 1u) g_m2comm.zfg ^= 1u;
     g_m2comm.shared[0] = 0x00;
     g_m2comm.shared[2] = 0xFF;
@@ -234,7 +318,7 @@ static inline void m2comm__ticks(uint64_t n) {
 }
 
 static inline void m2comm__run(uint64_t n) {
-    if (!g_m2comm_link.peer) { m2comm__ticks(n); return; }
+    if (!m2comm__peer(&g_m2comm_link)) { m2comm__ticks(n); return; }
     if (n > M2COMM_CATCH_UP) n = M2COMM_CATCH_UP;
     while (n--) m2comm__pass(&g_m2comm, &g_m2comm_link);
 }
@@ -250,6 +334,7 @@ static inline void m2comm__catch_up(void) {
 static inline void m2comm__cn_w(uint8_t v) {
     g_m2comm.cn = v & 1u;
     if (!g_m2comm.cn) {
+        g_m2comm_link.lone_seen = false;
         g_m2comm.enabled = 0;
         g_m2comm.zfg = 0;
         g_m2comm.fg = 0;
@@ -312,9 +397,32 @@ static inline void m2comm_set_peer(const m2comm_peer_t *peer) {
     m2comm__link_reset(&g_m2comm_link);
 }
 
-/* Whether the comm board is linked to another cabinet: its host then paces it
- * by the link's clock (core/link_pace.h). */
-static inline bool m2comm_linked(void) { return g_m2comm_link.peer != NULL; }
+/* The virtual TOSlink cable in (true) or out. With no session's peer, the
+ * board then takes what it sends: a master's ring comes up as one node on the
+ * passes that follow (the countdown it is in, the token, the ring size). It
+ * outlives the board's resets, as a peer does; the host takes it out when it
+ * loads another set (link_check_reset). */
+static inline void m2comm_set_cable(bool on) {
+    if (g_m2comm_link.cable == on) return;
+    g_m2comm_link.cable = on;
+    g_m2comm_loop.head = g_m2comm_loop.n = 0;
+    if (!g_m2comm_link.peer) m2comm__link_reset(&g_m2comm_link);
+}
+
+static inline bool m2comm_cable(void) { return g_m2comm_link.cable; }
+
+/* How many times the board has been started as a master with nobody on the
+ * link: the host asks about each new one (core/link_check.h). */
+static inline uint32_t m2comm_lone_masters(void) { return g_m2comm_link.lone_masters; }
+
+/* After m2comm_install: a data frame taken fills MAME's whole frame size from
+ * 0x2000 + offset (the ROM's ring of node slots), not just the window. */
+static inline void m2comm_set_whole_frame(bool on) { g_m2comm_link.whole_frame = on; }
+
+/* Whether the comm board is linked to another host's cabinet: its host then
+ * paces it by the link's clock (core/link_pace.h). Not a twin's (the other
+ * cabinet runs in this process): GGPO paces the pair. */
+static inline bool m2comm_linked(void) { return g_m2comm_link.peer != NULL && !g_m2comm_link.peer->twin; }
 
 /* The master's messages waiting for a slave's next passes; 0 on the master.
  * The master's clock is the link's: it sends a window every pass, and the
@@ -333,6 +441,7 @@ static inline uint32_t m2comm_backlog(void) {
 static inline void m2comm_install(memory_bus_t *bus, uint32_t frame_offset) {
     memset(&g_m2comm, 0, sizeof g_m2comm);
     m2comm__link_reset(&g_m2comm_link);
+    g_m2comm_link.whole_frame = false;
     g_m2comm.frame_offset = frame_offset;
     irqt_flush();
     g_m2comm.vbl_seen = (uint64_t)g_irqt.vbl_count;

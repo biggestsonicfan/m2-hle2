@@ -204,6 +204,15 @@ static inline void dynamcop_install_2c(const romset_t *rs, i960_cpu_t *cpu, memo
     /* country setting as well is not looked at yet. */ \
     .region           = { .kind = REGION_TODO, \
                           .why  = "country setting not looked for yet" }, \
+    /* The model table, in the data ROMs every build shares: 19432 entries */ \
+    /* of 16 bytes at data 0xD40000, the 1995 layout, read by the draw */ \
+    /* routines as 0x2D40000[n*16]. 50 entries are empty (the table is laid */ \
+    /* out in 51 banks); the other 19382 meshes are all in the polygon ROM. */ \
+    /* prepared_test holds it to the explorer's reads (NOCLIP-SYNC.md §8.2). */ \
+    .model_table_offset = 0xD40000, \
+    .model_table_count  = 19432, \
+    .mesh_ptr_subtract  = 0x02000010, \
+    .mesh_ptr_add       = 0x10, \
 }
 
 static const game_profile_t dynamcop_profile = {

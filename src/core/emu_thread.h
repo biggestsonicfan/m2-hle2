@@ -70,7 +70,7 @@ static volatile int g_idle_hold;
 #define EMU_CPU_HZ           25000000               /* i960 KB on Model 2 = 25 MHz */
 #define EMU_SLICES_PER_SEC   60
 #define EMU_SLICE_US         (1000000 / EMU_SLICES_PER_SEC)  /* ~16667 µs */
-/* EMU_STEPS_PER_SLICE is in constants.h (500,000): a cap above the 416,667
+/* EMU_STEPS_PER_SLICE is in constants.h (500,000): a cap above the 434,600
  * cycles to a vblank, so a slice reaches its vblank whatever the program does,
  * since an instruction costs at least a cycle. */
 
@@ -222,7 +222,6 @@ static int  s_irq_baseline_depth = 0;
  * (game_quirks_t.irq_vectors), and the slices it has been in service for. */
 static bool s_irq_from_table     = false;
 static int  s_irq_slices         = 0;
-static uint64_t s_timer_cycles_seen = 0;   /* cpu->cycles the board's clock has been given */
 #include "i960_blocks.h"     /* the decoded-block cache (I960_BLOCKS builds) */
 #ifndef I960_AOT
 #define I960_AOT 0
@@ -270,7 +269,8 @@ static inline void emu_board_reset_state(void) {
     s_irq_baseline_depth = 0;
     s_irq_from_table     = false;
     s_irq_slices         = 0;
-    s_timer_cycles_seen  = 0;   /* install_fn put cpu->cycles back to 0 */
+    g_irqt_seen          = 0;   /* install_fn put cpu->cycles back to 0 */
+    g_irqt_given         = 0;
 #if I960_BLOCKS
     s_ib_valid           = 0;   /* new code, perhaps */
 #endif
@@ -306,7 +306,7 @@ static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
     savestate_emu_t e;
     memset(&e, 0, sizeof e);
     e.total_steps        = ctx->total_steps;
-    e.timer_cycles_seen  = s_timer_cycles_seen;
+    e.timer_cycles_seen  = g_irqt_seen;
     e.frame_clock_sample = g_frame_clock.sample;
     e.frame_clock_frame  = g_frame_clock.frame;
     e.irq_in_service     = s_irq_in_service;
@@ -323,7 +323,8 @@ static inline savestate_emu_t emu_state_latches(const emu_thread_ctx_t *ctx) {
 
 static inline void emu_state_put_latches(emu_thread_ctx_t *ctx, const savestate_emu_t *e) {
     ctx->total_steps     = e->total_steps;
-    s_timer_cycles_seen  = e->timer_cycles_seen;
+    g_irqt_seen          = e->timer_cycles_seen;   /* pending is whole between slices */
+    g_irqt_given         = e->timer_cycles_seen;
     s_irq_in_service     = e->irq_in_service != 0;
     s_irq_baseline_depth = e->irq_baseline_depth;
     s_irq_from_table     = e->irq_from_table != 0;
@@ -410,6 +411,7 @@ static inline const char *emu_state_flat_load(emu_thread_ctx_t *ctx, const void 
  * inputs and writes to a feed, a follower runs on them. Hooked into the slice. */
 #include "follow.h"
 #include "replay.h"   /* recorded online matches, and their playback (Pinboard #572) */
+#include "tas.h"      /* tool-assisted play: a movie, rewind, the greenzone (Pinboard #1462) */
 
 /* A game script's hooks (core/m2lua.h, Pinboard #958), set by a host that runs
  * scripts and called with the emu mutex held: at each vblank, and before and
@@ -598,10 +600,12 @@ static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
     i960_cpu_t *cpu = ctx->cpu;
     /* A board loaded or reset by a host that does not call
      * emu_board_reset_state starts its count again under us. */
-    if (cpu->cycles < s_timer_cycles_seen) s_timer_cycles_seen = cpu->cycles;
-    g_irqt.pending += (int64_t)(cpu->cycles - s_timer_cycles_seen);
-    s_timer_cycles_seen = cpu->cycles;
+    irqt_sync();
+    if (cpu->cycles < g_irqt_seen) g_irqt_seen = cpu->cycles;
+    g_irqt.pending += (int64_t)(cpu->cycles - g_irqt_seen);
+    g_irqt_seen = g_irqt_given = cpu->cycles;
     irqt_flush();
+    irqt__due();
 }
 
 /* After each instruction: count its cycles, and take an interrupt as soon as
@@ -611,8 +615,8 @@ static inline void emu_timers_slice_begin(emu_thread_ctx_t *ctx) {
  * difference is taken in 32 bits (irqt_count_t). */
 static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
     i960_cpu_t *cpu = ctx->cpu;
-    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
-    s_timer_cycles_seen = cpu->cycles;
+    g_irqt_seen = cpu->cycles;
+    irqt_sync();
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if (!s_irq_in_service && (g_irqt.intreq & g_irqt.intena & 0x03FFu) && g_active_profile)
         emu_service_irq(ctx);
@@ -620,13 +624,25 @@ static inline void emu_timers_after_step(emu_thread_ctx_t *ctx) {
 
 /* The same on the run loop's fast path, where no handler is in service
  * (entering one bumps the attention word, which sends the loop slow) and the
- * profile is the slice's: two loads an instruction fewer. */
-static inline void emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, bool profile) {
-    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
-    s_timer_cycles_seen = cpu->cycles;
+ * profile is the slice's. Between events an instruction only moves the
+ * boundary and compares it with g_irqt_due (irq_timer.h); the work is here.
+ * pending was a load, an add and a store an instruction, and the interrupt
+ * test two loads more. */
+static MEM_NOINLINE void emu_timers_due(emu_thread_ctx_t *ctx, bool profile) {
+    irqt_sync();
     if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
     if ((g_irqt.intreq & g_irqt.intena & 0x03FFu) && profile)
         emu_service_irq(ctx);
+}
+
+/* True when it did that work, the only part of the fast path that can move
+ * the attention word. */
+static I960_HOT_INLINE bool emu_timers_after_step_fast(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, bool profile) {
+    uint64_t c = cpu->cycles;
+    g_irqt_seen = c;
+    if (M2_LIKELY((int64_t)c < g_irqt_due)) return false;
+    emu_timers_due(ctx, profile);
+    return true;
 }
 
 /* ---- The sound board against the board's clock ---------------------------
@@ -661,7 +677,7 @@ static inline void emu_state_request_pump(emu_thread_ctx_t *ctx, netplay_step_t 
         else if (m2comm_linked())     err = "the board is linked to another cabinet";
         else if (replay_playing())    err = "a replay is playing";
         else                          err = emu_state_load_now(ctx, ctx->state_path);
-        if (!err) { follow_lead_break("state loaded"); replay_rec_break("state loaded"); }
+        if (!err) { follow_lead_break("state loaded"); replay_rec_break("state loaded"); tas_break("a state was loaded"); }
     } else {
         err = emu_state_save_now(ctx, ctx->state_path);
     }
@@ -682,6 +698,7 @@ static inline void emu_comm_role_pump(emu_thread_ctx_t *ctx, netplay_step_t step
         replay_rec_break("comm link role");
         replay_play_yield();
         follow_lead_break("comm link role");
+        tas_break("the comm link reset the board");
         ctx->total_steps       = 0;
         ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
         ctx->cpu_snapshot      = *ctx->cpu;
@@ -723,6 +740,7 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         else if (asked) asked = netplay_reset_board_now();
         else            netplay_do_reset();
         follow_lead_break("board reset");
+        tas_break("the board was reset");
         /* THE STEP COUNT IS PART OF THE BOARD, because the frame check hashes
          * it -- `netplay_frame_check` calls it "the instruction count since
          * reset" and it has to actually be one. Left running, it carries the
@@ -742,6 +760,8 @@ static inline netplay_step_t emu_netplay_pump(emu_thread_ctx_t *ctx) {
         if (asked) ctx->reset_count++;
     }
     emu_comm_role_pump(ctx, step);
+    /* After the reset above: a movie from power-on starts on the reset board. */
+    tas_pump(ctx, step != NETPLAY_STEP_OFF || replay__session_live(), ctx->request_reset != 0);
     return step;
 }
 
@@ -905,19 +925,29 @@ static inline void emu_slice_after(emu_thread_ctx_t *ctx, bool frame, int64_t pr
         pcprof_frame((int32_t)(emu_now_us() - prof_t0), (uint32_t)steps, g_emu_frames);
 }
 
-static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
+/* Before the i960's part of a slice: the profiler's start and zone, this
+ * slice's inputs, the timers and the interrupts due. Returns the profiler's
+ * start time; the zone goes to *hzone for emu_slice_body to leave. */
+static inline int64_t emu_slice_begin(emu_thread_ctx_t *ctx, int *hzone) {
     int64_t  prof_t0 = g_pcprof_on ? emu_now_us() : 0;
-    int      hzone   = hprof_enter(HPROF_I960);   /* host_prof.h; COP and sound tag themselves */
+    *hzone = hprof_enter(HPROF_I960);   /* host_prof.h; COP and sound tag themselves */
     /* A slice runs the board to its next vblank (irq_timer.h), whatever the
      * program is doing then: the frame is the board's, not the game's. */
     g_vblank_edge = 0;
     g_geodl_full_snap = g_active_profile && g_active_profile->quirks.geo_displaylist;
     follow_slice_begin(ctx);   /* follow.h: latch or replay this slice's inputs */
+    tas_slice_begin(ctx);      /* tas.h: the movie's input for this frame */
     replay_slice_begin(ctx);   /* replay.h: record a netplay match's */
     emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
     emu_service_irq(ctx);   /* deliver pending i960 interrupts (sound, …) */
+    return prof_t0;
+}
+
+static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
+    int      hzone;
+    int64_t  prof_t0 = emu_slice_begin(ctx, &hzone);
     int max_steps = g_emu_steps_per_slice;
     /* The step count is accumulated in a register and written back once.
      * ctx->total_steps is volatile -- netplay hashes it into every frame's
@@ -945,6 +975,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
      * its inlining limits on the handheld -- mem_fetch2 became a call per
      * instruction, and the two-loop version ran 5% MORE instructions. */
     const bool     profile = g_active_profile != NULL;
+    const bool     bt      = g_i960_bt_on;   /* set by emu_slice_begin, fixed for the slice */
     int      i;
     uint32_t steps = 0;   /* at most max_steps; 32-bit for the SH-4 */
     uint32_t attn  = g_emu_attn;
@@ -999,7 +1030,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
         if (!slow && !bps && !g_pcprof_on) {
             const ib_block_t *b = ib_lookup(cpu, bus, cpu->sfr.ip);
             if (b->n && b->n <= (uint32_t)(max_steps - i)
-                    && g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon
+                    && g_irqt.pending + (irqt_count_t)(g_irqt_seen - g_irqt_given) + (irqt_count_t)b->cyc < g_irqt.horizon
                     && !(g_irqt.intreq & g_irqt.intena & 0x03FFu)) {
 #ifdef IB_WHY
                 uint32_t t0 = IBW_T();
@@ -1014,7 +1045,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             }
 #ifdef IB_WHY
             g_ib.why[!b->n ? 1 : b->n > (uint32_t)(max_steps - i) ? 2
-                     : !(g_irqt.pending + (irqt_count_t)b->cyc < g_irqt.horizon) ? 3 : 4]++;
+                     : !(g_irqt.pending + (irqt_count_t)(g_irqt_seen - g_irqt_given) + (irqt_count_t)b->cyc < g_irqt.horizon) ? 3 : 4]++;
         } else {
             g_ib.why[0]++;
 #endif
@@ -1027,14 +1058,14 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 #ifdef IB_WHY
         {
             uint32_t t0 = IBW_T();
-            int r = i960_step_core(cpu, bus, (slow || bps) ? 1u : (uint32_t)(max_steps - i));
+            int r = i960_step_core(cpu, bus, (slow || bps) ? 1u : (uint32_t)(max_steps - i), bt);
             uint32_t dt = IBW_D(t0);
             if (g_hle_extra) { g_ib.ns[2] += dt; g_ib.why[5] += g_hle_extra; } else g_ib.ns[1] += dt;
             if (M2_UNLIKELY(r != 0)) break;
         }
 #else
         if (M2_UNLIKELY(i960_step_core(cpu, bus,
-                                       (slow || bps) ? 1u : (uint32_t)(max_steps - i)) != 0)) break;
+                                       (slow || bps) ? 1u : (uint32_t)(max_steps - i), bt) != 0)) break;
 #endif
 #if I960_BLOCKS || I960_AOT
     ib_ran:
@@ -1047,13 +1078,14 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
             if (stop) break;
         } else {
             /* Fast: no handler in service (entering one bumps the word). */
-            emu_timers_after_step_fast(ctx, cpu, profile);
-            if (g_emu_attn != attn) {      /* flagged by the timer service */
+            if (M2_UNLIKELY(emu_timers_after_step_fast(ctx, cpu, profile))
+                    && g_emu_attn != attn) {      /* flagged by the timer service */
                 slow = true;
                 if (emu_slice_break_flag()) break;
             }
         }
     }
+    irqt_sync();   /* pending whole again: savestates, rollback and hosts read it */
     g_emu_times.loop_us += emu_now_us() - loop_t0
                          - (g_emu_times.sound_inline_us + g_emu_times.sound_wait_us - loop_snd);
     g_emu_times.steps   += steps;
@@ -1061,6 +1093,7 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
     ctx->slice_capped = (i >= max_steps);
     bool frame = g_vblank_edge != 0;
     follow_slice_end(ctx, frame);
+    tas_slice_end(ctx, frame);
     replay_slice_end(ctx, frame);
     if (frame) emu_slice_frame_edge(ctx);
     emu_script_frame(frame);
@@ -1073,6 +1106,9 @@ static inline void emu_slice_body(emu_thread_ctx_t *ctx) {
 static inline void emu_slice_count_frame(emu_thread_ctx_t *ctx) {
     g_emu_frames++;   /* frame clock for the MCP bridge / capture tools */
     g_dl_frame_now = g_emu_frames;
+    /* Idle loops a game put in work RAM since (m2_spin.h); no board state. */
+    if (g_hle_spin_rescan && !(g_emu_frames & 63u)) g_hle_spin_rescan(ctx->bus);
+
     /* Stamp the frame with the board audio produced up to its end: the
      * slice's own samples, which sound_run_slice handed out in the body
      * above and the sound thread may still be making (out_due is where
@@ -1166,6 +1202,7 @@ static inline void emu_idle_hold(emu_thread_ctx_t *ctx) {
         if (reset) {
             ctx->total_steps       = 0;    /* as the barrier's reset: see emu_netplay_pump */
             follow_lead_break("idle hold");
+            tas_break("idle hold");
             replay_rec_break("idle hold");
             ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
             ctx->cpu_snapshot      = *ctx->cpu;
@@ -1201,10 +1238,11 @@ static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
     if (m2comm_linked()) { emu_pace_linked(ctx, work_t1); return; }
     link_pace_stop(&ctx->link_pace);
     int64_t now = emu_now_us();
+    int64_t slice_us = (int64_t)EMU_SLICE_US * tas_slowdown();   /* TAS slow motion */
     if (ctx->frame_deadline_us == 0) {
-        ctx->frame_deadline_us = now + EMU_SLICE_US;
+        ctx->frame_deadline_us = now + slice_us;
     } else {
-        ctx->frame_deadline_us += EMU_SLICE_US;
+        ctx->frame_deadline_us += slice_us;
         /* Catch-up clamp: if we've fallen >1 frame behind (paused
          * in debugger, heavy host load), reset rather than spin. */
         if (ctx->frame_deadline_us < now - (int64_t)EMU_SLICE_US) {
@@ -1227,7 +1265,7 @@ static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
      * frame per call. */
     bool budget_hit = ctx->frame_budget_hit != 0;
     ctx->frame_budget_hit = 0;
-    if (unthrottled || netplay_catching_up() || replay_play_unpaced()) ctx->frame_deadline_us = 0;
+    if (unthrottled || netplay_catching_up() || replay_play_unpaced() || tas_unpaced()) ctx->frame_deadline_us = 0;
     else if (sleep_us > 0 && !budget_hit) {
         emu_sleep_us(sleep_us);
         g_emu_times.pace_us += emu_now_us() - work_t1;
@@ -1258,7 +1296,7 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
         g_emu_times.net_us += emu_now_us() - slice_start;
         return false;
     }
-    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget && !replay_playing()) {
+    if (np_step == NETPLAY_STEP_OFF && g_idle_hold && !ctx->frame_budget && !replay_playing() && !tas_live()) {
         emu_idle_hold(ctx);
         g_emu_times.net_us += emu_now_us() - slice_start;
         return false;
@@ -1273,6 +1311,7 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
  * slice ran and the loop goes straight round again. */
 static inline bool emu_run_running(emu_thread_ctx_t *ctx) {
     emu_ggpo_lobby_pump();
+    emu_ggpo_solo_netplay(ctx);
     if (emu_ggpo_wanted()) return emu_ggpo_step(ctx);
     if (emu_slice_should_stop(ctx)) return false;
     int64_t slice_start = emu_now_us();
@@ -1387,8 +1426,16 @@ static void *emu_thread_proc(void *p) {
  * with emu_slice_body / emu_slice_finish (the web build, which has one thread).
  * thread_alive stays 0, which is also what tells emu_sound_restart and
  * emu_sound_midi there is no run loop to lock out. */
+/* A light gun's host pointer and an analog wheel's position reach only a board
+ * this host's hands drive (lightgun.h, io_5649.h). */
+static int emu_board_remote(void) {
+    return replay__session_live() || follow_following() || g_replay_play.on || g_native_play.on;
+}
+
 static inline void emu_ctx_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_bus_t *bus) {
     memset(ctx, 0, sizeof(*ctx));
+    g_lightgun_remote_fn = emu_board_remote;
+    g_io5649_remote_fn   = emu_board_remote;
     ctx->cpu = cpu;
     ctx->bus = bus;
     ctx->run_state = EMU_STOPPED;

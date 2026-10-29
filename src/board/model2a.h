@@ -39,9 +39,15 @@ static uint32_t model2a_copro_read_cb(mem_region_t *r, uint32_t addr, int size) 
     return 0u;
 }
 
+/* A byte or halfword store pushes a whole word too, the value in its lane and
+ * zeros around it (MAME's 32-bit handlers take the shifted bus word and ignore
+ * the mask). Daytona sends some TGP arguments with stos (Pinboard #1035). */
 static void model2a_copro_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int size) {
     (void)r;
-    if (size != 4) return;
+    if (size != 4) {
+        val = (val & (size == 1 ? 0xFFu : 0xFFFFu)) << (8u * (addr & 3u));
+        addr &= ~3u;
+    }
     if (addr < 0x00884000u)      tgp_function_port_w(addr - 0x00880000u, val);
     else if (addr < 0x00888000u) tgp_fifo_w(val);
 }

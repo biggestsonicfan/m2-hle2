@@ -15,6 +15,7 @@
 #include "sfight.h"        /* profile, load/install */
 #include "emu_thread.h"    /* emu thread */
 #include "input.h"         /* g_input, input_attach, input_io_read_cb */
+#include "lightgun_host.h"  /* the trigger's flash (Pinboard #1045) */
 
 #include "test_rom_dir.h"
 #define HELD_ADDR 0x00500700u
@@ -23,13 +24,15 @@
 const game_profile_t *g_active_profile = &sfight_profile;
 
 static int g_fail = 0;
+static int test_remote_yes(void) { return 1; }
+
 #define CHECK(cond, msg) do { \
     if (!(cond)) { printf("FAIL: %s\n", msg); g_fail++; } \
     else         { printf("ok:   %s\n", msg); } \
 } while (0)
 
-int main(void) {
-    /* ---- (A) port byte mapping ---- */
+/* ---- (A) port byte mapping ---- */
+static void test_port_bytes(void) {
     mem_region_t io = { .name="IO", .base=IO_BASE, .size=IO_SIZE, .data=NULL };
     g_input.held = 0;
     CHECK((input_io_read_cb(&io, IO_BASE+0x02,1)&0xFF)==0xFF &&
@@ -47,13 +50,41 @@ int main(void) {
     CHECK((input_io_read_cb(&io, IO_BASE+0x02,1)&0x01)==0,
           "P1 COIN pulls IN0 (IO+0x02) bit0 low");
     g_input.held = 0;
+}
 
-    /* ---- (A2) combos ("macros") and counted presses ---- */
+/* ---- (A2) combos ("macros") and counted presses ---- */
+static void test_combos(void) {
     const uint32_t *bits = sfight_profile.input.bits;
     CHECK(input_combo_parse("b1+b2") == ((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P1_B2)) &&
           input_combo_parse("p2:B1+b3") == ((1u << GAME_INPUT_P2_B1) | (1u << GAME_INPUT_P2_B3)) &&
           input_combo_parse("b1+b5") == 0 && input_combo_parse("") == 0,
           "combo text parses to action masks, and junk to 0");
+    CHECK(input_combo_parse("service") == (1u << GAME_INPUT_SERVICE) &&
+          input_combo_parse("p1:test") == (1u << GAME_INPUT_TEST) &&
+          input_combo_parse("gearn") == (1u << GAME_INPUT_GEAR_N) &&
+          input_combo_parse("gear3+b1") == ((1u << GAME_INPUT_GEAR_3) | (1u << GAME_INPUT_P1_B1)) &&
+          input_combo_parse("p2:gear1") == 0 && input_combo_parse("p3:service") == 0 &&
+          input_combo_parse("gear5") == 0,
+          "the cabinet's service, test and gear buttons parse, for player 1 only (Pinboard #1137)");
+    {   /* a gear button puts the lever in its gate and it stays there (io_5649.h) */
+        io5649_controls_t saved = g_io5649_controls;
+        g_io5649_controls = (io5649_controls_t){ .shift_up = 1u, .shift_down = 2u,
+                                                 .gear = { 4u, 8u, 16u, 32u, 64u } };
+        io5649_reset();
+        io5649_shift(32u);                       /* 3rd */
+        int third = g_io5649.gear;
+        uint8_t lever3 = io5649_gearbox();
+        io5649_shift(0);                         /* let go: stays in 3rd */
+        int held = g_io5649.gear;
+        io5649_shift(1u);                        /* shift up from there */
+        int fourth = g_io5649.gear;
+        io5649_shift(4u);                        /* N */
+        int neutral = g_io5649.gear;
+        CHECK(third == 3 && lever3 == (0x8F | 6 << 4) && held == 3 && fourth == 4 && neutral == 0,
+              "gear buttons latch the lever's gate, and shifts go on from it");
+        g_io5649_controls = saved;
+        io5649_reset();
+    }
     CHECK(input_keycode_by_name("A") == SAPP_KEYCODE_A && input_keycode_by_name("kp1") == SAPP_KEYCODE_KP_1 &&
           input_keycode_by_name("f12") == SAPP_KEYCODE_F12 && input_keycode_by_name("pageup") == SAPP_KEYCODE_PAGE_UP &&
           input_keycode_by_name("nope") == -1,
@@ -78,6 +109,273 @@ int main(void) {
     CHECK(g_input.held == 0, "a release-all forgets the counts, so a later press and release clears");
     input_reset();
     g_input_combo_count = 0;
+}
+
+/* ---- (A2) the keyboard's map (Pinboard #1147) ---- */
+static void test_key_map(void) {
+    const uint32_t *bits = sfight_profile.input.bits;
+    char buf[64];
+    bool names_ok = true;
+    for (int kc = 1; kc < 400; kc++)   /* every named key reads back as itself */
+        if (input_keycode_name(kc, buf) && input_keycode_by_name(buf) != kc) names_ok = false;
+    CHECK(names_ok && !strcmp(input_keycode_name(SAPP_KEYCODE_LEFT_SHIFT, buf), "lshift") &&
+          !strcmp(input_keycode_name(SAPP_KEYCODE_F12, buf), "f12") && !input_keycode_name(SAPP_KEYCODE_ESCAPE, buf),
+          "key names round-trip, and Escape has none (it cancels binding)");
+    const uint32_t combos[] = { 0, 1u << GAME_INPUT_P1_B1, (1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P1_B3),
+                                (1u << GAME_INPUT_P2_UP) | (1u << GAME_INPUT_P2_COIN) };
+    bool combo_ok = true;
+    for (int i = 0; i < 4; i++) {
+        input_combo_format(combos[i], buf, sizeof buf);
+        if (combos[i] ? input_combo_parse(buf) != combos[i] : strcmp(buf, "none")) combo_ok = false;
+    }
+    CHECK(combo_ok && !strcmp(input_combo_format((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P1_B2), buf, sizeof buf), "b1+b2") &&
+          !strcmp(input_combo_format(1u << GAME_INPUT_SERVICE, buf, sizeof buf), "service") &&
+          !strcmp(input_combo_format((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P2_B1), buf, sizeof buf), ""),
+          "action masks write as the combo text that parses back to them");
+    CHECK(input_action_by_name("p2_start") == GAME_INPUT_P2_START && input_action_by_name("test") == GAME_INPUT_TEST &&
+          input_action_by_name("p3_up") == -1, "actions by their controls-file names");
+    bool gears_ok = true;
+    for (int a = GAME_INPUT_GEAR_N; a <= GAME_INPUT_GEAR_4; a++)
+        if (input_action_by_name(g_input_action_names[a]) != a
+            || input_combo_parse(input_combo_format(1u << a, buf, sizeof buf)) != 1u << a) gears_ok = false;
+    CHECK(gears_ok && !strcmp(input_combo_format(1u << GAME_INPUT_GEAR_3, buf, sizeof buf), "gear3"),
+          "a gear's button has a controls-file name, and writes as the text that parses back to it");
+}
+
+/* Keys moved off and onto actions, and the defaults put back. */
+static void test_key_rebind(void) {
+    const uint32_t *bits = sfight_profile.input.bits;
+    g_input_keys[GAME_INPUT_P1_B1][0] = SAPP_KEYCODE_SPACE;   /* B1 on Space, Z free */
+    g_input_keys[GAME_INPUT_P1_B2][1] = SAPP_KEYCODE_SPACE;   /* ...and B2's second key too */
+    input_key_down(SAPP_KEYCODE_Z);
+    CHECK(g_input.held == 0, "a key taken off its action presses nothing");
+    input_key_down(SAPP_KEYCODE_SPACE);
+    CHECK(g_input.held == (bits[GAME_INPUT_P1_B1] | bits[GAME_INPUT_P1_B2]),
+          "a key on two actions presses both");
+    input_key_up(SAPP_KEYCODE_SPACE);
+    CHECK(g_input.held == 0 && input_keycode_to_action(SAPP_KEYCODE_SPACE) == GAME_INPUT_P1_B1,
+          "and lets both go");
+    input_keys_default(g_active_profile);
+    input_key_down(SAPP_KEYCODE_Z);
+    CHECK(g_input.held == bits[GAME_INPUT_P1_B1] && input_keycode_to_action(SAPP_KEYCODE_SPACE) == -1,
+          "input_keys_default puts Z back on B1");
+    input_reset();
+}
+
+/* m2emulator's layout (docs/m2emulator-controls.md, Pinboard #1347) */
+static void test_key_m2emu(void) {
+    const uint32_t *bits = sfight_profile.input.bits;
+    CHECK(input_keycode_to_action(SAPP_KEYCODE_F1) == GAME_INPUT_SERVICE &&
+          input_keycode_to_action(SAPP_KEYCODE_9) == GAME_INPUT_SERVICE &&
+          input_keycode_to_action(SAPP_KEYCODE_F2) == GAME_INPUT_TEST &&
+          input_keycode_to_action(SAPP_KEYCODE_F3) == -1,
+          "F1 (and MAME's 9) is the service button, F2 the test switch");
+    CHECK(bits[GAME_INPUT_TEST] == 0x04 && bits[GAME_INPUT_SERVICE] == 0x08,
+          "STF's IN0: 0x04 the test switch, 0x08 the service button, as MAME's");
+    static game_profile_t drive;
+    drive.input = g_active_profile->input;
+    drive.quirks.wheel.accel = bits[GAME_INPUT_P1_B1];
+    drive.quirks.wheel.brake = bits[GAME_INPUT_P1_B2];
+    input_keys_default(&drive);
+    CHECK(!input_keys_driving(g_active_profile) && input_keys_driving(&drive) &&
+          input_keycode_to_action(SAPP_KEYCODE_UP) == GAME_INPUT_P1_B1 &&
+          input_keycode_to_action(SAPP_KEYCODE_DOWN) == GAME_INPUT_P1_B2 &&
+          input_keycode_to_action(SAPP_KEYCODE_LEFT) == GAME_INPUT_P1_LEFT &&
+          input_keycode_to_action(SAPP_KEYCODE_Z) == GAME_INPUT_P1_B3 &&
+          input_keycode_to_action(SAPP_KEYCODE_X) == GAME_INPUT_P1_B4 &&
+          input_keycode_to_action(SAPP_KEYCODE_C) == GAME_INPUT_P2_B3 &&
+          input_keycode_to_action(SAPP_KEYCODE_V) == GAME_INPUT_P2_B4 &&
+          input_keycode_to_action(SAPP_KEYCODE_W) == GAME_INPUT_P1_UP &&
+          input_keycode_to_action(SAPP_KEYCODE_Q) == GAME_INPUT_P1_DOWN &&
+          input_keycode_to_action(SAPP_KEYCODE_A) == GAME_INPUT_GEAR_1 &&
+          input_keycode_to_action(SAPP_KEYCODE_F) == GAME_INPUT_GEAR_4 &&
+          input_keycode_to_action(SAPP_KEYCODE_G) == GAME_INPUT_GEAR_N &&
+          input_keycode_to_action(SAPP_KEYCODE_PAGE_DOWN) == -1,
+          "a racing cabinet: Up accelerates, Down brakes, Z X C V the views, Q / W shift, A S D F G the gears");
+    input_keys_default(g_active_profile);
+}
+
+/* ---- (A2) a light gun's flash: off by default, N drawn frames a pull ---- */
+static void test_gun_flash(void) {
+    static game_profile_t gun_profile;
+    const game_profile_t *was = g_active_profile;
+    gun_profile.quirks.lightgun = 1;
+    g_active_profile = &gun_profile;
+    g_lightgun_controls[0].trigger = 0x100;
+    g_lightgun_controls[1].trigger = 0x10000;
+    g_lightgun_held_fn = input_board_held;
+    lightgun_host_bar_t bars[LIGHTGUN_HOST_BARS];
+    int frames[6];
+    #define GUN_FLASHED() (lightgun_host_crosshairs(0, 0, 496, 384, bars) > 0 && bars[0].rgb == 0xFFFFFFu \
+                           && bars[0].x1 == 496.0f && bars[0].y1 == 384.0f)
+    g_input.held = 0x100;
+    CHECK(!GUN_FLASHED(), "no flash unless --gun-flash asks for one");
+    g_input.held = 0;
+    GUN_FLASHED();
+    CHECK(lightgun_host_option("--gun-flash", "2") && g_lightgun_flash == 2 &&
+          lightgun_host_option("--gun-flash", "99") && g_lightgun_flash == LIGHTGUN_HOST_FLASH_MAX &&
+          lightgun_host_option("--gun-flash", "on") && g_lightgun_flash == 2 &&
+          !lightgun_host_option("--wheel-range", "2"), "--gun-flash N, clamped; on is 2");
+    for (int i = 0; i < 6; i++) { g_input.held = i < 4 ? 0x100 : 0; frames[i] = GUN_FLASHED(); }
+    CHECK(frames[0] && frames[1] && !frames[2] && !frames[3] && !frames[4] && !frames[5],
+          "a pull flashes 2 frames, holding it does not flash again");
+    g_input.held = 0x10000;
+    CHECK(GUN_FLASHED(), "P2's trigger flashes too");
+    g_input.held = 0;
+    GUN_FLASHED();
+    lightgun_host_option("--gun-flash", "off");
+    g_input.held = 0x100;
+    CHECK(!GUN_FLASHED(), "--gun-flash off");
+    #undef GUN_FLASHED
+    g_input.held = 0;
+    g_lightgun_held_fn = NULL;
+    g_lightgun_controls[0].trigger = g_lightgun_controls[1].trigger = 0;
+    g_active_profile = was;
+}
+
+/* ---- (A2b) the off-screen border (Pinboard #1493): MAME's 5 %, or the host's ---- */
+static void test_gun_border(void) {
+    g_lightgun_range[0] = (lightgun_range_t){ 0, 1000, 500, 0, 1000, 500 };
+    g_lightgun.x[0] = 960; g_lightgun.y[0] = 500;
+    CHECK(lightgun_offscreen(0, 0), "960 of 1000 is in MAME's 5 % border");
+    CHECK(lightgun_host_option("--gun-border", "1") && g_lightgun_border == 10 && !lightgun_offscreen(0, 0),
+          "--gun-border 1: 960 is on the picture");
+    uint8_t gun[LIGHTGUN_FEED_BYTES];
+    lightgun_latch(gun);
+    lightgun_unlatch();
+    CHECK(gun[2] == 11 && gun[14] == 11, "the border rides in the GUN record's byte 2");
+    lightgun_host_option("--gun-border", "mame");
+    lightgun_feed_put(gun);
+    CHECK(!lightgun_offscreen(0, 0), "a fed record's border is the one the board reads");
+    gun[2] = 0;
+    lightgun_feed_put(gun);
+    CHECK(lightgun_offscreen(0, 0), "a record from before #1493 (byte 0) keeps MAME's 5 %");
+    lightgun_unlatch();
+    lightgun_host_option("--gun-border", "0");
+    g_lightgun.x[0] = 999;
+    bool on999 = !lightgun_offscreen(0, 0);
+    g_lightgun.x[0] = 1000;
+    CHECK(on999 && lightgun_offscreen(0, 0), "--gun-border 0: only the very edge is off the picture");
+    g_lightgun.x[0] = 960;
+    g_lightgun_remote_fn = test_remote_yes;
+    lightgun_latch(gun);
+    lightgun_unlatch();
+    CHECK(lightgun_offscreen(0, 0) && gun[2] == 0, "a board fed from the network keeps to MAME's 5 %");
+    g_lightgun_remote_fn = NULL;
+    lightgun_host_option("--gun-border", "mame");
+    g_lightgun_range[0] = (lightgun_range_t){ 0 };
+    g_lightgun.x[0] = g_lightgun.y[0] = 0;
+}
+
+/* ---- (A2c) the crosshair's reticle (Pinboard #1496): shape, size, none ---- */
+static void test_gun_reticle(void) {
+    static game_profile_t gun_profile;
+    const game_profile_t *was = g_active_profile;
+    gun_profile.quirks.lightgun = 1;
+    g_active_profile = &gun_profile;
+    lightgun_host_bar_t bars[LIGHTGUN_HOST_BARS];
+    int cross = lightgun_host_crosshairs(0, 0, 496, 384, bars);
+    float arm = bars[5].x1 - bars[5].x0;     /* P1's right arm, past its outlines */
+    CHECK(cross == 8, "the default: P1's cross, four arms and their outlines");
+    CHECK(lightgun_host_option("--gun-reticle", "dot") && g_lightgun_reticle == LIGHTGUN_RETICLE_DOT &&
+          lightgun_host_crosshairs(0, 0, 496, 384, bars) == 2, "--gun-reticle dot: one square and its outline");
+    CHECK(lightgun_host_option("--gun-reticle", "box") && lightgun_host_crosshairs(0, 0, 496, 384, bars) == 8,
+          "--gun-reticle box: four sides");
+    CHECK(lightgun_host_option("--gun-reticle", "off") && lightgun_host_crosshairs(0, 0, 496, 384, bars) == 0,
+          "--gun-reticle off: no crosshair");
+    CHECK(lightgun_host_option("--gun-reticle", "my reticle.png") && g_lightgun_reticle == LIGHTGUN_RETICLE_IMAGE &&
+          !strcmp(g_lightgun_reticle_image, "my reticle.png") && lightgun_host_crosshairs(0, 0, 496, 384, bars) == 8,
+          "a file is the image; the bars draw the cross for it");
+    lightgun_host_option("--gun-reticle-size", "200");
+    lightgun_host_option("--gun-reticle", "cross");
+    lightgun_host_crosshairs(0, 0, 496, 384, bars);
+    CHECK(g_lightgun_reticle_size == 200 && bars[5].x1 - bars[5].x0 > arm * 1.9f, "--gun-reticle-size 200 doubles it");
+    CHECK(lightgun_host_option("--gun-reticle-size", "9999") && g_lightgun_reticle_size == LIGHTGUN_RETICLE_SIZE_MAX &&
+          lightgun_host_option("--gun-reticle-size", "1") && g_lightgun_reticle_size == LIGHTGUN_RETICLE_SIZE_MIN,
+          "the size is clamped");
+    lightgun_host_option("--gun-reticle-size", "100");
+    lightgun_host_option("--gun-reticle", "ring");
+    lightgun_reticle_set_image(NULL);
+    g_lightgun_reticle_cli = false;
+    g_active_profile = was;
+}
+
+/* ---- (A3) a four-player cabinet's side switch (Air Walkers, Pinboard #1063) ---- */
+static void test_side_switch(void) {
+    static game_profile_t four_profile = { .id = "four" };
+    const game_profile_t *was = g_active_profile;
+    four_profile.quirks.four_player_sides = 1;
+    four_profile.input = sfight_profile.input;   /* the standard ports' bits */
+    input_reset();
+    input_far_down(GAME_INPUT_P1_B1);
+    CHECK(g_input.far_held == 0, "a two-player profile has no players 3 and 4");
+    g_active_profile = &four_profile;
+    mem_region_t sio = { .name="IO", .base=IO_BASE, .size=IO_SIZE, .data=NULL };
+    input_attach_sides(&sio);
+    g_input.held = 0x00010330;   /* START1, START2, P1 B1 + B2, P2 B1 */
+    CHECK((sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0xCF &&
+          (sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFC &&
+          (sio.read_cb(&sio, IO_BASE+0x06,1)&0xFF)==0xFE,
+          "side 1/2: IN0 starts, IN1 P1, IN2 P2 as any game");
+    sio.write_cb(&sio, IO_BASE+0x0A, 0x80, 1);
+    CHECK(g_io_side == 1 &&
+          (sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0xFF &&
+          (sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFF &&
+          (sio.read_cb(&sio, IO_BASE+0x06,1)&0xFF)==0xFF,
+          "port F bit 7: players 3 and 4, who are not held, on IN1 / IN2 / the starts");
+    sio.write_cb(&sio, IO_BASE+0x0A, 0x7F, 1);
+    CHECK(g_io_side == 0 && (sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFC,
+          "bit 7 down: back to players 1 and 2");
+
+    /* Players 3 and 4 (Pinboard #1073): player 3 on player 1's bits, 4 on 2's. */
+    input_far_down(GAME_INPUT_P1_B1);      /* P3 B1 */
+    input_far_down(GAME_INPUT_P2_UP);      /* P4 UP */
+    input_far_down(GAME_INPUT_P2_START);   /* START4 */
+    CHECK((sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFC && (sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0xCF,
+          "players 3 and 4 held: side 1/2 still reads players 1 and 2");
+    sio.write_cb(&sio, IO_BASE+0x0A, 0x80, 1);
+    CHECK((sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFE &&
+          (sio.read_cb(&sio, IO_BASE+0x06,1)&0xFF)==0xDF &&
+          (sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0xDF,
+          "port F bit 7: P3 B1 on IN1, P4 UP on IN2, START4 on IN0");
+    input_far_down(GAME_INPUT_P1_COIN);   /* COIN3 */
+    CHECK((sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0x9F, "COIN3 is IN0 bit 6");
+    sio.write_cb(&sio, IO_BASE+0x0A, 0x00, 1);
+    CHECK((sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0x8F, "COIN3 on side 1/2 too, beside the held starts");
+    sio.write_cb(&sio, IO_BASE+0x0A, 0x80, 1);
+    g_input.use_net = 1; g_input.net_held = 0;
+    CHECK((sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFF && (sio.read_cb(&sio, IO_BASE+0x02,1)&0xFF)==0xFF,
+          "a session has the input: players 3 and 4 read released");
+    g_input.use_net = 0;
+    input_far_up(GAME_INPUT_P1_B1);
+    CHECK((sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xFF, "P3 lets go of B1");
+    CHECK(input_combo_parse("p3:up") == (INPUT_COMBO_FAR | (1u << GAME_INPUT_P1_UP)) &&
+          input_combo_parse("P4:b1+b2") == (INPUT_COMBO_FAR | (1u << GAME_INPUT_P2_B1) | (1u << GAME_INPUT_P2_B2)) &&
+          input_combo_parse("p3:") == 0 && input_combo_parse("p5:b1") == 0,
+          "p3: and p4: combos are players 3 and 4's");
+    input_release_all();
+    input_combo_bind(SAPP_KEYCODE_T, input_combo_parse("p3:right"));
+    input_key_down(SAPP_KEYCODE_T);
+    CHECK(g_input.held == 0 && (sio.read_cb(&sio, IO_BASE+0x04,1)&0xFF)==0xBF, "a p3: key holds player 3's RIGHT");
+    input_key_up(SAPP_KEYCODE_T);
+    CHECK(g_input.far_held == 0, "and lets go of it");
+    sio.write_cb(&sio, IO_BASE+0x0A, 0x00, 1);
+    g_input_combo_count = 0;
+    g_input.held = 0;
+    input_reset();
+    g_active_profile = was;
+}
+
+int main(void) {
+    test_port_bytes();
+    test_combos();
+    test_key_map();
+    test_key_rebind();
+    test_key_m2emu();
+    test_gun_flash();
+    test_gun_border();
+    test_gun_reticle();
+    test_side_switch();
 
     /* ---- (B) end-to-end through the game's read_sw interrupt ---- */
     static romset_t rs; static memory_bus_t bus; static i960_cpu_t cpu; static emu_thread_ctx_t ctx;

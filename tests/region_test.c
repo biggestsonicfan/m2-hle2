@@ -46,7 +46,50 @@ static const struct { const char *id; game_region_kind_t kind; } g_region_unhook
     { "dynamcopb",        REGION_TODO },
     { "dyndeka2b",        REGION_TODO },
     { "dynamcopc",        REGION_TODO },
+    { "doa",              REGION_TODO },
+    { "doab",             REGION_TODO },
+    { "doaa",             REGION_TODO },
+    { "doaab",            REGION_TODO },
+    { "doaae",            REGION_PROGRAM_ROM },
+    { "airwlkrs",         REGION_PROGRAM_ROM },
     { "vonj",            REGION_PROGRAM_ROM },
+    { "von",             REGION_PROGRAM_ROM },   /* USA Rev B */
+    { "hotdp",           REGION_PROGRAM_ROM },   /* runs Japan only (hotd.h) */
+    { "powsled",         REGION_TODO },
+    { "daytona",         REGION_TODO },
+    { "daytona93",       REGION_TODO },
+    { "daytonase",       REGION_TODO },
+    { "daytonas",        REGION_TODO },
+    { "daytonat",        REGION_TODO },
+    { "daytonata",       REGION_TODO },
+    { "daytonagtx",      REGION_TODO },
+    { "vcop",            REGION_TODO },
+    { "lastbrnx",        REGION_PROGRAM_ROM },
+    { "lastbrnxu",       REGION_PROGRAM_ROM },
+    { "lastbrnxj",       REGION_PROGRAM_ROM },
+    { "pltkids",         REGION_TODO },
+    { "pltkidsa",        REGION_TODO },
+    { "manxtt",          REGION_TODO },   /* m2_library.h */
+    { "skytargt",        REGION_TODO },   /* m2_library.h */
+    { "vcop2",           REGION_TODO },   /* m2_library.h */
+    { "zeroguna",        REGION_TODO },   /* m2_library.h */
+    { "vstriker",        REGION_TODO },   /* m2_library.h */
+    { "vstrikero",       REGION_TODO },   /* m2_library.h */
+    { "zerogun",         REGION_TODO },   /* m2_library.h */
+    { "zerogunj",        REGION_TODO },   /* m2_library.h */
+    { "dynabb",          REGION_TODO },   /* m2_library.h */
+    { "gunblade",        REGION_TODO },   /* m2_library.h */
+    { "indy500",         REGION_TODO },   /* m2_library.h */
+    { "indy500d",        REGION_TODO },   /* m2_library.h */
+    { "sgt24h",          REGION_TODO },   /* m2_library.h */
+    { "overrevb",        REGION_TODO },   /* m2_library.h */
+    { "overrev",         REGION_TODO },   /* m2_library.h */
+    { "stcc",            REGION_TODO },   /* m2_library.h */
+    { "skisuprg",        REGION_TODO },   /* m2_library.h */
+    { "segawski",        REGION_TODO },   /* m2_library.h */
+    { "waverunr",        REGION_TODO },   /* m2_library.h */
+    { "topskatr",        REGION_TODO },   /* m2_library.h */
+    { "bel",             REGION_TODO },   /* m2_library.h */
     { "m2snake",         REGION_HOMEBREW },
     { "sfight_homebrew", REGION_HOMEBREW },
 };

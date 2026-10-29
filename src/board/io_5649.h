@@ -18,13 +18,30 @@
  *     centre when neither is, `speed` A/D steps a frame. `center` and `range`
  *     are the pot's adjustment: full lock reads center ± range.
  *   - each pedal reads its released or pressed value.
- *   - UP / DOWN shift the gear lever one gate on each press (N, 1st .. 4th).
+ *   - UP / DOWN shift the gear lever one gate on each press (N, 1st .. 4th),
+ *     and a gear's own button (GAME_INPUT_GEAR_N .. GEAR_4, MAME's GEARS port)
+ *     puts it in that gate; either way it stays there until the next shift.
  *
  * The defaults are the cabinet's spec, from the Sega Rally Championship
  * owner's manual (input test, FIG 8.4): HANDLE centre 7DH-83H, full left under
  * 2DH, full right over D3H; ACCEL and BRAKE under 30H released, over C0H
  * pressed. 0x80 ± 0x58 (0x28..0xD8) and pedals 0x20 / 0xE0 sit inside that,
  * the same margins MAME's Daytona gives its wheel and pedals (0x20-0xE0).
+ *
+ * A host with an analog wheel or pedals (a racing wheel, a pad's stick and
+ * triggers; Pinboard #1082) gives their positions instead (io5649_host_analog):
+ * the wheel then reads where it is turned, center + steer * range, and a pedal
+ * how far it is pressed, between the released and pressed values. A pedal's
+ * held bit still floors it, and LEFT / RIGHT still walk the wheel while the
+ * host's wheel is centred (a pad's d-pad beside its stick). That position is
+ * the host's, not the network's, so, as with a light gun's pointer
+ * (lightgun.h), only a board this host's hands drive reads it: one in a
+ * session, a follow or a replay keeps to the held bits. A replay or a follow recorded with an analog wheel carries only
+ * the held bits, so it plays the race as the d-pad would have.
+ *
+ * Port E (IO+0x08, register 4) is the drive board's (drive_board.h): the game
+ * writes it, the board's buffer keeps the byte (savestated with the rest of
+ * the I/O window), and io5649_drive reads it for the host's force feedback.
  *
  * Determinism: the state moves only on the board's own vblank count
  * (g_irqt.vbl_count, brought up to date at the read) and the held bits, so it
@@ -43,6 +60,7 @@
 
 #include "eeprom_93c46.h"
 #include "irq_timer.h"
+#include "lightgun.h"
 #include "memory.h"
 
 /* The manual's spec (see above). */
@@ -52,11 +70,32 @@
 #define IO5649_PEDAL_OFF     0x20
 #define IO5649_PEDAL_ON      0xE0
 #define IO5649_STEPS_MAX     64      /* frames caught up at one read */
+#define IO5649_AXIS_MAX      32767   /* io5649_host_analog's full scale */
 
-/* The held bits that drive it; a profile fills these from its input map. */
+/* The held bits that drive it; a profile fills these from its input map.
+ * gear[g] is the button for gate g (0 = N, 1..4). */
 typedef struct {
     uint32_t left, right, accel, brake, shift_up, shift_down;
+    uint32_t gear[5];
+    bool     bike;       /* a motorbike's channels and ports (see io5649_analog) */
+    /* A channel layout (quirks.analog, Pinboard #1872): `layout` when any
+     * channel is set; the ports are plain then (io5649_in). */
+    bool     layout;
+    uint8_t  ch[8];
+    uint32_t in_high, up, down, press[2];
 } io5649_controls_t;
+
+/* What a layout's channel reads (quirks.analog.ch). */
+enum {
+    IO5649_AN_NONE,                          /* 0xFF, MAME's unwired pot */
+    IO5649_AN_STEER, IO5649_AN_STEER_REV,    /* the wheel (LEFT / RIGHT), or 255 less it */
+    IO5649_AN_ACCEL, IO5649_AN_ACCEL_REV,    /* a pedal, or 255 less it (PORT_REVERSE) */
+    IO5649_AN_BRAKE, IO5649_AN_BRAKE_REV,
+    IO5649_AN_AXIS2, IO5649_AN_AXIS2_REV,    /* the second axis (`up` / `down`) */
+    IO5649_AN_PRESS1, IO5649_AN_PRESS2,      /* 0x00, 0xFF while `press` is held (a bat) */
+    IO5649_AN_GUN1_X, IO5649_AN_GUN1_Y,      /* a gun stick (lightgun.h's aim, the pad's walk) */
+    IO5649_AN_GUN2_X, IO5649_AN_GUN2_Y,
+};
 
 /* The pot adjustment: host settings (--wheel-center, --wheel-range,
  * --wheel-speed), not board state. */
@@ -76,11 +115,32 @@ typedef struct {
 } io5649_state_t;
 
 static io5649_state_t     g_io5649;
+/* A layout's second axis, centred like the wheel (savestated by the profile
+ * that has one; no other board reads it). */
+typedef struct { int32_t v, pad; } io5649_axis_t;
+static io5649_axis_t      g_io5649_ax;
 static io5649_controls_t  g_io5649_controls;
 /* Set by input_attach: the mask the board reads, and whether it comes from
  * the network (then the adjustment is the spec's). */
 static uint32_t (*g_io5649_held_fn)(void);
 static int      (*g_io5649_from_net_fn)(void);
+/* "Is the board driven from elsewhere" (a session, a follow, a replay), set by
+ * emu_thread.h as lightgun.h's. */
+static int      (*g_io5649_remote_fn)(void);
+
+/* A host's analog wheel and pedals: steer -32767 (full left) .. 32767 (full
+ * right), accel and brake 0 (released) .. 32767 (floored). Host input, read
+ * only by a board that is not driven from elsewhere. */
+typedef struct {
+    volatile int on;          /* an analog device drives them */
+    volatile int steer, accel, brake;
+} io5649_host_t;
+
+static io5649_host_t g_io5649_host;
+
+/* The board's I/O window (the bus's buffer, set by input.h): port E there is
+ * the drive board's last command. */
+static const uint8_t *g_io5649_regs;
 
 /* --wheel-center N, --wheel-range N, --wheel-speed N (decimal or 0x hex): true
  * when `opt` is one of them. Out-of-range values are clamped where they are used. */
@@ -108,12 +168,45 @@ static inline io5649_wheel_t io5649_wheel(void) {
 
 static inline uint32_t io5649_held(void) { return g_io5649_held_fn ? g_io5649_held_fn() : 0; }
 
+/* The host's wheel and pedals (thread-safe enough: words the board reads whole).
+ * Out-of-range values are clamped. on = false hands them back to the held bits. */
+static inline void io5649_host_analog(bool on, int steer, int accel, int brake) {
+    g_io5649_host.steer = io5649_clamp(steer, -IO5649_AXIS_MAX, IO5649_AXIS_MAX);
+    g_io5649_host.accel = io5649_clamp(accel, 0, IO5649_AXIS_MAX);
+    g_io5649_host.brake = io5649_clamp(brake, 0, IO5649_AXIS_MAX);
+    g_io5649_host.on    = on;
+}
+
+static inline bool io5649_host_live(void) {
+    return g_io5649_host.on && !(g_io5649_from_net_fn && g_io5649_from_net_fn())
+        && !(g_io5649_remote_fn && g_io5649_remote_fn());
+}
+
+/* The drive board's command (port E), 0 before there is a board. */
+static inline uint8_t io5649_drive(void) { return g_io5649_regs ? g_io5649_regs[0x08] : 0; }
+
 /* Power-on: wheel at the spec's centre (the same on every machine; a local
  * adjustment takes it from there), lever in 1st, mux on channel 0. */
 static inline void io5649_reset(void) {
     g_io5649 = (io5649_state_t){ 0 };
     g_io5649.steer = IO5649_WHEEL_CENTER;
     g_io5649.gear  = 1;
+    g_io5649_ax = (io5649_axis_t){ IO5649_WHEEL_CENTER, 0 };
+}
+
+/* Move `v` toward `target`, `steps` frames of `speed`. */
+static inline int io5649_walk(int v, int target, int steps, int speed) {
+    int move = steps * speed;
+    return v < target ? io5649_clamp(v + move, v, target) : io5649_clamp(v - move, target, v);
+}
+
+/* A layout's second axis: toward full travel while UP or DOWN is held, back
+ * to centre when neither is, as the wheel. */
+static inline void io5649_axis2(uint32_t held, uint64_t steps, io5649_wheel_t w) {
+    if (!g_io5649_controls.layout || !steps) return;
+    int dir = ((held & g_io5649_controls.down) ? 1 : 0) - ((held & g_io5649_controls.up) ? 1 : 0);
+    int n = steps > IO5649_STEPS_MAX ? IO5649_STEPS_MAX : (int)steps;
+    g_io5649_ax.v = io5649_walk(g_io5649_ax.v, w.center + dir * w.range, n, w.speed);
 }
 
 static inline void io5649_shift(uint32_t held) {
@@ -121,6 +214,8 @@ static inline void io5649_shift(uint32_t held) {
     g_io5649.prev_held = held;
     if (pressed & g_io5649_controls.shift_up)   g_io5649.gear = io5649_clamp(g_io5649.gear + 1, 0, 4);
     if (pressed & g_io5649_controls.shift_down) g_io5649.gear = io5649_clamp(g_io5649.gear - 1, 0, 4);
+    for (int g = 0; g < 5; g++)
+        if (pressed & g_io5649_controls.gear[g]) g_io5649.gear = g;
 }
 
 /* Turn the wheel for the frames since the last read. */
@@ -132,22 +227,67 @@ static inline void io5649_advance(void) {
     g_io5649.last_vbl = now;
     uint32_t held = io5649_held();
     io5649_shift(held);
+    io5649_wheel_t w = io5649_wheel();
+    io5649_axis2(held, steps, w);
+    int dir = ((held & g_io5649_controls.right) ? 1 : 0) - ((held & g_io5649_controls.left) ? 1 : 0);
+    if (io5649_host_live() && (g_io5649_host.steer || !dir)) {   /* where the host's wheel is turned */
+        int d = g_io5649_host.steer * w.range;                     /* rounded to the nearest step */
+        d = (d + (d < 0 ? -IO5649_AXIS_MAX / 2 : IO5649_AXIS_MAX / 2)) / IO5649_AXIS_MAX;
+        g_io5649.steer = io5649_clamp(w.center + d, 0, 255);
+        return;
+    }
     if (!steps) return;
     if (steps > IO5649_STEPS_MAX) steps = IO5649_STEPS_MAX;
-    io5649_wheel_t w = io5649_wheel();
-    int dir = ((held & g_io5649_controls.right) ? 1 : 0) - ((held & g_io5649_controls.left) ? 1 : 0);
-    int target = w.center + dir * w.range;
-    int move = (int)steps * w.speed;
-    int s = g_io5649.steer;
-    g_io5649.steer = s < target ? io5649_clamp(s + move, s, target) : io5649_clamp(s - move, target, s);
+    g_io5649.steer = io5649_walk(g_io5649.steer, w.center + dir * w.range, (int)steps, w.speed);
+}
+
+/* A pedal: floored while its bit is held, else where the host's pedal is. */
+static inline uint8_t io5649_pedal(bool held, int host) {
+    if (held) return IO5649_PEDAL_ON;
+    if (!io5649_host_live()) return IO5649_PEDAL_OFF;
+    return (uint8_t)(IO5649_PEDAL_OFF + (host * (IO5649_PEDAL_ON - IO5649_PEDAL_OFF) + IO5649_AXIS_MAX / 2) / IO5649_AXIS_MAX);
+}
+
+/* A layout's channel (io5649_controls_t.ch). */
+static inline uint8_t io5649_layout_analog(int ch, uint32_t held) {
+    int code = g_io5649_controls.ch[ch & 7];
+    if (code >= IO5649_AN_GUN1_X) {
+        lightgun_advance();
+        int p = (code - IO5649_AN_GUN1_X) >> 1;
+        return (uint8_t)io5649_clamp((code - IO5649_AN_GUN1_X) & 1 ? g_lightgun.y[p] : g_lightgun.x[p], 0, 255);
+    }
+    int v;
+    switch (code) {
+        case IO5649_AN_STEER: case IO5649_AN_STEER_REV: v = io5649_clamp(g_io5649.steer, 0, 255); break;
+        case IO5649_AN_ACCEL: case IO5649_AN_ACCEL_REV:
+            v = io5649_pedal(held & g_io5649_controls.accel, g_io5649_host.accel); break;
+        case IO5649_AN_BRAKE: case IO5649_AN_BRAKE_REV:
+            v = io5649_pedal(held & g_io5649_controls.brake, g_io5649_host.brake); break;
+        case IO5649_AN_AXIS2: case IO5649_AN_AXIS2_REV: v = io5649_clamp(g_io5649_ax.v, 0, 255); break;
+        case IO5649_AN_PRESS1: case IO5649_AN_PRESS2:
+            return held & g_io5649_controls.press[code - IO5649_AN_PRESS1] ? 0xFF : 0x00;
+        default: return 0xFF;
+    }
+    /* The _REV codes are the even ones. */
+    return (uint8_t)((code & 1) == 0 ? 255 - v : v);
 }
 
 static inline uint8_t io5649_analog(int ch) {
     uint32_t held = io5649_held();
+    if (g_io5649_controls.layout) return io5649_layout_analog(ch, held);
+    /* A motorbike (MAME manxtt, Motor Raid): 0 the throttle, 1 the brake, 2
+     * the bank, a pot read the other way round (PORT_REVERSE: leaning left
+     * reads high). The handlebar is the wheel's model, centred the same. */
+    if (g_io5649_controls.bike) switch (ch) {
+        case 0:  return io5649_pedal(held & g_io5649_controls.accel, g_io5649_host.accel);
+        case 1:  return io5649_pedal(held & g_io5649_controls.brake, g_io5649_host.brake);
+        case 2:  return (uint8_t)(255 - io5649_clamp(g_io5649.steer, 0, 255));
+        default: return 0x00;
+    }
     switch (ch) {
         case 0:  return (uint8_t)io5649_clamp(g_io5649.steer, 0, 255);
-        case 1:  return (held & g_io5649_controls.accel) ? IO5649_PEDAL_ON : IO5649_PEDAL_OFF;
-        case 2:  return (held & g_io5649_controls.brake) ? IO5649_PEDAL_ON : IO5649_PEDAL_OFF;
+        case 1:  return io5649_pedal(held & g_io5649_controls.accel, g_io5649_host.accel);
+        case 2:  return io5649_pedal(held & g_io5649_controls.brake, g_io5649_host.brake);
         default: return 0x00;
     }
 }
@@ -156,6 +296,12 @@ static inline uint8_t io5649_analog(int ch) {
 static inline uint8_t io5649_gearbox(void) {
     static const uint8_t gate[5] = { 0, 2, 1, 6, 5 };
     return (uint8_t)(0x8F | gate[io5649_clamp(g_io5649.gear, 0, 4)] << 4);
+}
+
+/* A layout's IN1 (`shift` 8) or IN2 (16): plain buttons, active low but for
+ * the profile's `in_high` bits. */
+static inline uint8_t io5649_in(uint32_t held, int shift) {
+    return (uint8_t)~((held ^ g_io5649_controls.in_high) >> shift);
 }
 
 static inline uint8_t io5649_read_byte(mem_region_t *r, uint32_t off) {
@@ -168,15 +314,21 @@ static inline uint8_t io5649_read_byte(mem_region_t *r, uint32_t off) {
              * and a START (bit 6) held then took it to the test menu. */
             return eeprom_in0(in0);
         }
-        case 0x04: io5649_advance(); return io5649_gearbox();
-        case 0x06: return 0x00;                       /* IN2: hand brake, unused */
+        case 0x04: io5649_advance();
+                   if (g_io5649_controls.layout) return io5649_in(held, 8);
+                   /* A motorbike's IN1 is its buttons, active low. */
+                   if (g_io5649_controls.bike) return (uint8_t)~((held >> 8) & 0xFFu);
+                   return io5649_gearbox();
+        case 0x06: if (g_io5649_controls.layout) return io5649_in(held, 16);
+                   return g_io5649_controls.bike ? 0xFF : 0x00;   /* IN2: hand brake, unused */
         case 0x1E: {
             io5649_advance();
             uint8_t v = io5649_analog(g_io5649.channel);
             g_io5649.channel = (g_io5649.channel + 1) & 7;
             return v;
         }
-        default:   return r->data && off < r->size ? r->data[off] : 0xFFu;
+        default:   if (off >= IO_BOARD_SPAN) return 0;       /* constants.h */
+                   return r->data && off < r->size ? r->data[off] : 0xFFu;
     }
 }
 

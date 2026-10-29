@@ -3,7 +3,7 @@
 core-options.py -- a fake libretro frontend, just enough to see the option table
 the core registers and what it asks to have hidden.
 
-    python tools/libretro/core-options.py build_lr/Release/m2hle_libretro.dll
+    python tools/libretro/core-options.py build_lr/Release/m2hle_libretro.dll [ROM.zip ...]
 
 The things a frontend would quietly ignore in that table are worth catching here
 rather than in RetroArch's menu:
@@ -15,8 +15,12 @@ rather than in RetroArch's menu:
   * the update-display callback leaving a row visible that has nothing behind
     it (with online play set to RetroArch, none of the RPCN rows belong).
 
-It only calls retro_set_environment, so it needs neither a ROM nor a GL context.
-Run it after touching the option table; it exits non-zero on a fault.
+  * a row that is one game's shown while another game is loaded (Pinboard
+    #1058: Daytona offered STF's sound driver and Gems rows).
+
+Without a ROM it only calls retro_set_environment. Each ROM given is loaded
+(no GL context: the board is installed but never run) and the rows it hides
+are listed. Run it after touching the option table; it exits non-zero on a fault.
 """
 import ctypes as C
 import os
@@ -58,6 +62,14 @@ GET_CORE_OPTIONS_VERSION = 52
 SET_CORE_OPTIONS_DISPLAY = 55
 SET_CORE_OPTIONS_V2      = 67
 SET_UPDATE_DISPLAY_CB    = 69
+SET_HW_RENDER            = 14
+SET_PIXEL_FORMAT         = 10
+
+# The rows that are one game's, and the sets that have them.
+STF_ROWS = ("m2hle_stf_version", "m2hle_sound_driver", "m2hle_gems_i960", "m2hle_gems_cop")
+GAME_ROWS = {key: ("sfight",) for key in STF_ROWS}
+GAME_ROWS.update({"m2hle_wheel_range": ("srallyc",), "m2hle_wheel_speed": ("srallyc",),
+                  "m2hle_ffb": ("daytona",)})
 
 ENV = C.CFUNCTYPE(C.c_bool, C.c_uint, C.c_void_p)
 
@@ -106,9 +118,90 @@ def environment(cmd, data):
             fn = C.cast(data, C.POINTER(C.c_void_p))[0]
             update_cb.append(C.CFUNCTYPE(C.c_bool)(fn))
         return True
-    if cmd == SET_CONTROLLER_INFO:
+    if cmd in (SET_CONTROLLER_INFO, SET_HW_RENDER, SET_PIXEL_FORMAT):
         return True
     return False
+
+
+def check_row(r, faults):
+    keys = [v[0] for v in r["values"]]
+    notes = ""
+    if not keys:
+        faults.append("%s has no values" % r["key"])
+        notes += "   <-- NO VALUES"
+    if r["default"] not in keys:
+        faults.append("%s: default %r is not one of its values" % (r["key"], r["default"]))
+        notes += "   <-- DEFAULT NOT IN VALUES"
+    if len(set(keys)) != len(keys):
+        faults.append("%s repeats a value key" % r["key"])
+        notes += "   <-- DUPLICATE VALUE KEY"
+    print("  %-22s cat=%-8s default=%-10s %2d values%s"
+          % (r["key"], r["category"], r["default"], len(keys), notes))
+    for value, label in r["values"][:4]:
+        print("        %-12s %s" % (value, label if label else ""))
+    if len(r["values"]) > 4:
+        print("        ... %d more" % (len(r["values"]) - 4))
+
+
+def check_tables(rows, faults):
+    seen = [r["key"] for r in rows]
+    if len(set(seen)) != len(seen):
+        faults.append("the table repeats an option key")
+    for older in tables[:-1]:
+        if len(older) != len(rows):
+            faults.append("the option COUNT changed between tables (%d then %d); libretro.h "
+                          "forbids it and a frontend will ignore the second"
+                          % (len(older), len(rows)))
+
+
+def names(keys):
+    return ", ".join(keys) if keys else "(none)"
+
+
+def check_online(faults):
+    """The frontend is about to draw the list and asks what to leave out."""
+    if not update_cb:
+        print("\nno update-display callback registered")
+        return
+    for online in ("retroarch", "rpcn"):
+        variables["m2hle_online"] = online
+        visible.clear()
+        update_cb[0]()
+        shown = sorted(k for k, on in visible.items() if on)
+        gone = sorted(k for k, on in visible.items() if not on)
+        print("\nonline play = %s" % online)
+        print("  shown:  %s" % names(shown))
+        print("  hidden: %s" % names(gone))
+        if online == "retroarch":
+            for key in shown:
+                if key.startswith("m2hle_rpcn") or key.startswith("m2hle_room"):
+                    faults.append("%s is shown with online play set to RetroArch" % key)
+
+
+class GameInfo(C.Structure):
+    _fields_ = [("path", C.c_char_p), ("data", C.c_void_p), ("size", C.c_size_t), ("meta", C.c_char_p)]
+
+
+def check_game(core, rom, rows, faults):
+    """Each game hides the rows that are another game's."""
+    visible.clear()
+    info = GameInfo(os.path.abspath(rom).encode(), None, 0, None)
+    core.retro_load_game.argtypes = [C.POINTER(GameInfo)]
+    core.retro_load_game.restype = C.c_bool
+    if not core.retro_load_game(C.byref(info)):
+        faults.append("%s did not load" % rom)
+        return
+    if update_cb:
+        update_cb[0]()
+    set_name = os.path.splitext(os.path.basename(rom))[0]
+    gone = sorted(k for k, on in visible.items() if not on)
+    print("\n%s hides: %s" % (set_name, names(gone)))
+    for r in rows:
+        sets = GAME_ROWS.get(r["key"])
+        want = sets is None or set_name in sets
+        if visible.get(r["key"], True) != want:
+            faults.append("%s: %s is %s" % (set_name, r["key"], "hidden" if want else "shown"))
+    core.retro_unload_game()
 
 
 def main():
@@ -129,50 +222,16 @@ def main():
     faults = []
     print("%d options, %d table(s) sent" % (len(rows), len(tables)))
     for r in rows:
-        keys = [v[0] for v in r["values"]]
-        notes = ""
-        if not keys:
-            faults.append("%s has no values" % r["key"])
-            notes += "   <-- NO VALUES"
-        if r["default"] not in keys:
-            faults.append("%s: default %r is not one of its values" % (r["key"], r["default"]))
-            notes += "   <-- DEFAULT NOT IN VALUES"
-        if len(set(keys)) != len(keys):
-            faults.append("%s repeats a value key" % r["key"])
-            notes += "   <-- DUPLICATE VALUE KEY"
-        print("  %-22s cat=%-8s default=%-10s %2d values%s"
-              % (r["key"], r["category"], r["default"], len(keys), notes))
-        for value, label in r["values"][:4]:
-            print("        %-12s %s" % (value, label if label else ""))
-        if len(r["values"]) > 4:
-            print("        ... %d more" % (len(r["values"]) - 4))
+        check_row(r, faults)
+    check_tables(rows, faults)
+    check_online(faults)
 
-    seen = [r["key"] for r in rows]
-    if len(set(seen)) != len(seen):
-        faults.append("the table repeats an option key")
-    for older in tables[:-1]:
-        if len(older) != len(rows):
-            faults.append("the option COUNT changed between tables (%d then %d); libretro.h "
-                          "forbids it and a frontend will ignore the second"
-                          % (len(older), len(rows)))
-
-    # The frontend is about to draw the list and asks what to leave out.
-    if not update_cb:
-        print("\nno update-display callback registered")
-    else:
-        for online in ("retroarch", "rpcn"):
-            variables["m2hle_online"] = online
-            visible.clear()
-            update_cb[0]()
-            shown = sorted(k for k, on in visible.items() if on)
-            gone = sorted(k for k, on in visible.items() if not on)
-            print("\nonline play = %s" % online)
-            print("  shown:  %s" % (", ".join(shown) if shown else "(none)"))
-            print("  hidden: %s" % (", ".join(gone) if gone else "(none)"))
-            if online == "retroarch":
-                for key in shown:
-                    if key.startswith("m2hle_rpcn") or key.startswith("m2hle_room"):
-                        faults.append("%s is shown with online play set to RetroArch" % key)
+    roms = sys.argv[2:]
+    if roms:
+        variables.clear()
+        core.retro_init()
+    for rom in roms:
+        check_game(core, rom, rows, faults)
 
     print()
     for f in faults:

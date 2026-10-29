@@ -151,6 +151,29 @@ static void test_movem_roundtrip(void) {
     CHECKEQ("movem d0-a4 roundtrip: SP balanced", S.cpu.a[7], 0x8000);
 }
 
+static void test_movem_word(void) {
+    /* movem.w d0-d2/a0,-(sp) then movem.w (sp)+,d0-d2/a0: the word form (Motor
+       Raid's sound driver, Pinboard #1627) was not decoded, and its mask word ran
+       as an opcode. A word load sign-extends into the whole register. */
+    setup();
+    S.cpu.d[0] = 0x12348001; S.cpu.d[1] = 0x56780002; S.cpu.d[2] = 0x9ABC7FFF;
+    S.cpu.a[0] = 0x0000FFFE; S.cpu.a[7] = 0x8000; S.cpu.pc = 0x1000;
+    w16(0x1000, 0x48A7); w16(0x1002, 0xE080); /* movem.w d0-d2/a0,-(sp) */
+    m68k_step(&S);
+    CHECKEQ("movem.w predec: SP-8", S.cpu.a[7], 0x7FF8);
+    CHECKEQ("movem.w predec: pc past the mask", S.cpu.pc, 0x1004);
+    CHECKEQ("movem.w predec: D0 low word at lowest addr", r32(0x7FF8), 0x80010002);
+    CHECKEQ("movem.w predec: A0 low word at highest addr", r32(0x7FFC), 0x7FFFFFFE);
+    for (int i = 0; i < 3; i++) S.cpu.d[i] = 0;
+    S.cpu.a[0] = 0;
+    w16(0x1004, 0x4C9F); w16(0x1006, 0x0107); /* movem.w (sp)+,d0-d2/a0 */
+    m68k_step(&S);
+    CHECKEQ("movem.w postinc: SP balanced", S.cpu.a[7], 0x8000);
+    CHECKEQ("movem.w postinc: D0 sign-extended", S.cpu.d[0], 0xFFFF8001);
+    CHECKEQ("movem.w postinc: D2", S.cpu.d[2], 0x00007FFF);
+    CHECKEQ("movem.w postinc: A0 sign-extended", S.cpu.a[0], 0xFFFFFFFE);
+}
+
 static void test_link_unlk(void) {
     /* link a6,#-8 ; unlk a6 — SP/a6 round-trip. */
     setup();
@@ -447,6 +470,7 @@ int main(void) {
     test_jsr_rts_roundtrip();
     test_movem_predec_layout();
     test_movem_roundtrip();
+    test_movem_word();
     test_link_unlk();
     test_moveq();
     test_addq();

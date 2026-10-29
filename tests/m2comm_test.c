@@ -118,6 +118,37 @@ static void test_alone(void) {
     CHECK(g_m2comm.zfg == 0, "alone: zfg toggles once a pass");
 }
 
+/* Power Sled's whole frame (m2comm_set_whole_frame): 0x180-byte windows go
+ * over, and each node's ring of slots reads as MAME's would: slot 1 the
+ * other's window, slot 2 its own, slot 3 the other's again. */
+static bool slot_holds(const m2comm_node_t *n, uint32_t slot, uint8_t seed) {
+    for (uint32_t i = 0; i < 0x180u; i++)
+        if (n->s.shared[M2COMM_FRAME_START + slot * 0x180u + i] != (uint8_t)(seed + i * 7u)) return false;
+    return true;
+}
+
+static void test_whole_frame(void) {
+    m2comm_node_start(&A, 1, 0x180u);
+    m2comm_node_start(&B, 2, 0x180u);
+    m2comm_node_pair(&A, &B);
+    A.l.whole_frame = B.l.whole_frame = true;
+    passes(M2COMM_LINK_DELAY + 2);
+    for (uint32_t i = 0; i < 0x180u; i++) {
+        A.s.shared[M2COMM_FRAME_START + i] = (uint8_t)(0x21u + i * 7u);
+        B.s.shared[M2COMM_FRAME_START + i] = (uint8_t)(0x42u + i * 7u);
+    }
+    passes(4);
+    CHECK(slot_holds(&B, 1, 0x21) && slot_holds(&B, 2, 0x42) && slot_holds(&B, 3, 0x21),
+          "whole frame: the slave's slots are the master, itself, the master");
+    CHECK(slot_holds(&A, 1, 0x42) && slot_holds(&A, 2, 0x21) && slot_holds(&A, 3, 0x42),
+          "whole frame: the master's slots are the slave, itself, the slave");
+    bool clear = true;
+    for (uint32_t i = M2COMM_FRAME_START + 0x180u + 0xE00u; i < M2COMM_RAM_SIZE; i++)
+        clear = clear && !A.s.shared[i] && !B.s.shared[i];
+    CHECK(clear, "whole frame: nothing past the frame size");
+    CHECK(A.in.dropped == 0 && B.in.dropped == 0, "whole frame: only windows on the wire");
+}
+
 /* A board linked to the phantom: its window comes back to it. */
 static void test_phantom(void) {
     memset(&g_m2comm, 0, sizeof g_m2comm);
@@ -147,6 +178,7 @@ int main(void) {
     test_lost_size();
     test_alone();
     test_phantom();
+    test_whole_frame();
     printf("%s\n", g_fail ? "SOME CHECKS FAILED" : "all checks passed");
     return g_fail ? 1 : 0;
 }

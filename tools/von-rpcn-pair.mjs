@@ -34,6 +34,10 @@ const opt = (name, def) => {
 };
 const EXE     = opt('exe', null);
 const ROM     = opt('rom', path.join(process.env.ROMS_DIR ?? '', 'vonj.zip'));
+/* The profile is the set's (vonj Japan, von USA; profiles/vonj.h). */
+const PROFILE = path.basename(ROM, '.zip') === 'von' ? 'von' : 'vonj';
+/* vonj's link word 0x503A08 is von's 0x503A04. */
+const W503A08 = PROFILE === 'von' ? '0x00503A04' : '0x00503A08';
 const USERS   = opt('users', 'test1,test2').split(',');
 const SECONDS = Number(opt('seconds', '120'));
 const DIR     = opt('dir', fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'von-pair-')));
@@ -63,7 +67,7 @@ const le = (hex, n) => {
 /* The ROM's own link signs (profiles/vonj.h; det_digest --room-role). */
 async function vonSigns(c) {
     const r = await c.rpc('read_many', { ranges: [['0x01D00028', 1], ['0x005770B0', 2],
-                                                   ['0x00503A08', 4], ['0x005024F4', 4]] });
+                                                   [W503A08, 4], ['0x005024F4', 4]] });
     const d = r.data.map((x) => (typeof x === 'string' ? x : x.data ?? x.hex));
     return { role_byte: le(d[0], 1), net_flag: le(d[1], 1), link_id: le(d[1].slice(2), 1),
              w503A08: le(d[2], 4), crecn4: le(d[3], 4) };
@@ -86,7 +90,7 @@ async function launch(user) {
     fs.mkdirSync(dir, { recursive: true });
     const port = await freePort();
     const c = await M2Hle.launch({
-        rom: ROM, port, exe: EXE, profile: 'vonj', region: null, cwd: dir,
+        rom: ROM, port, exe: EXE, profile: PROFILE, region: null, cwd: dir,
         extraArgs: ['--no-nvram', '--net-config', path.join(dir, 'netplay.cfg')],
     });
     c.user = user;

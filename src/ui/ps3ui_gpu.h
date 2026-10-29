@@ -10,6 +10,7 @@
  *   ps3ui_gpu_setup()                       once sokol_gfx is up (after sgl_setup)
  *   ps3ui_gpu_record(&cv, w, h)             before drawing a frame of the UI into cv
  *   ps3ui_gpu_draw(&cv)                     inside a render pass: queue it for sgl_draw()
+ *   ps3ui_gpu_draw_at(&cv, x, y)            the same, the canvas's top left at (x, y)
  *   ps3ui_gpu_shutdown()
  *
  * Sprites become textures the first time they are drawn; glyphs are packed into
@@ -206,7 +207,9 @@ static void ps3ui_gpu_quad(const ps3ui_dl_item_t *it, float u0, float v0, float 
 
 /* Queue the recorded frame on sokol_gl's default context. The caller's pass
  * then runs sgl_draw(). The viewport is the whole w x h of the canvas. */
-static void ps3ui_gpu_draw(const ps3ui_canvas_t *cv)
+/* ps3ui_gpu_draw with the canvas's top left at (x, y) of the framebuffer: the
+ * same draw list once per eye with 3D on (stereo.h). */
+static void ps3ui_gpu_draw_at(const ps3ui_canvas_t *cv, int x, int y)
 {
     if (!g_ps3ui_gpu.ready || !cv->dl)
         return;
@@ -225,7 +228,7 @@ static void ps3ui_gpu_draw(const ps3ui_canvas_t *cv)
         g_ps3ui_gpu.dirty = 0;
     }
     sgl_defaults();
-    sgl_viewport(0, 0, cv->w, cv->h, true);
+    sgl_viewport(x, y, cv->w, cv->h, true);
     sgl_matrix_mode_projection();
     sgl_ortho(0.0f, (float)cv->w, (float)cv->h, 0.0f, -1.0f, 1.0f);
     sgl_enable_texture();
@@ -253,6 +256,11 @@ static void ps3ui_gpu_draw(const ps3ui_canvas_t *cv)
             sgl_end();
         }
     }
+}
+
+static void ps3ui_gpu_draw(const ps3ui_canvas_t *cv)
+{
+    ps3ui_gpu_draw_at(cv, 0, 0);
 }
 
 #endif /* PS3UI_GPU_H */

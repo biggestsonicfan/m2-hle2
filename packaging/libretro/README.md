@@ -78,6 +78,10 @@ RetroArch's **Quick Menu > Controls** remaps on top, as with any core.
 
 ## Core options
 
+Quick Menu > Core Options lists only the rows for the loaded game: the Sonic the Fighters
+rows (version, sound driver, Gems C) with Sonic the Fighters, the wheel rows with Sega Rally,
+force feedback with Daytona USA.
+
 | Option | Values | Applies |
 |---|---|---|
 | Internal resolution | Native (496x384), Double, Triple, Quadruple, Full screen | at once |

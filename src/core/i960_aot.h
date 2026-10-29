@@ -126,8 +126,8 @@ static __attribute__((noinline)) int aot_slow(i960_cpu_t *cpu, memory_bus_t *bus
     uint32_t k2 = d->kn >> 10, k1 = k2 + i960_cycle_cost(d->w1);
     cpu->sfr.ip = d->ip; bus->cpu_ip = d->ip;
     cpu->cycles = s->base + (uint32_t)(s->c0 - s->rc) - k1;
-    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
-    s_timer_cycles_seen = cpu->cycles;
+    g_irqt_seen = cpu->cycles; irqt_sync();
+
     cpu->cycles += k1 - k2;
     if (aot_x(cpu, bus, s, d)) return 1;
     if (M2_UNLIKELY(g_emu_attn != s->attn || g_irqt.horizon != s->h0
@@ -172,8 +172,8 @@ static __attribute__((noinline)) int aot_io_x(i960_cpu_t *cpu, memory_bus_t *bus
         }
     }
     cpu->cycles = s->base + (uint32_t)(s->c0 - s->rc) - k1;
-    g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
-    s_timer_cycles_seen = cpu->cycles;
+    g_irqt_seen = cpu->cycles; irqt_sync();
+
     cpu->cycles += k1 - k2;
     switch (w1 >> 24) {
     case 0x80: *r = mem_read8(bus, ea); break;
@@ -194,8 +194,8 @@ cop_done:
             return 0;
         }
         cpu->cycles = s->base + (uint32_t)(s->c0 - s->rc) - k1;
-        g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
-        s_timer_cycles_seen = cpu->cycles;
+        g_irqt_seen = cpu->cycles; irqt_sync();
+
         cpu->cycles += k1 - k2;
     }
     /* mem_ea's length: the MEMB modes with a displacement are two words */
@@ -596,7 +596,7 @@ static inline bool aot_lead(uint32_t ip) {
 static inline uint32_t aot_run(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t nmax, uint32_t attn,
                                int floor, int *halt) {
     int64_t room = (int64_t)g_irqt.horizon - (int64_t)g_irqt.pending - 1
-                 - (int64_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);
+                 - (int64_t)(uint32_t)(cpu->cycles - g_irqt_given);
     if (room <= 0) return 0;
     aot_state_t s;
     s.ip = cpu->sfr.ip; s.rn = nmax; s.attn = attn; s.h0 = g_irqt.horizon;

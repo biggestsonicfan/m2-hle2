@@ -31,3 +31,6 @@
 [submodule "vendor/lua"]
 	path = vendor/lua
 	url = https://github.com/lua/lua.git
+[submodule "vendor/ages-c"]
+	path = vendor/ages-c
+	url = https://github.com/biggestsonicfan/ages-c.git

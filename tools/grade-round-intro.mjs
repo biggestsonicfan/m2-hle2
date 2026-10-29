@@ -96,6 +96,20 @@ if (args.bool('mame')) {
 
 /* ---- here ----------------------------------------------------------------- */
 
+/* round-intro.lua's inputs at game frame fc (its record n): from frame 300 a
+ * coin every 10 s, and START, B1 and B2 in turn each second. */
+function introBits(fc) {
+    let bits = 0;
+    if (fc > 300) {
+        const m = fc % 60;
+        if (fc % 600 < 8) bits |= COIN1;
+        if (m < 6) bits |= IN.START1;
+        if (m >= 20 && m < 26) bits |= IN.P1_B1;
+        if (m >= 40 && m < 46) bits |= IN.P1_B2;
+    }
+    return bits;
+}
+
 /* Plays to the stage's round intro and returns, for each board frame captured,
  * the camera words and the game's frame counter, and a reader for the RGB
  * picture of any of those frames. The pictures go to disk as they arrive
@@ -141,14 +155,7 @@ async function playHere(port, stage, camera) {
         let held = -1, pinned = false;
         for (let vb = 0; vb < 4000 && !pinned; vb++) {
             const fc = (await emu.readMemory(COUNTER, 4)).readUInt32LE(0) + 2;
-            let bits = 0;
-            if (fc > 300) {
-                const m = fc % 60;
-                if (fc % 600 < 8) bits |= COIN1;
-                if (m < 6) bits |= IN.START1;
-                if (m >= 20 && m < 26) bits |= IN.P1_B1;
-                if (m >= 40 && m < 46) bits |= IN.P1_B2;
-            }
+            const bits = introBits(fc);
             if (bits !== held) { await emu.setInput(bits); held = bits; }
             if ((await emu.waitFrames(1, 20000)).reached) continue;
             const st = await emu.status();

@@ -609,7 +609,11 @@ static inline void c5881_line_fill(void) {
     int size = c->line_buffer_size;
 
     c->line_buffer_pos = 0;
-    for (int i = 0; i != size;) {
+    /* MAME loops to i != size, and a run that overshoots the line (a stream
+     * the program never meant to decompress: Pilot Kids reading the port
+     * while running wild) then writes past line[] for ever. A good stream
+     * ends each line exactly on size, so the bound changes nothing there. */
+    for (int i = 0; i < size;) {
         /* vlc 0: start of line, 1: interior, 2-9: 7-1 bytes from the end */
         int slot = i ? i < size - 7 ? 1 : (i & 7) + 1 : 0;
         uint32_t tmp = 0;
@@ -619,11 +623,11 @@ static inline void c5881_line_fill(void) {
         int count = (int)(tmp & 7) + 1;
         if (tmp & 0x40) {
             int offset = offsets[(tmp & 0x18) >> 3];
-            for (int j = 0; j != count; j++, i++)
+            for (int j = 0; j != count && i < size; j++, i++)
                 lc[i ^ 1] = lp[((i + offset) % size) ^ 1];
         } else {
             uint8_t byte = c5881_get_compressed_byte();
-            for (int j = 0; j != count; j++) lc[(i++) ^ 1] = byte;
+            for (int j = 0; j != count && i < size; j++) lc[(i++) ^ 1] = byte;
         }
     }
     if (c->block_numlines == ++c->block_pos) c->done_compression = 1;
@@ -634,7 +638,7 @@ static inline uint16_t c5881_do_decrypt(void) {
     const uint8_t *base;
     if (!c->enc_ready) c5881_enc_start();
     if (c->dec_header & C5881_COMPRESSED) {
-        if (c->line_buffer_pos == c->line_buffer_size) {
+        if (c->line_buffer_pos >= c->line_buffer_size) {
             if (c->done_compression == 1) c5881_enc_start();
             c5881_line_fill();
         }

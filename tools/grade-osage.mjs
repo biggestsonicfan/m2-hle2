@@ -124,7 +124,7 @@ async function captureHere(ch) {
 /* One cop_replay run: the op table, the state table and the osage dump. */
 function replay(prefix) {
     const dump = prefix + '.osage.txt';
-    const r = spawnSync(replayExe, [prefix, '0'], { encoding: 'utf8', maxBuffer: 64 << 20, env: { ...process.env, OSAGE: dump } });
+    const r = spawnSync(replayExe, [prefix, '0'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: { ...process.env, OSAGE: dump } });
     const ops = {}, states = {};
     for (const line of r.stdout.split('\n')) {
         let m = line.match(/^[ *]([0-9A-F]{2})  (\S+)\s+(\d+)\s+\S+\s+\d+!?\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);

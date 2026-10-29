@@ -90,12 +90,12 @@ typedef struct {
 static jt_state_t jt_s0, jt_a, jt_b;
 
 static void jt_take(jt_state_t *s, i960_cpu_t *cpu, memory_bus_t *bus, uint32_t scr) {
-    s->cpu = *cpu; s->pending = g_irqt.pending; s->seen = s_timer_cycles_seen;
+    irqt_sync(); s->cpu = *cpu; s->pending = g_irqt.pending; s->seen = g_irqt_seen;
     s->last_store = g_last_store_ip; s->last_write = g_mem_last_write_ip; s->bus_ip = bus->cpu_ip;
     for (uint32_t i = 0; i < sizeof s->mem; i++) s->mem[i] = mem_read8(bus, scr - 0x40u + i);
 }
 static void jt_put(const jt_state_t *s, i960_cpu_t *cpu, memory_bus_t *bus, uint32_t scr) {
-    *cpu = s->cpu; g_irqt.pending = s->pending; s_timer_cycles_seen = s->seen;
+    *cpu = s->cpu; g_irqt.pending = s->pending; g_irqt_seen = g_irqt_given = s->seen;
     g_last_store_ip = s->last_store; g_mem_last_write_ip = s->last_write; bus->cpu_ip = s->bus_ip;
     for (uint32_t i = 0; i < sizeof s->mem; i++) bus->wr_page[(scr - 0x40u + i) >> MEM_PAGE_SHIFT][(scr - 0x40u + i) & MEM_PAGE_OFF] = s->mem[i];
 }

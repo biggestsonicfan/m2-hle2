@@ -131,7 +131,7 @@ camera is not drawn.
 
 **`sky_eye_link()`**
 The game's camera and stage now as a noclip link fragment (`#game=sfight&tab=stage&…`
-with `eye`/`ang`, and `pos`/`target`/`look` for a noclip without them). Append it to
+with the board's `eye`/`ang` only). Append it to
 the explorer's page URL.
 
 **`get_registers()`**
@@ -325,7 +325,19 @@ Set the active-high held mask the game's input read is served, in the
 `0x500700` bit layout (see the table under "STF memory map"). `"0x1000"` holds
 P1 Down, `"0x0"` releases everything. It replaces the whole mask
 (`g_input.held`, the same one the window's keyboard drives). Returns `held`. This is the only safe way to drive a
-netplay session (see below).
+netplay session (see below). On a four-player cabinet (Air Walkers) `far`
+sets players 3 and 4 the same way, player 3 on player 1's bits and player 4
+on player 2's (`g_input.far_held`; left out, it stays as it was). The board
+reads them only outside netplay, replays and follows. Returns `far` too.
+
+**`set_gun(player: int = 0, x: float = 0.5, y: float = 0.5, offscreen: int = 0, on: int = 1)`**
+On a light-gun profile (The House of the Dead, Virtua Cop), aim a gun as the window's
+mouse would: `x` and `y` run 0..1 across and down the picture, `offscreen: 1`
+points it off the picture (a shot there reloads), `on: 0` hands it back to the
+pad's walk. Fire with `set_input` (P1 trigger `0x100`, reload `0x400`; P2
+`0x200` / `0x800`). Ignored by a board in a session, a follow or a replay,
+whose guns follow the pad word. Returns `ad_x` / `ad_y`, where the board's gun
+pointed at its last read (the A/D values the game sees).
 
 ### Breakpoints
 
@@ -750,9 +762,18 @@ Bridge-only JSON commands for the game's script, `<scripts>/<set>.lua`
 
 ### Captures and diagnostics
 
-`get_geo_captures` is an MCP tool; the rest are bridge-only JSON commands, used
-mostly by the graders under `tools/`. Paths are resolved by the emulator
-process, so pass absolute ones.
+`get_geo_captures`, `screenshot` and `set_geo_isolate` are MCP tools; the rest
+are bridge-only JSON commands, used mostly by the graders under `tools/`. Paths
+are resolved by the emulator process, so pass absolute ones.
+
+**`screenshot(path, width, height, timeout_ms = 10000)`**
+The game's picture as a PNG (`ui/game_shot.h`): what the A/V tap sends, at the
+board's 496x384 unless `width`/`height` say otherwise, with no ImGui and no
+picture filter. It is the frame the renderer last prepared, so a stopped board
+(`emu_stop`) gives its last frame. It needs a renderer: a window (an Xvfb will
+do) or `--headless --av-port`; plain `--headless` answers `ok: false`. Returns
+`frame`, `width`, `height`, `bytes`. With `set_geo_isolate` it shows one object
+alone (m2-megamix grabbed its Xvfb with ffmpeg for that before, #1545).
 
 **`get_geo_captures()`**
 The models the board drew in the last frame: `count` and `captures`, each with

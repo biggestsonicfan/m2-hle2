@@ -36,7 +36,7 @@ FRAMES = int(sys.argv[2])
 
 
 async def main():
-    b = MameBridge()
+    b = MameBridge(port=int(os.environ.get("BRIDGE_PORT", "6510")))   # a free port, when 6510 is taken
 
     async def ev(expr, timeout=120):
         r = await b.call("eval", {"expr": expr}, timeout=timeout)

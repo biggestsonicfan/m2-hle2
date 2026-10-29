@@ -229,12 +229,28 @@ static void dump_osage(FILE *fo, uint64_t ncmd, uint32_t arg, const uint32_t *ou
     }
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: cop_replay <prefix> [examples] [op]\n"); return 2; }
-    int max_ex = argc > 2 ? atoi(argv[2]) : 3;
-    int only = argc > 3 ? (int)strtol(argv[3], NULL, 16) : -1;
-    char path[1024];
+/* The replay: the command being assembled, the counts, and what the
+ * environment asked for. */
+static int      max_ex, only;
+static uint32_t cmd, args[MAX_IO], outs[MAX_IO];
+static int      have, nin, nout;
+static uint64_t rec, ncmd, bufw, bad_words, snaps;
+static int      resync, state_exact;
+static FILE    *fo, *fd;
+static uint32_t snap_tag, snap_ptr, snap_words[12]; static int snap_n = -1;
+/* Bufferram writes the i960 made once the running command had begun to
+ * answer: not inputs to it (it read its records before answering), so they
+ * wait until it has run. The replay runs a command only when the next one
+ * arrives; applied at once, Fn_osage would see the carries os_set_osage_after
+ * zeroes after reading each segment's matrix before writing them back. */
+static uint32_t late[1 << 16][2]; static int nlate;
+static float    hsnap[12]; static int draw_pending; static uint64_t draw_rec; static uint32_t draw_tag, draw_ptr, draw_words[12];
 
+#define MINMAX(lo, hi, v) do { if ((v) < (lo)) (lo) = (v); if ((v) > (hi)) (hi) = (v); } while (0)
+
+/* The COP data ROM, the bufferram and DM snapshots, and the capture. */
+static FILE *open_capture(const char *prefix) {
+    char path[1024];
     static uint8_t *rom = NULL;
     const char *rom_path = getenv("COPRO_ROM");
     if (rom_path) {
@@ -247,13 +263,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    snprintf(path, sizeof path, "%s.bufram.bin", argv[1]);
+    snprintf(path, sizeof path, "%s.bufram.bin", prefix);
     FILE *fb = fopen(path, "rb");
     if (fb) { size_t got = fread(g_bufram, 1, sizeof g_bufram, fb); fclose(fb); printf("bufferram snapshot: %zu bytes\n", got); }
 
-    snprintf(path, sizeof path, "%s.bin", argv[1]);
+    snprintf(path, sizeof path, "%s.bin", prefix);
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); return NULL; }
 
     cop_reset();
     g_sharc.sharc_dm_ext      = g_bufram;
@@ -261,7 +277,7 @@ int main(int argc, char **argv) {
     /* The firmware's own DM 0x30000-0x30FFF as capture began: what the i960
      * uploaded before it (collision radii and ball maps, via Fn_write_ram) and
      * the unit-matrix cache at 0x30420. */
-    snprintf(path, sizeof path, "%s.dm.bin", argv[1]);
+    snprintf(path, sizeof path, "%s.dm.bin", prefix);
     FILE *fm = fopen(path, "rb");
     if (fm) {
         static uint32_t dmw[0x1000];
@@ -269,144 +285,233 @@ int main(int argc, char **argv) {
         for (size_t k = 0; k < got; k++) sharc_dm_set(0x30000u + (uint32_t)k, dmw[k]);
         printf("SHARC DM snapshot: %zu words\n", got);
     }
+    return f;
+}
+
+/* The words the HLE answered against the board's. Whether any is off. */
+static int grade_replies(op_stat_t *s, int hn) {
+    int bad = 0;
+    for (int k = 0; k < nout || k < hn; k++) {
+        if (k >= hn)        { s->missing++; bad = 1; continue; }
+        if (k >= nout)      { s->extra++;   bad = 1; continue; }
+        s->words++;
+        uint32_t h = g_sharc.reply[k];
+        if (h == outs[k]) s->exact++;
+        else if (word_close(outs[k], h)) s->close++;
+        else { s->wrong++; bad = 1; }
+    }
+    return bad;
+}
+
+/* DRAWS: a draw's line, the board's matrix and the HLE's before it. */
+static void dump_draw(void) {
+    fprintf(fd, "%llu,%02X,%02X,%d,%08X", (unsigned long long)draw_rec,
+            draw_tag & 0xFF, (draw_tag >> 8) & 0xFF,
+            (int)((draw_ptr - 0x305A0u) / 12u), nin > 4 ? args[4] : 0);
+    for (int q = 0; q < 12; q++) fprintf(fd, ",%.6g", b2f(draw_words[q]));
+    for (int q = 0; q < 12; q++) fprintf(fd, ",%.6g", hsnap[q]);
+    fprintf(fd, "\n");
+}
+
+static void print_cmd_example(int hn) {
+    printf("\n[op %02X %s] command #%llu (record %llu): %d args, board wrote %d, hle %d\n  args:",
+           cmd & 0xFF, FW[cmd & 0xFF].name ? FW[cmd & 0xFF].name : "?",
+           (unsigned long long)ncmd, (unsigned long long)rec, nin, nout, hn);
+    for (int k = 0; k < nin && k < 24; k++) printf(" %08X(%g)", args[k], b2f(args[k]));
+    printf("\n  board:");
+    for (int k = 0; k < nout && k < 24; k++) printf(" %08X(%g)", outs[k], b2f(outs[k]));
+    printf("\n  hle:  ");
+    for (int k = 0; k < hn && k < 24; k++) printf(" %08X(%g)", g_sharc.reply[k], b2f(g_sharc.reply[k]));
+    printf("\n");
+}
+
+/* The command's counts: how often, its argument and reply lengths, whether
+ * the HLE's table expects that many arguments. */
+static void finish_count(op_stat_t *s) {
+    s->count++;
+    MINMAX(s->in_min, s->in_max, nin);
+    MINMAX(s->out_min, s->out_max, nout);
+    int want = sharc_args_for_cmd(cmd);
+    if (want != COP_ARGS_STREAM && want != nin) s->argcount_bad++;
+}
+
+/* Run the command assembled so far and grade what it produced. */
+static void finish(void) {
+    if (!have) return;
+    op_stat_t *s = &S[cmd & 0xFF];
+    finish_count(s);
+    if (fo && (cmd & 0xFF) == 0x4A && nin >= 1) dump_osage(fo, ncmd, args[0], outs, nout);
+    sharc_exec(cmd, args, nin < COP_ARGS_MAX ? nin : COP_ARGS_MAX);
+    int hn = g_sharc.reply_count;
+    MINMAX(s->hle_out_min, s->hle_out_max, hn);
+    int bad = grade_replies(s, hn);
+    g_sharc.reply_count = g_sharc.reply_idx = 0;
+    if (draw_pending && (cmd & 0xFF) == 0x78 && fd) dump_draw();
+    draw_pending = 0;
+    if (bad && s->examples < max_ex && (only < 0 || only == (int)(cmd & 0xFF))) {
+        s->examples++;
+        print_cmd_example(hn);
+    }
+    have = 0;
+    for (int q = 0; q < nlate; q++) memcpy(g_bufram + late[q][0], &late[q][1], 4);
+    nlate = 0;
+}
+
+/* A snapshot's 12 words against the HLE's matrix H: the worst rotation
+ * and translation errors, and whether any bit differs. */
+static int snapshot_err(const float *h, double *rmax, double *tmax) {
+    *rmax = 0; *tmax = 0;
+    for (int q = 0; q < 9; q++) { double d = fabs((double)b2f(snap_words[q]) - h[q]); if (d > *rmax) *rmax = d; }
+    for (int q = 9; q < 12; q++) { double d = fabs((double)b2f(snap_words[q]) - h[q]); if (d > *tmax) *tmax = d; }
+    int differs = 0;
+    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) { uint32_t hb; memcpy(&hb, &h[c*3 + r], 4); differs |= hb != snap_words[c*3 + r]; }
+    for (int r = 0; r < 3; r++) { uint32_t hb; memcpy(&hb, &h[9 + r], 4); differs |= hb != snap_words[9 + r]; }
+    return differs;
+}
+
+static void print_state_example(uint32_t prev, uint32_t next, const float *h, double rmax, double tmax) {
+    printf("\n[state after op %02X %s, before %02X] record %llu depth %d: rot err %.4g, T err %.4g\n  board:",
+           prev, FW[prev].name ? FW[prev].name : "?", next, (unsigned long long)rec,
+           (int)((snap_ptr - 0x305A0u) / 12u), rmax, tmax);
+    for (int q = 0; q < 12; q++) printf(" %.5g", b2f(snap_words[q]));
+    printf("\n  hle:  ");
+    for (int q = 0; q < 12; q++) printf(" %.5g", h[q]);
+    printf("\n");
+}
+
+/* The state op prev left (the HLE's matrix h) against the snapshot: its
+ * counts, and an example if it is bad. */
+static void grade_state(uint32_t prev, uint32_t next, const float *h) {
+    double rmax, tmax;
+    int differs = snapshot_err(h, &rmax, &tmax);
+    state_stat_t *t = &ST[prev];
+    t->n++;
+    if (rmax > t->rmax) t->rmax = rmax;
+    if (tmax > t->tmax) t->tmax = tmax;
+    if (!(state_exact ? differs : (rmax > 1e-3 || tmax > 1e-3))) return;
+    t->bad++;
+    if (t->examples < max_ex && (only < 0 || only == (int)prev)) {
+        t->examples++;
+        print_state_example(prev, next, h, rmax, tmax);
+    }
+}
+
+/* A whole matrix snapshot: grade the state the last command left. */
+static void grade_snapshot(void) {
+    snap_n = -1; snaps++;
+    uint32_t prev = (snap_tag >> 8) & 0xFF, next = snap_tag & 0xFF;
+    float h[12];
+    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) h[c*3 + r] = g_sharc.rot[c][r];
+    for (int r = 0; r < 3; r++) h[9 + r] = g_sharc.pos[r];
+    grade_state(prev, next, h);
+    memcpy(hsnap, h, sizeof hsnap);
+    if (next == 0x78) { draw_pending = 1; draw_rec = rec; draw_tag = snap_tag; draw_ptr = snap_ptr; memcpy(draw_words, snap_words, sizeof draw_words); }
+    if (resync) {
+        for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) g_sharc.rot[c][r] = b2f(snap_words[c*3 + r]);
+        for (int r = 0; r < 3; r++) g_sharc.pos[r] = b2f(snap_words[9 + r]);
+    }
+}
+
+/* A bufferram write: held back to after the command when its replies have
+ * begun (the board wrote it while the command ran), else made now. */
+static void replay_bufw(uint32_t tag, uint32_t val) {
+    bufw++;
+    uint32_t off = (tag - 0x900000u) & (BUFF_RAM_SIZE - 1) & ~3u;
+    if (have && nout > 0 && nlate < (int)(sizeof late / sizeof late[0])) { late[nlate][0] = off; late[nlate][1] = val; nlate++; }
+    else memcpy(g_bufram + off, &val, 4);
+}
+
+/* A command word: the last command graded, this one begun. */
+static void replay_cmd(uint32_t val) {
+    finish();
+    uint32_t op = val & 0xFF;
+    if (val != op * 0x00800101u) { bad_words++; return; }
+    cmd = val; nin = nout = 0; have = 1; ncmd++;
+}
+
+/* One record of the capture. */
+static void replay_record(uint32_t tag, uint32_t val) {
+    if (tag == 0x21000000u) {
+        replay_cmd(val);
+    } else if (tag == 0x20000000u) {
+        if (have && nin < MAX_IO) args[nin++] = val;
+    } else if (tag == 0x30000000u) {
+        if (have && nout < MAX_IO) outs[nout++] = val;
+    } else if ((tag & 0xFF000000u) == 0x40000000u) {
+        finish();                     /* command PP has run: grade the state it left */
+        snap_tag = tag; snap_ptr = val; snap_n = 0;
+    } else if (tag == 0x41000000u) {
+        if (snap_n >= 0 && snap_n < 12) snap_words[snap_n++] = val;
+        if (snap_n == 12) grade_snapshot();
+    } else if (tag >= 0x900000u && tag < 0x980000u) {
+        replay_bufw(tag, val);
+    }
+}
+
+static void report_states(void) {
+    printf(" state left by   name                          checks      bad   max rot err   max T err\n");
+    for (int op = 0; op < 256; op++) {
+        state_stat_t *t = &ST[op];
+        if (!t->n) continue;
+        printf("%c%02X             %-27s %8llu %8llu   %10.4g  %10.4g\n", t->bad ? '*' : ' ', op,
+               FW[op].name ? FW[op].name : "?", (unsigned long long)t->n, (unsigned long long)t->bad, t->rmax, t->tmax);
+    }
+    printf("\n");
+}
+
+static void report_op(int op, const op_stat_t *s) {
+    uint32_t word = (uint32_t)op * 0x00800101u;
+    int hle_in = sharc_args_for_cmd(word);
+    char ain[16], aout[16], hout[16];
+    snprintf(ain, sizeof ain, s->in_min == s->in_max ? "%d" : "%d..%d", s->in_min, s->in_max);
+    snprintf(aout, sizeof aout, s->out_min == s->out_max ? "%d" : "%d..%d", s->out_min, s->out_max);
+    snprintf(hout, sizeof hout, s->hle_out_min == s->hle_out_max ? "%d" : "%d..%d", s->hle_out_min, s->hle_out_max);
+    int flag = (s->argcount_bad || s->wrong || s->missing || s->extra);
+    printf("%c%02X  %-27s %7llu  %-10s %4d%s   %-9s %-9s %8llu %8llu %8llu %8llu %8llu %6llu\n",
+           flag ? '*' : ' ', op, FW[op].name ? FW[op].name : "?", (unsigned long long)s->count,
+           ain, hle_in, s->argcount_bad ? "!" : " ", aout, hout,
+           (unsigned long long)s->words, (unsigned long long)s->exact, (unsigned long long)s->close,
+           (unsigned long long)s->wrong, (unsigned long long)s->missing, (unsigned long long)s->extra);
+}
+
+static void report_ops(void) {
+    printf(" op  name                         count  args(board) hle-table  out(board) out(hle)   words    exact    close    WRONG  missing  extra\n");
+    for (int op = 0; op < 256; op++)
+        if (S[op].count) report_op(op, &S[op]);
+}
+
+/* The environment's switches: RESYNC, STATE_EXACT, and the OSAGE and DRAWS dumps. */
+static void env_options(void) {
+    resync = getenv("RESYNC") != NULL;
+    /* STATE_EXACT: a matrix left different in any bit is a bad state, not only one 1e-3 off. */
+    state_exact = getenv("STATE_EXACT") != NULL;
+    /* OSAGE=<file>: every Fn_osage call's record stream as the firmware found it
+     * in bufferram, and what the board answered for it (dump_osage). */
+    const char *osage_path = getenv("OSAGE");
+    fo = osage_path ? fopen(osage_path, "w") : NULL;
+    const char *draws_path = getenv("DRAWS");
+    fd = draws_path ? fopen(draws_path, "w") : NULL;
+    if (fd) fprintf(fd, "record,cmd,prev,depth,model,m0,m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,h0,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10,h11\n");
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: cop_replay <prefix> [examples] [op]\n"); return 2; }
+    max_ex = argc > 2 ? atoi(argv[2]) : 3;
+    only = argc > 3 ? (int)strtol(argv[3], NULL, 16) : -1;
+    FILE *f = open_capture(argv[1]);
+    if (!f) return 2;
     for (int i = 0; i < 256; i++) {
         S[i].in_min = S[i].out_min = S[i].hle_out_min = 1 << 30;
         S[i].in_max = S[i].out_max = S[i].hle_out_max = -1;
     }
 
-    uint32_t cmd = 0, args[MAX_IO], outs[MAX_IO];
-    int have = 0, nin = 0, nout = 0;
-    uint64_t rec = 0, ncmd = 0, bufw = 0, bad_words = 0, snaps = 0;
-    int resync = getenv("RESYNC") != NULL;
-    /* STATE_EXACT: a matrix left different in any bit is a bad state, not only one 1e-3 off. */
-    int state_exact = getenv("STATE_EXACT") != NULL;
-    /* OSAGE=<file>: every Fn_osage call's record stream as the firmware found it
-     * in bufferram, and what the board answered for it (dump_osage). */
-    const char *osage_path = getenv("OSAGE");
-    FILE *fo = osage_path ? fopen(osage_path, "w") : NULL;
-    const char *draws_path = getenv("DRAWS");
-    FILE *fd = draws_path ? fopen(draws_path, "w") : NULL;
-    if (fd) fprintf(fd, "record,cmd,prev,depth,model,m0,m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,h0,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10,h11\n");
-    uint32_t snap_tag = 0, snap_ptr = 0, snap_words[12]; int snap_n = -1;
-    /* Bufferram writes the i960 made once the running command had begun to
-     * answer: not inputs to it (it read its records before answering), so they
-     * wait until it has run. The replay runs a command only when the next one
-     * arrives; applied at once, Fn_osage would see the carries os_set_osage_after
-     * zeroes after reading each segment's matrix before writing them back. */
-    static uint32_t late[1 << 16][2]; int nlate = 0;
-    float hsnap[12]; int draw_pending = 0; uint64_t draw_rec = 0; uint32_t draw_tag = 0, draw_ptr = 0, draw_words[12];
-
-    #define MINMAX(lo, hi, v) do { if ((v) < (lo)) (lo) = (v); if ((v) > (hi)) (hi) = (v); } while (0)
-
-    /* Run the command assembled so far and grade what it produced. */
-    #define FINISH() do { if (have) {                                                   \
-        op_stat_t *s = &S[cmd & 0xFF];                                                  \
-        s->count++;                                                                     \
-        MINMAX(s->in_min, s->in_max, nin);                                              \
-        MINMAX(s->out_min, s->out_max, nout);                                           \
-        int want = sharc_args_for_cmd(cmd);                                                     if (want != COP_ARGS_STREAM && want != nin) s->argcount_bad++;                  \
-        if (fo && (cmd & 0xFF) == 0x4A && nin >= 1) dump_osage(fo, ncmd, args[0], outs, nout); \
-        sharc_exec(cmd, args, nin < COP_ARGS_MAX ? nin : COP_ARGS_MAX);                 \
-        int hn = g_sharc.reply_count;                                                   \
-        MINMAX(s->hle_out_min, s->hle_out_max, hn);                                     \
-        int bad = 0;                                                                    \
-        for (int k = 0; k < nout || k < hn; k++) {                                      \
-            if (k >= hn)        { s->missing++; bad = 1; continue; }                    \
-            if (k >= nout)      { s->extra++;   bad = 1; continue; }                    \
-            s->words++;                                                                 \
-            uint32_t h = g_sharc.reply[k];                                              \
-            if (h == outs[k]) s->exact++;                                               \
-            else if (word_close(outs[k], h)) s->close++;                                \
-            else { s->wrong++; bad = 1; }                                               \
-        }                                                                               \
-        g_sharc.reply_count = g_sharc.reply_idx = 0;                                    \
-        if (draw_pending && (cmd & 0xFF) == 0x78 && fd) {                               \
-            fprintf(fd, "%llu,%02X,%02X,%d,%08X", (unsigned long long)draw_rec,         \
-                    draw_tag & 0xFF, (draw_tag >> 8) & 0xFF,                            \
-                    (int)((draw_ptr - 0x305A0u) / 12u), nin > 4 ? args[4] : 0);         \
-            for (int q = 0; q < 12; q++) fprintf(fd, ",%.6g", b2f(draw_words[q]));      \
-            for (int q = 0; q < 12; q++) fprintf(fd, ",%.6g", hsnap[q]);                \
-            fprintf(fd, "\n");                                                         \
-        }                                                                               \
-        draw_pending = 0;                                                               \
-        if (bad && s->examples < max_ex && (only < 0 || only == (int)(cmd & 0xFF))) {   \
-            s->examples++;                                                              \
-            printf("\n[op %02X %s] command #%llu (record %llu): %d args, board wrote %d, hle %d\n  args:", \
-                   cmd & 0xFF, FW[cmd & 0xFF].name ? FW[cmd & 0xFF].name : "?",         \
-                   (unsigned long long)ncmd, (unsigned long long)rec, nin, nout, hn);   \
-            for (int k = 0; k < nin && k < 24; k++) printf(" %08X(%g)", args[k], b2f(args[k])); \
-            printf("\n  board:");                                                       \
-            for (int k = 0; k < nout && k < 24; k++) printf(" %08X(%g)", outs[k], b2f(outs[k])); \
-            printf("\n  hle:  ");                                                       \
-            for (int k = 0; k < hn && k < 24; k++) printf(" %08X(%g)", g_sharc.reply[k], b2f(g_sharc.reply[k])); \
-            printf("\n");                                                               \
-        }                                                                               \
-        have = 0;                                                                               for (int q = 0; q < nlate; q++) memcpy(g_bufram + late[q][0], &late[q][1], 4);          nlate = 0; } } while (0)
+    env_options();
 
     uint32_t buf[2 * 8192];
     size_t got;
-    while ((got = fread(buf, 8, 8192, f)) > 0) {
-        for (size_t k = 0; k < got; k++, rec++) {
-            uint32_t tag = buf[2 * k], val = buf[2 * k + 1];
-            if (tag == 0x21000000u) {
-                FINISH();
-                uint32_t op = val & 0xFF;
-                if (val != op * 0x00800101u) { bad_words++; continue; }
-                cmd = val; nin = nout = 0; have = 1; ncmd++;
-            } else if (tag == 0x20000000u) {
-                if (have && nin < MAX_IO) args[nin++] = val;
-            } else if (tag == 0x30000000u) {
-                if (have && nout < MAX_IO) outs[nout++] = val;
-            } else if ((tag & 0xFF000000u) == 0x40000000u) {
-                FINISH();                     /* command PP has run: grade the state it left */
-                snap_tag = tag; snap_ptr = val; snap_n = 0;
-            } else if (tag == 0x41000000u) {
-                if (snap_n >= 0 && snap_n < 12) snap_words[snap_n++] = val;
-                if (snap_n == 12) {
-                    snap_n = -1; snaps++;
-                    uint32_t prev = (snap_tag >> 8) & 0xFF, next = snap_tag & 0xFF;
-                    float h[12];
-                    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) h[c*3 + r] = g_sharc.rot[c][r];
-                    for (int r = 0; r < 3; r++) h[9 + r] = g_sharc.pos[r];
-                    double rmax = 0, tmax = 0;
-                    for (int q = 0; q < 9; q++) { double d = fabs((double)b2f(snap_words[q]) - h[q]); if (d > rmax) rmax = d; }
-                    for (int q = 9; q < 12; q++) { double d = fabs((double)b2f(snap_words[q]) - h[q]); if (d > tmax) tmax = d; }
-                    state_stat_t *t = &ST[prev];
-                    t->n++;
-                    if (rmax > t->rmax) t->rmax = rmax;
-                    if (tmax > t->tmax) t->tmax = tmax;
-                    int differs = 0;
-                    for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) { uint32_t hb; memcpy(&hb, &h[c*3 + r], 4); differs |= hb != snap_words[c*3 + r]; }
-                    for (int r = 0; r < 3; r++) { uint32_t hb; memcpy(&hb, &h[9 + r], 4); differs |= hb != snap_words[9 + r]; }
-                    if (state_exact ? differs : (rmax > 1e-3 || tmax > 1e-3)) {
-                        t->bad++;
-                        if (t->examples < max_ex && (only < 0 || only == (int)prev)) {
-                            t->examples++;
-                            printf("\n[state after op %02X %s, before %02X] record %llu depth %d: rot err %.4g, T err %.4g\n  board:",
-                                   prev, FW[prev].name ? FW[prev].name : "?", next, (unsigned long long)rec,
-                                   (int)((snap_ptr - 0x305A0u) / 12u), rmax, tmax);
-                            for (int q = 0; q < 12; q++) printf(" %.5g", b2f(snap_words[q]));
-                            printf("\n  hle:  ");
-                            for (int q = 0; q < 12; q++) printf(" %.5g", h[q]);
-                            printf("\n");
-                        }
-                    }
-                    memcpy(hsnap, h, sizeof hsnap);
-                    if (next == 0x78) { draw_pending = 1; draw_rec = rec; draw_tag = snap_tag; draw_ptr = snap_ptr; memcpy(draw_words, snap_words, sizeof draw_words); }
-                    if (resync) {
-                        for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) g_sharc.rot[c][r] = b2f(snap_words[c*3 + r]);
-                        for (int r = 0; r < 3; r++) g_sharc.pos[r] = b2f(snap_words[9 + r]);
-                    }
-                }
-            } else if (tag >= 0x900000u && tag < 0x980000u) {
-                bufw++;
-                uint32_t off = (tag - 0x900000u) & (BUFF_RAM_SIZE - 1) & ~3u;
-                if (have && nout > 0 && nlate < (int)(sizeof late / sizeof late[0])) { late[nlate][0] = off; late[nlate][1] = val; nlate++; }
-                else memcpy(g_bufram + off, &val, 4);
-            }
-        }
-    }
-    FINISH();
+    while ((got = fread(buf, 8, 8192, f)) > 0)
+        for (size_t k = 0; k < got; k++, rec++) replay_record(buf[2 * k], buf[2 * k + 1]);
+    finish();
     fclose(f);
 
     if (fd) fclose(fd);
@@ -414,32 +519,7 @@ int main(int argc, char **argv) {
     printf("\nrecords %llu: %llu commands, %llu bufferram writes, %llu malformed command words, %llu matrix snapshots%s\n\n",
            (unsigned long long)rec, (unsigned long long)ncmd, (unsigned long long)bufw, (unsigned long long)bad_words,
            (unsigned long long)snaps, resync ? " (HLE matrix reset to the board's at each)" : "");
-    if (snaps) {
-        printf(" state left by   name                          checks      bad   max rot err   max T err\n");
-        for (int op = 0; op < 256; op++) {
-            state_stat_t *t = &ST[op];
-            if (!t->n) continue;
-            printf("%c%02X             %-27s %8llu %8llu   %10.4g  %10.4g\n", t->bad ? '*' : ' ', op,
-                   FW[op].name ? FW[op].name : "?", (unsigned long long)t->n, (unsigned long long)t->bad, t->rmax, t->tmax);
-        }
-        printf("\n");
-    }
-    printf(" op  name                         count  args(board) hle-table  out(board) out(hle)   words    exact    close    WRONG  missing  extra\n");
-    for (int op = 0; op < 256; op++) {
-        op_stat_t *s = &S[op];
-        if (!s->count) continue;
-        uint32_t word = (uint32_t)op * 0x00800101u;
-        int hle_in = sharc_args_for_cmd(word);
-        char ain[16], aout[16], hout[16];
-        snprintf(ain, sizeof ain, s->in_min == s->in_max ? "%d" : "%d..%d", s->in_min, s->in_max);
-        snprintf(aout, sizeof aout, s->out_min == s->out_max ? "%d" : "%d..%d", s->out_min, s->out_max);
-        snprintf(hout, sizeof hout, s->hle_out_min == s->hle_out_max ? "%d" : "%d..%d", s->hle_out_min, s->hle_out_max);
-        int flag = (s->argcount_bad || s->wrong || s->missing || s->extra);
-        printf("%c%02X  %-27s %7llu  %-10s %4d%s   %-9s %-9s %8llu %8llu %8llu %8llu %8llu %6llu\n",
-               flag ? '*' : ' ', op, FW[op].name ? FW[op].name : "?", (unsigned long long)s->count,
-               ain, hle_in, s->argcount_bad ? "!" : " ", aout, hout,
-               (unsigned long long)s->words, (unsigned long long)s->exact, (unsigned long long)s->close,
-               (unsigned long long)s->wrong, (unsigned long long)s->missing, (unsigned long long)s->extra);
-    }
+    if (snaps) report_states();
+    report_ops();
     return 0;
 }

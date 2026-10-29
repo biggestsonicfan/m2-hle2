@@ -197,6 +197,35 @@ static bool srallyc_in_play(memory_bus_t *bus) {
     return mem_read8(bus, SRALLYC_MODE) == 3;
 }
 
+/* The car's meters (Pinboard #1361), found in RAM against the HUD:
+ *   0x500078  gear, word 1-4 (the HUD's SHIFT box)
+ *   0x50007C  the engine, float rpm: 8800 at the limiter (the tacho reads to
+ *             9, red from 8)
+ *   0x500080  the car's speed, float: x64.5 is the HUD's km/h, which follows
+ *             it a few frames late
+ * The HUD's own number was not found in RAM. */
+#define SRALLYC_GEAR  0x00500078u
+#define SRALLYC_RPM   0x0050007Cu
+#define SRALLYC_SPEED 0x00500080u
+
+static float srallyc_peek_float(memory_bus_t *bus, uint32_t addr) {
+    union { uint32_t u; float f; } v = { mem_peek32(bus, addr) };
+    return v.f == v.f ? v.f : 0.0f;
+}
+
+static void srallyc_dash(memory_bus_t *bus, game_dash_t *out) {
+    if (mem_peek8(bus, SRALLYC_MODE) != 3) return;
+    float rpm = srallyc_peek_float(bus, SRALLYC_RPM), kmh = srallyc_peek_float(bus, SRALLYC_SPEED) * 64.5f;
+    uint32_t gear = mem_peek32(bus, SRALLYC_GEAR);
+    if (gear < 1 || gear > 4 || !(rpm > 0.0f)) return;   /* the select screens */
+    out->on      = true;
+    out->gear    = (int)gear;
+    out->rpm     = rpm < 20000.0f ? (int)rpm : 0;
+    out->speed   = kmh >= 0.0f && kmh < 999.0f ? (int)(kmh + 0.5f) : -1;
+    out->rpm_lo  = 5500;
+    out->rpm_max = 8800;
+}
+
 static void srallyc_match_info(memory_bus_t *bus, game_match_info_t *out) {
     static const char *const cars[4] = {
         "Toyota Celica GT-Four (MT)", "Toyota Celica GT-Four (AT)",
@@ -273,6 +302,7 @@ static const game_profile_t srallyc_profile = {
     .native_put      = srallyc_native_put,
     .native_play     = srallyc_native_play,
     .in_play         = srallyc_in_play,
+    .dash            = srallyc_dash,
     .input = {
         /* IN0 is the cabinet's: COIN1 0x01, TEST 0x04, SERVICE 0x08, VR 0x20,
          * START 0x40 (MAME INPUT_PORTS_START(srallyc)). Byte 1 is not a port
@@ -290,6 +320,12 @@ static const game_profile_t srallyc_profile = {
             [GAME_INPUT_P1_UP]    = 0x00002000,
             [GAME_INPUT_P1_RIGHT] = 0x00004000,
             [GAME_INPUT_P1_LEFT]  = 0x00008000,
+            /* A gear's own button (io_5649.h): bits no port reads. */
+            [GAME_INPUT_GEAR_N]   = 0x00010000,
+            [GAME_INPUT_GEAR_1]   = 0x00020000,
+            [GAME_INPUT_GEAR_2]   = 0x00040000,
+            [GAME_INPUT_GEAR_3]   = 0x00080000,
+            [GAME_INPUT_GEAR_4]   = 0x00100000,
         },
     },
     .quirks = {
@@ -311,8 +347,17 @@ static const game_profile_t srallyc_profile = {
          * path, as on the board and in the PS2 port (FUN_0012bf70 picks row
          * 7). Pinboard #667, #744. */
         .i960_board_timing = true,
+        /* The model table: 1508 entries of 16 bytes at data 0x864B40, the
+         * 1995 layout (uv, mat, mesh, polygon count), read by the draw
+         * routines as 0x2864B40[n*16]; the "CGM 1.0 " block at 0x86A980
+         * ends it. Every entry's mesh is in the polygon ROM. prepared_test
+         * holds it to the explorer's reads (NOCLIP-SYNC.md §8.2). */
+        .model_table_offset = 0x864B40,
+        .model_table_count  = 1508,
+        .mesh_ptr_subtract  = 0x02000010,
+        .mesh_ptr_add       = 0x10,
         .wheel = { .left = 0x8000, .right = 0x4000, .accel = 0x0100, .brake = 0x0200,
-                   .shift_up = 0x2000, .shift_down = 0x1000 },
+                   .shift_up = 0x2000, .shift_down = 0x1000, .view = { 0x0020 } },
     },
 };
 

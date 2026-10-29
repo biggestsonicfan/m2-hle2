@@ -62,6 +62,63 @@ static void ref_dsp_decode(const scsp_dsp_t *d, ref_op_t *ops) {
 
 static uint16_t ref_dsp_pack(int32_t val);
 
+/* A step's input: MEMS, MIXS or EXTS by IRA, false for an IRA that ends the
+ * program; IWT writes MEMS first. */
+static bool ref_dsp_inputs(scsp_dsp_t *d, const ref_op_t *o, int32_t memval, int32_t *out) {
+    int32_t inputs;
+    if (o->ira <= 0x1F)      inputs = d->mems[o->ira];
+    else if (o->ira <= 0x2F) inputs = d->mixs[o->ira - 0x20] * 16;
+    else if (o->ira <= 0x31) inputs = d->exts[o->ira - 0x30] * 256;
+    else return false;
+    inputs = scsp_sext(inputs, 24);
+    if (o->iwt) {
+        d->mems[o->iwa] = memval;
+        if (o->ira == o->iwa) inputs = memval;
+    }
+    *out = inputs;
+    return true;
+}
+
+static int32_t ref_dsp_y(const scsp_dsp_t *d, const ref_op_t *o, int32_t frc, int32_t yreg) {
+    int32_t y = 0;
+    if (o->ysel == 0)      y = frc;
+    else if (o->ysel == 1) y = d->coef[o->coef] >> 3;
+    else if (o->ysel == 2) y = (yreg >> 11) & 0x1FFF;
+    else                   y = (yreg >> 4) & 0x0FFF;
+    return y;
+}
+
+static int32_t ref_dsp_shift(int32_t acc, int sh) {
+    int32_t shifted;
+    if (sh == 0)      shifted = acc < -0x800000 ? -0x800000 : acc > 0x7FFFFF ? 0x7FFFFF : acc;
+    else if (sh == 1) { int64_t v2 = (int64_t)acc * 2; shifted = v2 < -0x800000 ? -0x800000 : v2 > 0x7FFFFF ? 0x7FFFFF : (int32_t)v2; }
+    else if (sh == 2) shifted = scsp_sext((int32_t)((uint32_t)acc * 2u), 24);
+    else              shifted = scsp_sext(acc, 24);
+    return shifted;
+}
+
+/* The delay memory's read and write for a step with MRD or MWT. */
+static void ref_dsp_memory(scsp_t *s, const ref_op_t *o, int st, int32_t shifted, uint32_t adrs, int32_t *memval) {
+    scsp_dsp_t *d = &s->dsp;
+    uint32_t addr = d->madrs[o->masa];
+    if (!o->table) addr += d->dec;
+    if (o->adreb)  addr += adrs & 0x0FFF;
+    if (o->nxadr)  addr++;
+    addr &= o->table ? 0xFFFFu : d->rbl - 1;
+    addr += d->rbp << 12;
+    addr <<= 1;
+    /* MAME: the delay memory is only touched on odd steps */
+    if (o->mrd && (st & 1)) *memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
+    if (o->mwt && (st & 1)) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : ref_dsp_pack(shifted));
+}
+
+/* The adder's B input: none, the accumulator or a TEMP word, negated on NEGB. */
+static int32_t ref_dsp_b(const scsp_dsp_t *d, const ref_op_t *o, int32_t acc) {
+    if (o->zero) return 0;
+    int32_t b = o->bsel ? acc : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
+    return o->negb ? -b : b;
+}
+
 static void ref_dsp_step(scsp_t *s, const ref_op_t *ops) {
     scsp_dsp_t *d = &s->dsp;
     if (d->stopped) return;
@@ -72,34 +129,14 @@ static void ref_dsp_step(scsp_t *s, const ref_op_t *ops) {
         const ref_op_t *o = &ops[st];
 
         int32_t inputs;
-        if (o->ira <= 0x1F)      inputs = d->mems[o->ira];
-        else if (o->ira <= 0x2F) inputs = d->mixs[o->ira - 0x20] * 16;
-        else if (o->ira <= 0x31) inputs = d->exts[o->ira - 0x30] * 256;
-        else return;
-        inputs = scsp_sext(inputs, 24);
-        if (o->iwt) {
-            d->mems[o->iwa] = memval;
-            if (o->ira == o->iwa) inputs = memval;
-        }
+        if (!ref_dsp_inputs(d, o, memval, &inputs)) return;
 
-        int32_t b = 0;
-        if (!o->zero) {
-            b = o->bsel ? acc : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
-            if (o->negb) b = -b;
-        }
+        int32_t b = ref_dsp_b(d, o, acc);
         int32_t x = o->xsel ? inputs : scsp_sext(d->temp[(o->tra + d->dec) & 0x7F], 24);
-        int32_t y = 0;
-        if (o->ysel == 0)      y = frc;
-        else if (o->ysel == 1) y = d->coef[o->coef] >> 3;
-        else if (o->ysel == 2) y = (yreg >> 11) & 0x1FFF;
-        else                   y = (yreg >> 4) & 0x0FFF;
+        int32_t y = ref_dsp_y(d, o, frc, yreg);
         if (o->yrl) yreg = inputs;
 
-        int32_t shifted;
-        if (o->sh == 0)      shifted = acc < -0x800000 ? -0x800000 : acc > 0x7FFFFF ? 0x7FFFFF : acc;
-        else if (o->sh == 1) { int64_t v2 = (int64_t)acc * 2; shifted = v2 < -0x800000 ? -0x800000 : v2 > 0x7FFFFF ? 0x7FFFFF : (int32_t)v2; }
-        else if (o->sh == 2) shifted = scsp_sext((int32_t)((uint32_t)acc * 2u), 24);
-        else                 shifted = scsp_sext(acc, 24);
+        int32_t shifted = ref_dsp_shift(acc, o->sh);
 
         y = scsp_sext(y, 13);
         acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
@@ -107,18 +144,7 @@ static void ref_dsp_step(scsp_t *s, const ref_op_t *ops) {
         if (o->twt) d->temp[(o->twa + d->dec) & 0x7F] = shifted;
         if (o->frcl) frc = o->sh == 3 ? (shifted & 0x0FFF) : ((shifted >> 11) & 0x1FFF);
 
-        if (o->mrd || o->mwt) {
-            uint32_t addr = d->madrs[o->masa];
-            if (!o->table) addr += d->dec;
-            if (o->adreb)  addr += adrs & 0x0FFF;
-            if (o->nxadr)  addr++;
-            addr &= o->table ? 0xFFFFu : d->rbl - 1;
-            addr += d->rbp << 12;
-            addr <<= 1;
-            /* MAME: the delay memory is only touched on odd steps */
-            if (o->mrd && (st & 1)) memval = o->nofl ? scsp_ram_w(s, addr) << 8 : scsp_dsp_unpack(scsp_ram_w(s, addr));
-            if (o->mwt && (st & 1)) scsp_ram_ww(s, addr, o->nofl ? (uint16_t)(shifted >> 8) : ref_dsp_pack(shifted));
-        }
+        if (o->mrd || o->mwt) ref_dsp_memory(s, o, st, shifted, adrs, &memval);
         if (o->adrl) adrs = o->sh == 3 ? (uint32_t)((shifted >> 12) & 0xFFF) : (uint32_t)(inputs >> 16);
         if (o->ewt) d->efreg[o->ewa] = (int16_t)(d->efreg[o->ewa] + (shifted >> 8));
     }
@@ -245,6 +271,34 @@ static void known_programs(scsp_t *ours, scsp_t *ref, uint8_t *ram_ours, uint8_t
     printf("%d compiled program(s) against the reference over 300 random states each\n", n_known);
 }
 
+/* Whether some step of the program reads an IRA past 0x31 (the program is cut short there). */
+static bool cut_by_bad_ira(const scsp_t *s) {
+    for (int st = 0; st < s->dsp.last_step; st++)
+        if (((s->dsp.mpro[st * 4 + 1] >> 6) & 0x3F) > 0x31) return true;
+    return false;
+}
+
+/* A program change between samples, as the 68000 makes one: a rewritten step
+ * (an MPRO write clears ops_ok), or a longer program found by scsp_dsp_start
+ * without any decode being asked for. Returns 1 if it changed the program. */
+static int mid_run_change(scsp_t *ours, scsp_t *ref, ref_op_t *ref_ops, unsigned seed, int n) {
+    if (n == 24 && (seed & 1)) {
+        int st = (int)(rnd() % 128);
+        random_step(ours->dsp.mpro + st * 4);
+        memcpy(ref->dsp.mpro + st * 4, ours->dsp.mpro + st * 4, 8);
+        ours->dsp.ops_ok = 0;
+        ref_dsp_decode(&ref->dsp, ref_ops);
+        scsp_dsp_start(&ours->dsp);
+        scsp_dsp_start(&ref->dsp);
+        return 1;
+    }
+    if (n == 36 && seed % 5 == 0) {
+        ours->dsp.last_step = ref->dsp.last_step = 1 + (int)(rnd() % 128);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     static scsp_t ours, ref;
     static uint8_t ram_ours[RAM_MAX], ram_ref[RAM_MAX];
@@ -260,29 +314,10 @@ int main(void) {
         memcpy(ram_ref, ram_ours, RAM_MAX);
         ref_dsp_decode(&ref.dsp, ref_ops);
 
-        int first_bad = -1;
-        for (int st = 0; st < ours.dsp.last_step && first_bad < 0; st++)
-            if (((ours.dsp.mpro[st * 4 + 1] >> 6) & 0x3F) > 0x31) first_bad = st;
-        if (first_bad >= 0) cut_short++;
+        if (cut_by_bad_ira(&ours)) cut_short++;
 
         for (int n = 0; n < 48; n++) {
-            /* a program change between samples, as the 68000 makes one: a
-             * rewritten step (an MPRO write clears ops_ok), or a longer program
-             * found by scsp_dsp_start without any decode being asked for */
-            if (n == 24 && (seed & 1)) {
-                int st = (int)(rnd() % 128);
-                random_step(ours.dsp.mpro + st * 4);
-                memcpy(ref.dsp.mpro + st * 4, ours.dsp.mpro + st * 4, 8);
-                ours.dsp.ops_ok = 0;
-                ref_dsp_decode(&ref.dsp, ref_ops);
-                scsp_dsp_start(&ours.dsp);
-                scsp_dsp_start(&ref.dsp);
-                rewritten++;
-            }
-            if (n == 36 && seed % 5 == 0) {
-                ours.dsp.last_step = ref.dsp.last_step = 1 + (int)(rnd() % 128);
-                rewritten++;
-            }
+            rewritten += mid_run_change(&ours, &ref, ref_ops, seed, n);
             feed(&ours, &ref);
             scsp_dsp_step(&ours);
             ref_dsp_step(&ref, ref_ops);

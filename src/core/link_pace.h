@@ -30,7 +30,7 @@
  *     early: at most two extra frames a second, until the backlog is gone.
  *     The master never does (m2comm_backlog is 0 there): its clock is the
  *     link's, and the slave only answers what it takes.
- * The board's own frame is unchanged: 416,667 cycles, 60 Hz; this decides only
+ * The board's own frame is unchanged: 434,600 cycles (irq_timer.h); this decides only
  * when the host runs it. What it ran is the same board, bit for bit.
  *
  * Two ways to use it:

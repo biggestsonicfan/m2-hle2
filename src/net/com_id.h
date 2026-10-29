@@ -116,6 +116,12 @@ static const comid_entry_t g_comid_registry[] = {
     { "VF2",                "VRTFT2", "VRTFT2" },
     { "VIRTUAFIGHTER2",     "VRTFT2", "VRTFT2" },
     { "LASTBRONX",          "LSTBRX", NULL },
+    { "LASTBRNX",           "LSTBRX", NULL },   /* its profiles (Pinboard #1535) */
+    { "LASTBRNXU",          "LSTBRX", NULL },
+    { "LASTBRNXJ",          "LSTBRX", NULL },
+    { "PILOTKIDS",          "PLTKDS", NULL },   /* both builds (Pinboard #1538) */
+    { "PLTKIDS",            "PLTKDS", NULL },
+    { "PLTKIDSA",           "PLTKDS", NULL },
     { "DOA",                "DEDALV", NULL },
     { "DEADORALIVE",        "DEDALV", NULL },
 
@@ -139,6 +145,14 @@ static const comid_entry_t g_comid_registry[] = {
     { "VSTRIKER",           "VRTSTR", NULL },
     { "DYNAMCOP",           "DYNCOP", NULL },
     { "TOPSKATR",           "TOPSKT", NULL },
+
+    /* Data East's shooter on the 2A (Pinboard #1063). */
+    { "AIRWLKRS",           "ARWLKR", NULL },
+    { "AIRWALKERS",         "ARWLKR", NULL },
+
+    /* Sega's linked sled racer on the 2B (Pinboard #1089). */
+    { "POWSLED",            "PWRSLD", NULL },
+    { "POWERSLED",          "PWRSLD", NULL },
 
     /* The homebrew that runs on this board layer. */
     { "M2SNAKE",            "M2SNAK", NULL },

@@ -464,12 +464,19 @@ static inline bool kiosk__syscommand_blocked(WPARAM wp) {
     }
 }
 
-static inline LRESULT CALLBACK kiosk__wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+/* Explorer's TaskbarCreated: put the tray icon back; true when it was that. */
+static inline bool kiosk__taskbar_recreated(UINT msg) {
     if (g_kioskw.taskbar_created && msg == g_kioskw.taskbar_created && g_kiosk.on) {
         g_kioskw.tray_added = false;      /* Explorer restarted; put it back */
         kiosk__tray_add();
-        return 0;
+        return true;
     }
+    return false;
+}
+
+static inline LRESULT CALLBACK kiosk__wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (kiosk__taskbar_recreated(msg))
+        return 0;
     switch (msg) {
         case KIOSK_WM_TRAY:
             kiosk__tray_event(wp, lp);

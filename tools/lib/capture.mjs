@@ -83,6 +83,42 @@ export async function identifyScene(emu, stageCount = 16) {
 
 /* ---- capturing ----------------------------------------------------------- */
 
+/* Poll texram0 every `every` frames until its digest holds for two polls in a
+ * row with the sheet filled, at most `polls` times. A stable non-zero count is
+ * not the same statement: two scenes can fill the same number of bytes. */
+async function settleTexram(emu, { polls, every, scratch, log }) {
+    let lastDigest = null, stable = 0, used = 0, nonzero = 0;
+    for (; used < polls; used++) {
+        if (!(await emu.waitFrames(every, 30000)).reached) break;
+
+        const r = await emu.rpc('dump_memory_file', {
+            addr: '0x' + REGIONS.texram0.base.toString(16),
+            size: REGIONS.texram0.size, path: scratch,
+        });
+        nonzero = r.nonzero;
+        const digest = createHash('sha256').update(fs.readFileSync(scratch)).digest('hex');
+        log(`poll ${used + 1}: texram0 ${(nonzero / REGIONS.texram0.size * 100).toFixed(1)}% ` +
+            `filled, ${digest.slice(0, 12)}`);
+
+        if (digest === lastDigest && nonzero > MIN_NONZERO) { if (++stable >= 2) break; }
+        else stable = 0;
+        lastDigest = digest;
+    }
+    return { stable, nonzero };
+}
+
+/* Every region into `out`/<name>.bin; their sizes and non-zero counts. */
+async function dumpRegions(emu, out, log) {
+    fs.mkdirSync(out, { recursive: true });
+    const regions = {};
+    for (const [name, { base, size }] of Object.entries(REGIONS)) {
+        const d = await emu.dumpRegion(base, size, path.join(out, `${name}.bin`));
+        regions[name] = { bytes: size, nonzero: d.nonzero };
+        log(`${name}.bin  ${size} bytes, ${(d.nonzero / size * 100).toFixed(1)}% non-zero`);
+    }
+    return regions;
+}
+
 /**
  * Run until texture RAM stops changing, then dump the regions.
  *
@@ -107,25 +143,7 @@ export async function captureBoard(emu, {
             reached = await reachRound(emu, stage, { log });
         }
 
-        /* Settle on the sheet's digest. A stable non-zero count is not the same
-         * statement: two scenes can fill the same number of bytes. */
-        let lastDigest = null, stable = 0, used = 0, nonzero = 0;
-        for (; used < polls; used++) {
-            if (!(await emu.waitFrames(every, 30000)).reached) break;
-
-            const r = await emu.rpc('dump_memory_file', {
-                addr: '0x' + REGIONS.texram0.base.toString(16),
-                size: REGIONS.texram0.size, path: scratch,
-            });
-            nonzero = r.nonzero;
-            const digest = createHash('sha256').update(fs.readFileSync(scratch)).digest('hex');
-            log(`poll ${used + 1}: texram0 ${(nonzero / REGIONS.texram0.size * 100).toFixed(1)}% ` +
-                `filled, ${digest.slice(0, 12)}`);
-
-            if (digest === lastDigest && nonzero > MIN_NONZERO) { if (++stable >= 2) break; }
-            else stable = 0;
-            lastDigest = digest;
-        }
+        const { stable, nonzero } = await settleTexram(emu, { polls, every, scratch, log });
 
         if (nonzero <= MIN_NONZERO) {
             throw new Error('texture RAM never filled — the game did not reach a scene.');
@@ -134,13 +152,7 @@ export async function captureBoard(emu, {
         const scene = await identifyScene(emu);
         const stageNum = (await emu.readMemory(STAGE_NUM, 1))[0];
 
-        fs.mkdirSync(out, { recursive: true });
-        const regions = {};
-        for (const [name, { base, size }] of Object.entries(REGIONS)) {
-            const d = await emu.dumpRegion(base, size, path.join(out, `${name}.bin`));
-            regions[name] = { bytes: size, nonzero: d.nonzero };
-            log(`${name}.bin  ${size} bytes, ${(d.nonzero / size * 100).toFixed(1)}% non-zero`);
-        }
+        const regions = await dumpRegions(emu, out, log);
 
         const final = await emu.status();
         const manifest = {

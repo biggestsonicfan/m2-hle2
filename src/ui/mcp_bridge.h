@@ -38,6 +38,7 @@
 #include "rom_loader.h"   /* romset_t — the regions the model decoder reads */
 #include "input.h"     /* g_input.held — drive the game's I/O ports over the bridge */
 #include "objview_cmd.h"  /* the object viewer's commands, shared with the web build */
+#include "game_shot.h"    /* screenshot: the game's picture, from the render thread */
 #include "av_stream.h"    /* the --av-port server, for the "av" block of get_status */
 #include "overlay_host.h" /* ...and the "overlay" block: is the plugin actually running */
 #include "frame_times.h"  /* ...and "render": where the host's frame time goes */
@@ -47,7 +48,10 @@
  * to precede it. main.c already includes this first, so here it is a no-op --
  * it is stated so the dependency is visible from the file that has it. */
 #include "net/netplay.h"   /* the lobby, over the bridge — see the netplay section */
+#include "ffb.h"          /* get_status reports the drive board ("drive") */
+#include "cabinet_picture.h" /* set_camera's cabinet: another cabinet's colours */
 #include "m2_texload.h"   /* get_status reports the texture loader in C */
+#include "link_check.h"   /* a MASTER alone on the link (#1449): link_check */
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -142,9 +146,29 @@ static void (*g_mcp_script_cmd)(const char *cmd, const char *req, char *resp, in
  * ones dropped past its cap, and the SLAVE's early ones. */
 static void mcp_link_pace_json(const emu_thread_ctx_t *emu, char *out, int cap) {
     if (!emu) { snprintf(out, (size_t)cap, "null"); return; }
-    snprintf(out, (size_t)cap, "{\"linked\":%s,\"frames\":%llu,\"dropped\":%llu,\"trims\":%u}",
+    snprintf(out, (size_t)cap,
+             "{\"linked\":%s,\"frames\":%llu,\"dropped\":%llu,\"trims\":%u,"
+             "\"lone_masters\":%u,\"cable\":%s}",
              m2comm_linked() ? "true" : "false", (unsigned long long)emu->link_pace.frames,
-             (unsigned long long)emu->link_pace.dropped, emu->link_pace.trims);
+             (unsigned long long)emu->link_pace.dropped, emu->link_pace.trims,
+             (unsigned)m2comm_lone_masters(), m2comm_cable() ? "true" : "false");
+}
+
+/* get_status's game fields: the frame count, whether the ROM set is in, the
+ * attract's match replay, the idle hold, the texture loader and the CPU rank. */
+static void mcp_status_game_json(const mcp_bridge_t *b, char *out, int cap) {
+    snprintf(out, (size_t)cap,
+             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
+             "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
+             "\"texload\":{\"hle\":%s,\"rows\":%llu},"
+             "\"enemy_rank\":%d",
+             g_emu_frames,
+             (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
+             g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
+             g_match_replay_frame,
+             g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
+             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
+             (int)g_enemy_rank);
 }
 
 static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
@@ -199,26 +223,31 @@ static void mcp_cmd_get_status(char *resp, int cap, bool restart_max) {
     emu_times_json(et, (int)sizeof et, restart_max);
     char lp[160];
     mcp_link_pace_json(b->emu, lp, (int)sizeof lp);
+    char game[384];
+    mcp_status_game_json(b, game, (int)sizeof game);
+    /* The drive board's force, as the hosts play it (ffb.h). */
+    ffb_out_t fo = ffb_poll();
+    char dv[160];
+    snprintf(dv, sizeof dv,
+             "{\"cmd\":%u,\"kind\":%u,\"level\":%u,\"dir\":%d,\"strong\":%u,\"weak\":%u,\"push\":%d}",
+             fo.effect.cmd, fo.effect.kind, fo.effect.level, fo.effect.dir, fo.strong, fo.weak, fo.push);
+    /* A racing game's meters, as a Fanatec wheel shows them (game_dash_t, fanatec.h). */
+    game_dash_t dash = { .speed = -1, .gear = -1 };
+    if (g_active_profile && g_active_profile->dash) g_active_profile->dash(b->bus, &dash);
+    char da[128];
+    snprintf(da, sizeof da, "{\"on\":%s,\"speed\":%d,\"gear\":%d,\"rpm\":%d}",
+             dash.on ? "true" : "false", dash.speed, dash.gear, dash.rpm);
 
     snprintf(resp, (size_t)cap,
              "{\"ok\":true,\"running\":%s,\"halted\":%s,"
              "\"ip\":\"0x%08X\",\"steps_per_second\":%u,\"steps\":%llu,\"profile\":\"%s\","
-             "\"frames\":%u,\"rom_loaded\":%s,\"match_replay\":\"%s\",\"match_replay_frame\":%u,"
-             "\"idle_hold\":{\"on\":%s,\"holding\":%s},"
-             "\"texload\":{\"hle\":%s,\"rows\":%llu},"
-             "\"enemy_rank\":%d,"
-             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"link_pace\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
+             "%s,"
+             "\"av\":%s,\"overlay\":%s,\"render\":%s,\"emu\":%s,\"link_pace\":%s,\"drive\":%s,\"dash\":%s,\"version\":\"%s\",\"build\":\"%s\"}",
              running ? "true" : "false",
              halted  ? "true" : "false",
              ip, sps, (unsigned long long)steps, profile_id,
-             g_emu_frames,
-             (g_mcp.romset && g_mcp.romset->loaded && !g_mcp.installing) ? "true" : "false",
-             g_match_replay == 1 ? "armed" : g_match_replay == 2 ? "done" : g_match_replay < 0 ? "unsupported" : "off",
-             g_match_replay_frame,
-             g_idle_hold ? "true" : "false", b->emu && b->emu->idle_holding ? "true" : "false",
-             g_texload_hle ? "true" : "false", (unsigned long long)g_texload_rows,
-             (int)g_enemy_rank,
-             av, ov, rt, et, lp, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
+             game,
+             av, ov, rt, et, lp, dv, da, M2HLE_VERSION, M2HLE_BUILD_FLAVOR);
 }
 
 /* {"cmd":"prof","on":1} arms the i960 address profiler (clearing it),
@@ -272,12 +301,36 @@ static void mcp_cmd_match_replay(char *resp, int cap) {
 
 /* Drive game input: set the active-high held mask (0x500700 layout, same bits the
  * profile's input.bits use). The I/O read callback serves these to the game's
- * read_sw. e.g. {"cmd":"set_input","held":"0x1000"} holds P1 DOWN. */
+ * read_sw. e.g. {"cmd":"set_input","held":"0x1000"} holds P1 DOWN. "far" sets
+ * players 3 and 4 on a four-player cabinet the same way (g_input.far_held:
+ * player 3 on player 1's bits, player 4 on player 2's); left out, they stay. */
 static void mcp_cmd_set_input(const char *req, char *resp, int cap) {
-    uint32_t held = 0;
+    uint32_t held = 0, far_bits = 0;
     mcp_json_get_u32(req, "held", &held);
     g_input.held = held;
-    snprintf(resp, (size_t)cap, "{\"ok\":true,\"held\":\"0x%08X\"}", held);
+    if (mcp_json_get_u32(req, "far", &far_bits)) g_input.far_held = far_bits;
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"held\":\"0x%08X\",\"far\":\"0x%08X\"}", held, (uint32_t)g_input.far_held);
+}
+
+/* Point a light gun as a host's mouse would (lightgun.h): {"cmd":"set_gun",
+ * "player":0,"x":0.5,"y":0.5} aims P1 at the picture's centre (0..1 across
+ * and down), "offscreen":1 points it off the picture, "on":0 hands the gun
+ * back to the pad. Replies with where the board's gun points. */
+static void mcp_cmd_set_gun(const char *req, char *resp, int cap) {
+    int player = 0, on = 1, off = 0;
+    float x = 0.5f, y = 0.5f;
+    json_get_int(req, "player", &player);
+    json_get_int(req, "on", &on);
+    json_get_int(req, "offscreen", &off);
+    json_get_f32(req, "x", &x);
+    json_get_f32(req, "y", &y);
+    if (player < 0 || player >= LIGHTGUN_PLAYERS) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"player is 0 or 1\"}");
+        return;
+    }
+    lightgun_point(player, on != 0, off != 0, x, y);
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"player\":%d,\"ad_x\":%d,\"ad_y\":%d}",
+             player, (int)g_lightgun.x[player], (int)g_lightgun.y[player]);
 }
 
 /* set_camera's view fields: where the debug camera stands and looks, and the
@@ -309,16 +362,20 @@ static void mcp_set_camera_depth(const char *req) {
      * the board's flat key (geo3d_flat_depth); the layers are the object viewer's. */
     if (mcp_json_get_str(req,"zflat",   v,sizeof v)) g_geo3d_zflat = (atoi(v) != 0);
     if (mcp_json_get_str(req,"pixdepth",v,sizeof v)) g_geo3d_pixel_depth = (atoi(v) != 0);
+    /* The Picture menu's cabinet (cabinet_picture.h): "twin", "deluxe", "" the board's own. */
+    if (mcp_json_get_str(req,"cabinet", v,sizeof v)) cabinet_picture_choose(v);
     /* 0: polygons the board gives sort key 0 keep their own depth (geo3d.h GEO3D_ZSORT_KEY0). */
     if (mcp_json_get_str(req,"zkey0",   v,sizeof v)) g_geo3d_zsort_key0 = (atoi(v) != 0);
 }
 
-/* set_camera's fill fields: texture wrap, checker phase and corner normals. */
+/* set_camera's fill fields: texture wrap, checker phase, microtextures and corner normals. */
 static void mcp_set_camera_fill(const char *req) {
     char v[32];
     /* 0: the texture filter wraps at every tile edge, ignoring the faces' wrap bits. */
     if (mcp_json_get_str(req,"texclamp",v,sizeof v)) g_geo3d_tex_clamp = (atoi(v) != 0);
     if (mcp_json_get_str(req,"checker",v,sizeof v)) g_geo3d_checker_phase = (atoi(v) != 0);
+    /* 0: no face blends its microtexture square (GEO3D_FACE_MICRO). */
+    if (mcp_json_get_str(req,"microtex",v,sizeof v)) g_geo3d_microtex = (atoi(v) != 0);
     /* 0: a list in mode 2 or 3 is lit and culled with the ROM normals (geo3d_board_normal). */
     if (mcp_json_get_str(req,"nnormals",v,sizeof v)) g_geo3d_nn_normals = (atoi(v) != 0);
 }
@@ -1074,16 +1131,10 @@ static void mcp_cmd_reset_sound(const char *req, char *resp, int cap) {
              restart ? "true" : "false", n, g_sound.m68k.cpu.pc, sc->mi_drops, sc->mi_hi);
 }
 
-static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
-    char *p = resp; int left = cap, n;
-    int fe = g_cop.geo_frame_end, fs = g_cop.geo_frame_start;
-    int total = fe - fs;
-    if (total <= 0 || total > GEO_CAPTURE_SIZE) {
-        total = g_cop.geo_capture_count;
-        if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
-        fe = g_cop.geo_capture_head;
-    }
-    int head = fe;
+/* dump_geo_stream's reply after its first line: the captured commands, each
+ * with its arguments, from p on, left bytes free. */
+static inline void mcp_geo_stream_cmds(char *p, int left, int total, int head) {
+    int n;
 #define DAPPEND(...) do { n = snprintf(p, (size_t)left, __VA_ARGS__); p += n; left -= n; } while(0)
     DAPPEND("{\"ok\":true,\"total\":%d,\"cmds\":[", total);
     int first = 1;
@@ -1104,6 +1155,19 @@ static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
     }
     DAPPEND("]}");
 #undef DAPPEND
+}
+
+static void mcp_cmd_dump_geo_stream(char *resp, int cap) {
+    char *p = resp; int left = cap;
+    int fe = g_cop.geo_frame_end, fs = g_cop.geo_frame_start;
+    int total = fe - fs;
+    if (total <= 0 || total > GEO_CAPTURE_SIZE) {
+        total = g_cop.geo_capture_count;
+        if (total > GEO_CAPTURE_SIZE) total = GEO_CAPTURE_SIZE;
+        fe = g_cop.geo_capture_head;
+    }
+    int head = fe;
+    mcp_geo_stream_cmds(p, left, total, head);
 }
 
 static void mcp_cmd_dump_midi_log(char *resp, int cap) {
@@ -1316,6 +1380,24 @@ static void mcp_cmd_clear_all_breakpoints(char *resp, int cap) {
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"removed\":%d}", removed);
 }
 
+/* The reply: why the board stopped, where, and what a watchpoint saw. */
+static void mcp_wait_stop_reply(char *resp, int cap, int running, int halted, uint32_t ip, uint32_t elapsed) {
+    const char *reason = running                  ? "timeout"
+                       : halted                   ? "halted"
+                       : g_wp.hit                 ? "watchpoint"
+                       : g_bp.hit_addr            ? "breakpoint"
+                       : g_sharc.unknown_trigger_cmd ? "cop_unknown"
+                       : "stopped";
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"stopped\":%s,\"reason\":\"%s\","
+             "\"ip\":\"0x%08X\",\"elapsed_ms\":%u,"
+             "\"cop_cmd\":\"0x%08X\",\"cop_ip\":\"0x%08X\","
+             "\"wp_addr\":\"0x%08X\",\"wp_val\":\"0x%08X\",\"wp_ip\":\"0x%08X\",\"wp_write\":%s}",
+             running ? "false" : "true", reason, ip, elapsed,
+             g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip,
+             g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip, g_wp.hit_write ? "true" : "false");
+}
+
 /*
  * Block until the emulator stops running (breakpoint, halt, or manual stop),
  * or until timeout_ms elapses.  Returns the stop reason and final IP.
@@ -1344,20 +1426,7 @@ static void mcp_cmd_wait_for_stop(const char *req, char *resp, int cap) {
         ip = g_mcp.emu->cpu_snapshot.sfr.ip;
         emu_mutex_unlock(&g_mcp.emu->mutex);
     }
-    const char *reason = running                  ? "timeout"
-                       : halted                   ? "halted"
-                       : g_wp.hit                 ? "watchpoint"
-                       : g_bp.hit_addr            ? "breakpoint"
-                       : g_sharc.unknown_trigger_cmd ? "cop_unknown"
-                       : "stopped";
-    snprintf(resp, (size_t)cap,
-             "{\"ok\":true,\"stopped\":%s,\"reason\":\"%s\","
-             "\"ip\":\"0x%08X\",\"elapsed_ms\":%u,"
-             "\"cop_cmd\":\"0x%08X\",\"cop_ip\":\"0x%08X\","
-             "\"wp_addr\":\"0x%08X\",\"wp_val\":\"0x%08X\",\"wp_ip\":\"0x%08X\",\"wp_write\":%s}",
-             running ? "false" : "true", reason, ip, elapsed,
-             g_sharc.unknown_trigger_cmd, g_sharc.unknown_trigger_ip,
-             g_wp.hit_addr, g_wp.hit_val, g_wp.hit_ip, g_wp.hit_write ? "true" : "false");
+    mcp_wait_stop_reply(resp, cap, running, halted, ip, elapsed);
 }
 
 /* ---- Command dispatch ---------------------------------------------------- */
@@ -1423,6 +1492,24 @@ static void mcp_cmd_dump_geo_list(const char *req, char *resp, int cap) {
              ok ? "true" : "false", head[0], head[1], (int16_t)sync[0], (int16_t)sync[1]);
 }
 
+/* Copies size bytes of the bus at addr into buf and counts the ones that
+ * are not zero. */
+static uint32_t mcp_dump_snapshot(uint32_t addr, uint32_t size, uint8_t *buf) {
+    /* One consistent snapshot: the i960 must not write half of texture RAM
+     * between the first byte and the last. Copy under the emu mutex, write the
+     * file outside it — disk I/O inside the critical section stalls the UI. */
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    uint32_t nonzero = 0;
+    for (uint32_t i = 0; i < size; i++) {
+        uint8_t b = mem_read8(g_mcp.bus, addr + i);
+        buf[i] = b;
+        if (b) nonzero++;
+    }
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    return nonzero;
+}
+
 static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
     uint32_t addr = 0, size = 0;
     char path[512] = {0};
@@ -1440,18 +1527,7 @@ static void mcp_cmd_dump_memory_file(const char *req, char *resp, int cap) {
     uint8_t *buf = (uint8_t *)malloc(size ? size : 1);
     if (!buf) { snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"out of memory\"}"); return; }
 
-    /* One consistent snapshot: the i960 must not write half of texture RAM
-     * between the first byte and the last. Copy under the emu mutex, write the
-     * file outside it — disk I/O inside the critical section stalls the UI. */
-    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
-    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
-    uint32_t nonzero = 0;
-    for (uint32_t i = 0; i < size; i++) {
-        uint8_t b = mem_read8(g_mcp.bus, addr + i);
-        buf[i] = b;
-        if (b) nonzero++;
-    }
-    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    uint32_t nonzero = mcp_dump_snapshot(addr, size, buf);
 
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -1574,6 +1650,31 @@ static void mcp_cmd_run_frames(const char *req, char *resp, int cap) {
              reason, (unsigned)((emu_now_us() - t0) / 1000));
 }
 
+/* The quirks of the game whose model table dump_model reads, or NULL with the
+ * error in resp: no ROM yet, no profile, or first past the end of the table. */
+static const game_quirks_t *mcp_dump_model_quirks(uint32_t first, char *resp, int cap) {
+    /* `loaded` and not merely allocated. The regions are calloc'd before they
+     * are filled, and a profile resolves in between — decoding out of the gap
+     * reads zero mesh pointers and reports every model empty, which looks like
+     * a decoder that agrees about nothing rather than like a race. */
+    if (!g_mcp.romset || !g_mcp.romset->loaded ||
+        !g_mcp.romset->main_data || !g_mcp.romset->polygons) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"no ROM loaded yet\"}"); return NULL;
+    }
+    if (!g_active_profile) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}"); return NULL;
+    }
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (first >= q->model_table_count) {
+        snprintf(resp, (size_t)cap,
+                 "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
+                 first, q->model_table_count);
+        return NULL;
+    }
+    return q;
+}
+
 /* Decode model-table entries and write the triangles out as a file.
  *
  * This is the emulator's own index-array polygon decoder — the one in geo3d.h,
@@ -1604,25 +1705,8 @@ static void mcp_cmd_dump_model(const char *req, char *resp, int cap) {
     if (!mcp_json_get_str(req, "path", path, sizeof(path))) {
         snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"missing path\"}"); return;
     }
-    /* `loaded` and not merely allocated. The regions are calloc'd before they
-     * are filled, and a profile resolves in between — decoding out of the gap
-     * reads zero mesh pointers and reports every model empty, which looks like
-     * a decoder that agrees about nothing rather than like a race. */
-    if (!g_mcp.romset || !g_mcp.romset->loaded ||
-        !g_mcp.romset->main_data || !g_mcp.romset->polygons) {
-        snprintf(resp, (size_t)cap,
-                 "{\"ok\":false,\"error\":\"no ROM loaded yet\"}"); return;
-    }
-    if (!g_active_profile) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}"); return;
-    }
-    const game_quirks_t *q = &g_active_profile->quirks;
-    if (first >= q->model_table_count) {
-        snprintf(resp, (size_t)cap,
-                 "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
-                 first, q->model_table_count);
-        return;
-    }
+    const game_quirks_t *q = mcp_dump_model_quirks(first, resp, cap);
+    if (!q) return;
     if (count > q->model_table_count - first) count = q->model_table_count - first;
 
     FILE *f = fopen(path, "wb");
@@ -1934,6 +2018,22 @@ static bool mcp_dl_write_index(const mcp_dl_req_t *q, size_t n, size_t nmarks, i
     return true;
 }
 
+/* The side files asked for, each only if every one before it was written. */
+static bool mcp_dl_write_extras(const mcp_dl_req_t *q, size_t nmarks) {
+    if (q->slots && !mcp_dl_dump(q->path, ".slots.bin", q->slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks))
+        return false;
+    if (q->unit && !mcp_dl_dump(q->path, ".unit.bin", q->unit, sizeof(float) * MCP_DL_UNIT_PER_MARK, nmarks))
+        return false;
+    if (q->blocks && !mcp_dl_dump(q->path, ".blocks.bin", q->blocks, q->bbytes, nmarks))
+        return false;
+    if (q->cop_bufram) {
+        bool b = mcp_dl_dump(q->path, ".bufram.bin", q->cop_bufram, 1, BUFF_RAM_SIZE);
+        bool d = mcp_dl_dump(q->path, ".dm.bin", q->cop_dm, sizeof(uint32_t), 0x1000);
+        if (!b || !d) return false;
+    }
+    return true;
+}
+
 /* The capture's files, each only if every one before it was written:
  * <path>.bin (address, value pairs), <path>.json, and those asked for --
  * <path>.slots.bin: DL_SLOT_WORDS bufferram words per mark (a MAME capture's
@@ -1951,18 +2051,7 @@ static bool mcp_dl_write(const mcp_dl_req_t *q, size_t n, size_t nmarks, int ove
     }
     fclose(f);
     if (!ok || !mcp_dl_write_index(q, n, nmarks, overflow)) return false;
-    if (q->slots && !mcp_dl_dump(q->path, ".slots.bin", q->slots, sizeof(uint32_t) * DL_SLOT_WORDS, nmarks))
-        return false;
-    if (q->unit && !mcp_dl_dump(q->path, ".unit.bin", q->unit, sizeof(float) * MCP_DL_UNIT_PER_MARK, nmarks))
-        return false;
-    if (q->blocks && !mcp_dl_dump(q->path, ".blocks.bin", q->blocks, q->bbytes, nmarks))
-        return false;
-    if (q->cop_bufram) {
-        bool b = mcp_dl_dump(q->path, ".bufram.bin", q->cop_bufram, 1, BUFF_RAM_SIZE);
-        bool d = mcp_dl_dump(q->path, ".dm.bin", q->cop_dm, sizeof(uint32_t), 0x1000);
-        if (!b || !d) return false;
-    }
-    return true;
+    return mcp_dl_write_extras(q, nmarks);
 }
 
 static void mcp_cmd_capture_dl(const char *req, char *resp, int cap) {
@@ -2539,10 +2628,10 @@ static void mcp_cmd_ggpo_lobby(const char *req, char *resp, int cap) {
     if (len && resp[len - 1] == '}')
         snprintf(resp + len - 1, (size_t)cap - (len - 1),
                  ",\"vs_mode\":%s,\"results\":%u,\"winner\":%d,"
-                 "\"session\":{\"on\":%s,\"running\":%s,\"frames\":%u}}",
+                 "\"session\":{\"on\":%s,\"running\":%s,\"frames\":%u},\"solo\":%s}",
                  g_vs_mode ? "true" : "false", (unsigned)n, winner,
-                 g_ggpo.on ? "true" : "false", g_ggpo.on && g_ggpo.running ? "true" : "false",
-                 g_ggpo.on ? (unsigned)g_ggpo.frames : 0u);
+                 emu_ggpo_active() ? "true" : "false", emu_ggpo_active() && g_ggpo.running ? "true" : "false",
+                 emu_ggpo_active() ? (unsigned)g_ggpo.frames : 0u, emu_ggpo_solo() ? "true" : "false");
 #else
     (void)req;
     snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"this build has no GGPO\"}");
@@ -2623,6 +2712,38 @@ static void mcp_cmd_state(const char *req, char *resp, int cap, int load) {
         return;
     }
     snprintf(resp, (size_t)cap, "{\"ok\":true,\"frame\":%u}", (unsigned)g_emu_frames);
+}
+
+/*
+ * {"cmd":"link_check","answer":"cable"} -- the question a MASTER with nobody
+ * on the link gets (core/link_check.h, #1449), answered for a script:
+ * "test" (back to the test menu: Test held 20 frames), "continue", "cable"
+ * (the virtual TOSlink cable in, even for a game the question does not offer
+ * it to: "cable_offered"). No "answer" only reads: "due" is whether the
+ * windowed build would be asking now, "lone_masters" the starts counted.
+ */
+static void mcp_cmd_link_check(const char *req, char *resp, int cap) {
+    char a[16];
+    if (mcp_json_get_str(req, "answer", a, sizeof a)) {
+        link_answer_t ans;
+        if      (strcmp(a, "test")     == 0) ans = LINK_ANSWER_TEST_MENU;
+        else if (strcmp(a, "continue") == 0) ans = LINK_ANSWER_CONTINUE;
+        else if (strcmp(a, "cable")    == 0) ans = LINK_ANSWER_CABLE;
+        else {
+            snprintf(resp, (size_t)cap,
+                     "{\"ok\":false,\"error\":\"answer is test, continue or cable\"}");
+            return;
+        }
+        int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+        if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+        link_check_answer(ans, g_emu_frames);
+        if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+    }
+    snprintf(resp, (size_t)cap,
+             "{\"ok\":true,\"due\":%s,\"lone_masters\":%u,\"cable\":%s,\"cable_offered\":%s}",
+             link_check_due() ? "true" : "false", (unsigned)m2comm_lone_masters(),
+             m2comm_cable() ? "true" : "false",
+             link_check_has_cable(g_active_profile) ? "true" : "false");
 }
 
 /*
@@ -2720,6 +2841,49 @@ static void mcp_cmd_objview_set(const char *req, char *resp, int cap) {
      * settle and then fail. Report what the renderer found, not that it looked. */
     objview_cmd_reply(g_mcp.romset, g_mcp.bus, resp, cap,
                       g_objview.last_ok, g_objview.last_err);
+}
+
+/* {"cmd":"screenshot","path":"...","width":W,"height":H,"timeout_ms":N}: the
+ * game's picture as a PNG (game_shot.h), the board's 496x384 unless W x H say
+ * otherwise; no ImGui, no picture filter. Works with the board stopped: the
+ * last frame is drawn again. Blocks until the render thread has written it. */
+static void mcp_cmd_screenshot(const char *req, char *resp, int cap) {
+    char path[GAME_SHOT_PATH_MAX] = {0}, err[192] = {0};
+    uint32_t w = 0, h = 0, timeout_ms = 10000;
+    mcp_json_get_str(req, "path", path, sizeof path);
+    mcp_json_get_u32(req, "width", &w);
+    mcp_json_get_u32(req, "height", &h);
+    mcp_json_get_u32(req, "timeout_ms", &timeout_ms);
+    if (timeout_ms > 120000) timeout_ms = 120000;
+    if (!game_shot_renderer()) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no renderer: --headless draws nothing "
+                 "without --av-port; run with a window (an Xvfb will do)\"}");
+        return;
+    }
+    char esc[2 * GAME_SHOT_PATH_MAX];
+    if (!game_shot_arm(path, (int)w, (int)h, err, sizeof err)) {
+        mcp_json_escape(esc, (int)sizeof esc, err);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"%s\"}", esc);
+        return;
+    }
+    game_shot_req_t *rq = &g_game_shot.req;
+    uint32_t elapsed = 0;
+    while (!rq->done && elapsed < timeout_ms) { emu_sleep_ms(2); elapsed += 2; }
+    if (!rq->done) {
+        rq->pending = 0;
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"the render thread did not take the shot "
+                 "in %u ms (a minimised window gets no frames)\"}", timeout_ms);
+        return;
+    }
+    if (!rq->ok) {
+        mcp_json_escape(esc, (int)sizeof esc, rq->err);
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"%s\"}", esc);
+        return;
+    }
+    mcp_json_escape(esc, (int)sizeof esc, rq->path);
+    snprintf(resp, (size_t)cap, "{\"ok\":true,\"path\":\"%s\",\"width\":%d,\"height\":%d,"
+             "\"frame\":%u,\"bytes\":%zu,\"elapsed_ms\":%u}",
+             esc, rq->w, rq->h, rq->frame, rq->bytes, elapsed);
 }
 
 static void mcp_cmd_objview_shot(const char *req, char *resp, int cap) {
@@ -2884,6 +3048,139 @@ static void mcp_cmd_replay(const char *req, char *resp, int cap) {
     if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
 }
 
+/* "tas": tool-assisted play (core/tas.h), for scripted tests of the movie.
+ *   {"start":1}  a movie from here ({"power_on":1}: from a reset)
+ *   {"stop":1}, {"resume":1} (the kept movie again, from its start)
+ *   {"seek":F}, {"rewind":K}, {"undo_rewind":1}, {"advance":N} (N frames on)
+ *   {"recording":0|1}, {"keys_too":0|1}, {"cut":0|1}, {"pad":HELD}, {"once":BITS}
+ *   {"aim":"P,X,Y[,OFF]"}  the pad aims gun P at X,Y (0..1); {"aim":"P"} lets it go
+ *   {"gun_border":T}  the guns' off-screen border, tenths of a % (50, MAME's, to 0)
+
+ *   {"edit":F,"xor":BITS}, {"insert":F}, {"delete":F}, {"undo":1}, {"redo":1}
+ *   {"branch_save":I}, {"branch_load":I}, {"save":PATH}, {"load":PATH}
+ *   {"from":F,"count":N}  the frames' held words and checks in the answer */
+/* The keys that start, stop, save or load a movie, the first one there
+ * answering for the request: true when one was. */
+static bool mcp_tas_session(emu_thread_ctx_t *ctx, const char *req, const char **err) {
+    uint32_t v = 0;
+    char path[512];
+    if (mcp_json_get_u32(req, "power_on", &v) && v) {
+        *err = tas__busy();
+        if (!*err) { g_tas.start_req = true; ctx->request_reset = 1; }
+    }
+    else if (mcp_json_get_u32(req, "start", &v) && v)        *err = tas_start(ctx);
+    else if (mcp_json_get_u32(req, "stop", &v) && v)         { tas_stop("asked for"); *err = NULL; }
+    else if (mcp_json_get_u32(req, "resume", &v) && v)       *err = tas_resume(ctx);
+    else if (mcp_json_get_str(req, "save", path, sizeof path)) *err = tas_save_file(path);
+    else if (mcp_json_get_str(req, "load", path, sizeof path)) *err = tas_load_file(ctx, path, true);
+    else return false;
+    return true;
+}
+
+/* The pad and the movie's switches, which hold with or without a movie. */
+static const char *mcp_tas_settings(const char *req) {
+    uint32_t v = 0;
+    char path[512];
+    if (mcp_json_get_u32(req, "recording", &v))         g_tas.recording = v != 0;
+    if (mcp_json_get_u32(req, "keys_too", &v))          g_tas.keys_too = v != 0;
+    if (mcp_json_get_u32(req, "cut", &v))               g_tas.cut = v != 0;
+    if (mcp_json_get_u32(req, "pad", &v))               g_tas.pad.hold = v;
+    if (mcp_json_get_u32(req, "once", &v))              g_tas.pad.once = v;
+    if (mcp_json_get_u32(req, "gun_border", &v))        /* tenths of a %, lightgun.h */
+        g_lightgun_border = v > LIGHTGUN_BORDER_DEF ? LIGHTGUN_BORDER_DEF : (int)v;
+
+    if (mcp_json_get_str(req, "aim", path, sizeof path)) {
+        int p = -1, off = 0;
+        float x = 0.5f, y = 0.5f;
+        int got = sscanf(path, "%d,%f,%f,%d", &p, &x, &y, &off);
+        if (p < 0 || p >= LIGHTGUN_PLAYERS) return "aim: no such gun";
+        g_tas.pad.aim_on[p] = got >= 3;
+        g_tas.pad.aim_x[p] = x; g_tas.pad.aim_y[p] = y;
+        g_tas.pad.aim_off[p] = got >= 4 && off;
+    }
+    return NULL;
+}
+
+/* The movie's seeks: only with a movie on. */
+static const char *mcp_tas_seeks(const char *req) {
+    uint32_t v = 0;
+    if (mcp_json_get_u32(req, "seek", &v))              { g_tas.rewinding = false; tas_seek(v, false); }
+    if (mcp_json_get_u32(req, "rewind", &v))            tas_rewind(v, false);
+    if (mcp_json_get_u32(req, "undo_rewind", &v) && v && !tas_undo_rewind(false)) return "nothing to undo";
+    return NULL;
+}
+
+/* The movie's edits: only with a movie on. */
+static const char *mcp_tas_edits(const char *req) {
+    uint32_t v = 0, w = 0;
+    if (mcp_json_get_u32(req, "edit", &v) && mcp_json_get_u32(req, "xor", &w)) tas_edit_held(v, w);
+    if (mcp_json_get_u32(req, "insert", &v))            tas_insert(v, 1);
+    if (mcp_json_get_u32(req, "delete", &v))            tas_delete(v, 1);
+    if (mcp_json_get_u32(req, "undo", &v) && v && !tas_undo(false)) return "nothing to undo";
+    if (mcp_json_get_u32(req, "redo", &v) && v && !tas_undo(true))  return "nothing to redo";
+    return NULL;
+}
+
+/* With a movie on: its seeks, its edits, its branches, then advance. */
+static const char *mcp_tas_movie(emu_thread_ctx_t *ctx, const char *req) {
+    uint32_t v = 0;
+    const char *err = mcp_tas_seeks(req);
+    if (!err) err = mcp_tas_edits(req);
+    if (err) return err;
+    if (mcp_json_get_u32(req, "branch_save", &v))       tas_branch_save((int)v);
+    if (mcp_json_get_u32(req, "branch_load", &v))       tas_branch_load((int)v);
+    if (mcp_json_get_u32(req, "advance", &v) && v)      emu_run_frames(ctx, v);
+    return NULL;
+}
+
+static const char *mcp_tas_do(const char *req) {
+    emu_thread_ctx_t *ctx = g_mcp.emu;
+    const char *err = NULL;
+    if (!ctx) return "no board";
+    if (mcp_tas_session(ctx, req, &err)) return err;
+    if ((err = mcp_tas_settings(req)) != NULL) return err;
+    return g_tas.on ? mcp_tas_movie(ctx, req) : NULL;
+}
+
+/* {"from":F,"count":N}: the frames' held words and checks, after resp[k]. */
+static int mcp_tas_frames(const char *req, char *resp, int k, int cap) {
+    uint32_t from = 0, count = 0;
+    if (!mcp_json_get_u32(req, "from", &from) || !mcp_json_get_u32(req, "count", &count)) return k;
+    k += snprintf(resp + k, (size_t)(cap - k), ",\"held\":[");
+    for (uint32_t f = from; f < from + count && f < g_tas.mv.n && k < cap - 64; f++)
+        k += snprintf(resp + k, (size_t)(cap - k), "%s%u", f > from ? "," : "", g_tas.mv.in[f].held);
+    k += snprintf(resp + k, (size_t)(cap - k), "],\"check\":[");
+    for (uint32_t f = from; f < from + count && f < g_tas.mv.n && k < cap - 64; f++)
+        k += snprintf(resp + k, (size_t)(cap - k), "%s%u", f > from ? "," : "", g_tas.mv.check[f]);
+    k += snprintf(resp + k, (size_t)(cap - k), "]");
+    return k;
+}
+
+/* The request done, and the movie's state in resp. */
+static void mcp_tas_answer(const char *req, char *resp, int cap) {
+    const char *err = mcp_tas_do(req);
+    char msg[260];
+    json_escape(msg, sizeof msg, g_tas.msg);
+    int k = snprintf(resp, (size_t)cap,
+             "{\"ok\":%s%s%s%s,\"on\":%d,\"frame\":%u,\"frames\":%u,\"seeking\":%d,\"pending\":%d,"
+             "\"mid\":%d,\"recording\":%d,\"rerecords\":%u,\"greenzone\":%u,\"desync\":%lld,"
+             "\"undo\":%d,\"running\":%d,\"msg\":\"%s\"",
+             err ? "false" : "true", err ? ",\"error\":\"" : "", err ? err : "", err ? "\"" : "",
+             g_tas.on ? 1 : 0, g_tas.frame, g_tas.mv.n, g_tas.seeking ? 1 : 0,
+             (g_tas.seek_req >= 0 || g_tas.start_req) ? 1 : 0, g_tas.mid ? 1 : 0,
+             g_tas.recording ? 1 : 0, g_tas.rerecords, g_tas.gz_n, (long long)g_tas.desync,
+             g_tas.undo_n, g_mcp.emu && emu_is_running(g_mcp.emu) ? 1 : 0, msg);
+    k = mcp_tas_frames(req, resp, k, cap);
+    snprintf(resp + k, (size_t)(cap - k), "}");
+}
+
+static void mcp_cmd_tas(const char *req, char *resp, int cap) {
+    int locked = g_mcp.emu && g_mcp.emu->thread_alive;
+    if (locked) emu_mutex_lock(&g_mcp.emu->mutex);
+    mcp_tas_answer(req, resp, cap);
+    if (locked) emu_mutex_unlock(&g_mcp.emu->mutex);
+}
+
 /* Commands that change the board in a way a follow feed cannot carry: the
  * segment ends, and the next slice starts another (core/follow.h). */
 static void mcp_follow_break_after(const char *cmd) {
@@ -2914,6 +3211,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
 
     if      (strcmp(cmd, "get_status")       == 0) mcp_cmd_get_status(resp, cap, true);
     else if (strcmp(cmd, "set_input")        == 0) mcp_cmd_set_input(req, resp, cap);
+    else if (strcmp(cmd, "set_gun")          == 0) mcp_cmd_set_gun(req, resp, cap);
     else if (strcmp(cmd, "prof")             == 0) mcp_cmd_prof(req, resp, cap);
     else if (strcmp(cmd, "prof_dump")        == 0) mcp_cmd_prof_dump(req, resp, cap);
     else if (strcmp(cmd, "set_camera")       == 0) mcp_cmd_set_camera(req, resp, cap);
@@ -2953,6 +3251,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "objview_status")           == 0) mcp_cmd_objview_status(resp, cap);
     else if (strcmp(cmd, "objview_set")              == 0) mcp_cmd_objview_set(req, resp, cap);
     else if (strcmp(cmd, "objview_shot")             == 0) mcp_cmd_objview_shot(req, resp, cap);
+    else if (strcmp(cmd, "screenshot")               == 0) mcp_cmd_screenshot(req, resp, cap);
     else if (strcmp(cmd, "objview_wait_ready")       == 0) mcp_cmd_objview_wait_ready(req, resp, cap);
     else if (strcmp(cmd, "objview_list")             == 0) mcp_cmd_objview_list(req, resp, cap);
     else if (strcmp(cmd, "dump_bones")               == 0) mcp_cmd_dump_bones(resp, cap);
@@ -2982,7 +3281,7 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
         char *p=resp; int left=cap; int n;
         n=snprintf(p,(size_t)left,"{\"ok\":true,\"addr\":\"%03X\",\"b\":[",addr); p+=n; left-=n;
         for (uint32_t i=0;i<len && (addr+i)<M68K_SCSP_SIZE && left>6;i++){
-            uint16_t w = scsp_peek16(&g_sound.scsp, (addr+i) & ~1u);
+            uint16_t w = ssyn_scsp_peek16((addr+i) & ~1u);
             n=snprintf(p,(size_t)left,"%s%u",i?",":"",((addr+i)&1) ? (w&0xFF) : (w>>8)); p+=n; left-=n;
         }
         snprintf(p,(size_t)left,"]}");
@@ -3005,9 +3304,11 @@ static void mcp_dispatch(const char *req, char *resp, int cap) {
     else if (strcmp(cmd, "save_state")               == 0) mcp_cmd_state(req, resp, cap, 0);
     else if (strcmp(cmd, "load_state")               == 0) mcp_cmd_state(req, resp, cap, 1);
     else if (strcmp(cmd, "idle_hold")                == 0) mcp_cmd_idle_hold(req, resp, cap);
+    else if (strcmp(cmd, "link_check")               == 0) mcp_cmd_link_check(req, resp, cap);
     else if (strcmp(cmd, "enemy_rank")               == 0) mcp_cmd_enemy_rank(req, resp, cap);
     else if (strcmp(cmd, "follow_lead")              == 0) mcp_cmd_follow_lead(req, resp, cap);
     else if (strcmp(cmd, "replay")                   == 0) mcp_cmd_replay(req, resp, cap);
+    else if (strcmp(cmd, "tas")                      == 0) mcp_cmd_tas(req, resp, cap);
     else if (strncmp(cmd, "script_", 7) == 0 && g_mcp_script_cmd) g_mcp_script_cmd(cmd, req, resp, cap);
     else snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"unknown cmd: %s\"}", cmd);
     mcp_follow_break_after(cmd);

@@ -188,6 +188,29 @@ int main(void) {
     CHECK(mem_read32(&bus, MAIN_DATA_BASE + 0x4000) == 0, "re-init clears MAIN_DATA");
     CHECK(mem_read8(&bus, IO_BASE) == 0xFF, "IO region is 0xFF again after re-init");
 
+    /* The geometrizer's mode, LOD and z-adjust outlive a list (memory.h,
+     * g_geo_held): hotd sends mode 2 and LOD 4 in its first lists only, and a
+     * state loaded before those drew untextured when only the renderer kept
+     * them. Each published list carries the values it starts with. */
+    {
+        uint32_t *L = (uint32_t *)(void *)bus.buff_ram, p = 0x10000u >> 2;
+        float lod = 4.0f; uint32_t lodw; memcpy(&lodw, &lod, 4);
+        L[p + 0] = 0x07u << 23; L[p + 1] = 2u;                 /* mode 2 */
+        L[p + 2] = 0x16u << 23; L[p + 3] = lodw;               /* LOD 4 */
+        L[p + 4] = 0x08u << 23; L[p + 5] = 0x408000FFu;        /* z-adjust */
+        L[p + 6] = 0x0Fu << 23;                                /* END */
+        geodl_publish(0x10000u);
+        const geo_held_t *h = geodl_held_for(g_geodl_snap);
+        CHECK(h->mode == 0 && h->lod == 0.0f, "a list starts with the values from before it");
+        CHECK(g_geo_held.live.mode == 2 && g_geo_held.live.lod == 4.0f && g_geo_held.live.zadj == 0x40800000u,
+              "mode, LOD and z-adjust are followed as the list is applied");
+        L[p + 0] = 0x0Fu << 23;                                /* a list that sends none */
+        geodl_publish(0x10000u);
+        h = geodl_held_for(g_geodl_snap);
+        CHECK(h->mode == 2 && h->lod == 4.0f && h->zadj == 0x40800000u,
+              "the next list starts with them though it never sends them");
+    }
+
     mem_shutdown(&bus);
 
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

@@ -4,8 +4,13 @@
  *
  *   arcade.sonicthefighte.rs/?lang=ja&game=vonj
  *
- * ?lang= is a key of LANGS; without it, or with one the site does not have, the
- * page is in English. The language is the page's words only: which game and
+ * ?lang= is a key of LANGS; one the site does not have is English. Without it
+ * (Pinboard #1099) the page takes the language this browser last asked for
+ * with ?lang= (localStorage m2hle2.lang), and failing that guesses: Japanese
+ * when the visitor seems to be in Japan (the clock on Japan time, or Japanese
+ * first among the browser's languages), English otherwise. A static site sees
+ * no address, so the clock and the browser's languages are what it has. The
+ * switch on the home page always names its language, so a choice sticks. The language is the page's words only: which game and
  * which profile run is ?game= and ?profile= (m2hle-games.js), so a Japanese
  * page can play an English set and the other way round.
  *
@@ -84,10 +89,29 @@ const m2hleLang = (() => {
   /* Other names a visit may give a language: ?lang=jp is Japanese. */
   const ALIASES = { jp: 'ja' };
 
+  const STORE = 'm2hle2.lang';
+  const store = {
+    get() { try { return localStorage.getItem(STORE); } catch { return null; } },
+    set(v) { try { localStorage.setItem(STORE, v); } catch { /* private mode */ } },
+  };
+
+  /* Whether this visitor seems to be in Japan: the clock is on Japan time, or
+   * Japanese is the browser's first language. */
+  function inJapan() {
+    let zone = '';
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { /* old browser */ }
+    const first = (navigator.languages && navigator.languages[0]) || navigator.language || '';
+    return zone === 'Asia/Tokyo' || /^ja\b/i.test(first);
+  }
+
   const q = new URLSearchParams(location.search);
+  /* The language this visit names in its address, or null. */
+  const named = q.get('lang') ? ALIASES[q.get('lang')] || q.get('lang') : null;
+  if (named) store.set(named);
   /* The language the visit asked for, even one the site has no words in: the
-   * board's country follows it (m2hle-game.js), ?lang=fr is Export in English. */
-  const asked = ALIASES[q.get('lang')] || q.get('lang') || DEFAULT;
+   * board's country follows it (m2hle-game.js), ?lang=fr is Export in English.
+   * A guessed Japanese is asked for as ?lang=ja is: Japan's board too. */
+  const asked = named || store.get() || (inJapan() ? 'ja' : DEFAULT);
   const lang = LANGS[asked] ? asked : DEFAULT;
 
   /* The string for `key` in this page's language, {name}s filled from `vars`. */
@@ -121,10 +145,11 @@ const m2hleLang = (() => {
     if (root === document) applied = true;
   }
 
-  /* `params` (a URLSearchParams) with this page's language, if it is not the
-   * default, so a link keeps the visit's language. */
+  /* `params` (a URLSearchParams) with the language the visit's address named,
+   * if it named one, so a link keeps it; a guessed or remembered one is the
+   * same on the next page without it. */
   function keep(params) {
-    if (lang !== DEFAULT) params.set('lang', lang);
+    if (named) params.set('lang', named);
     return params;
   }
 
@@ -139,5 +164,5 @@ const m2hleLang = (() => {
     document.addEventListener('DOMContentLoaded', () => { if (!applied) apply(document); });
   else apply(document);
 
-  return { LANGS, DEFAULT, lang, asked, t, add, apply, keep, query };
+  return { LANGS, DEFAULT, lang, asked, named, t, add, apply, keep, query };
 })();

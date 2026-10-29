@@ -29,6 +29,21 @@ static int g_fail = 0;
     else         { printf("ok:   %s\n", msg); } \
 } while (0)
 
+/* The timers after a step, and the profile's handler for an interrupt they
+ * raise (one at a time: none while a handler's frame is still open). */
+static void boot_irqs(i960_cpu_t *cpu, uint64_t *seen, bool *in_service, uint32_t *base_depth) {
+    g_irqt.pending += (int64_t)(cpu->cycles - *seen);
+    *seen = cpu->cycles;
+    if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
+    if (*in_service && cpu->frame_depth <= *base_depth) *in_service = false;
+    int pin = *in_service ? -1 : irqt_pending_pin();
+    if (pin >= 0 && pin < 3 && sfight_profile.quirks.irq_handler[pin]) {
+        *base_depth = cpu->frame_depth;
+        hle_interrupt(cpu, sfight_profile.quirks.irq_handler[pin]);
+        *in_service = true;
+    }
+}
+
 int main(void) {
     static romset_t     rs;
     static memory_bus_t bus;
@@ -60,16 +75,7 @@ int main(void) {
         if (cpu.sfr.ip > max_ip && cpu.sfr.ip < ROM_SIZE * 2) max_ip = cpu.sfr.ip;
         if (i960_step(&cpu, &bus) != 0) break;
         steps++;
-        g_irqt.pending += (int64_t)(cpu.cycles - seen);
-        seen = cpu.cycles;
-        if (g_irqt.pending >= g_irqt.horizon) irqt_flush();
-        if (in_service && cpu.frame_depth <= base_depth) in_service = false;
-        int pin = in_service ? -1 : irqt_pending_pin();
-        if (pin >= 0 && pin < 3 && sfight_profile.quirks.irq_handler[pin]) {
-            base_depth = cpu.frame_depth;
-            hle_interrupt(&cpu, sfight_profile.quirks.irq_handler[pin]);
-            in_service = true;
-        }
+        boot_irqs(&cpu, &seen, &in_service, &base_depth);
     }
 
     printf("info: ran %llu steps, frames=%d, halted=%d, final IP=0x%08X, max IP seen=0x%08X\n",

@@ -49,6 +49,38 @@ export function findExe() {
     return best;
 }
 
+/* Whether something on 127.0.0.1 already answers on port. */
+function portTaken(port) {
+    return new Promise((res) => {
+        const s = net.createConnection({ host: '127.0.0.1', port });
+        s.once('connect', () => { s.destroy(); res(true); });
+        s.once('error', () => res(false));
+    });
+}
+
+/* M2Hle.launch's options over their defaults; an undefined one takes its
+ * default, as a destructuring default would. */
+function launchOpts(opts) {
+    const given = Object.entries(opts).filter(([, v]) => v !== undefined);
+    return { port: DEFAULT_PORT, run: true, exe: null, profile: 'sfight', region: 'japan',
+             quiet: true, timeoutMs: 30000, headless: !process.env.M2_WINDOW, extraArgs: [], cwd: null,
+             ...Object.fromEntries(given) };
+}
+
+/* The emulator's command line for M2Hle.launch. */
+function launchArgs({ rom, port, run, profile, region, headless, extraArgs }) {
+    /* $M2HLE_EXTRA_ARGS goes to every emulator a grader starts, so a run can
+     * be graded with an option the grader itself knows nothing about (the
+     * handheld's --live-timers, say). */
+    const envArgs = (process.env.M2HLE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean);
+    const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom),
+                  ...(profile ? ['--profile', profile] : []),
+                  ...(region ? ['--region', region] : []), ...extraArgs, ...envArgs];
+    if (run) args.push('--run');
+    if (headless) args.push('--headless');
+    return args;
+}
+
 export class M2Hle {
     constructor(sock, { child = null, port = DEFAULT_PORT } = {}) {
         this.sock = sock;
@@ -148,34 +180,20 @@ export class M2Hle {
      * epr-19002.16 from the working directory over the zip's, which turns a
      * stock set into homebrew. The parent zip (schamp.zip) is found beside the
      * --rom path, so the ROMs need no copying. */
-    static async launch({ rom, port = DEFAULT_PORT, run = true, exe = null, profile = 'sfight',
-                          region = 'japan',
-                          quiet = true, timeoutMs = 30000,
-                          headless = !process.env.M2_WINDOW, extraArgs = [], cwd = null } = {}) {
+    static async launch(opts = {}) {
+        const o = launchOpts(opts);
+        const { rom, port, exe, quiet, timeoutMs, cwd } = o;
         if (!rom) throw new Error('launch needs a rom path');
         /* Something already listening on the port would be attached to below
          * instead of the emulator this launches, which cannot take the port and
          * runs on without a bridge. On a machine with a live emulator on the
          * default port (a stream, a bot) a grader then breakpoints and resets
          * that one. Refuse instead. */
-        const taken = await new Promise((res) => {
-            const s = net.createConnection({ host: '127.0.0.1', port });
-            s.once('connect', () => { s.destroy(); res(true); });
-            s.once('error', () => res(false));
-        });
-        if (taken) throw new Error(`port ${port} already has something listening (another emulator?) — pass a free --port`);
+        if (await portTaken(port)) throw new Error(`port ${port} already has something listening (another emulator?) — pass a free --port`);
         /* A relative path is resolved here: the emulator runs from runDir below. */
         const raw = exe ?? findExe();
         const bin = /[\\/]/.test(raw) ? path.resolve(raw) : raw;
-        /* $M2HLE_EXTRA_ARGS goes to every emulator a grader starts, so a run can
-         * be graded with an option the grader itself knows nothing about (the
-         * handheld's --live-timers, say). */
-        const envArgs = (process.env.M2HLE_EXTRA_ARGS ?? '').split(/\s+/).filter(Boolean);
-        const args = ['--mcp', '--mcp-port', String(port), '--rom', path.resolve(rom),
-                      ...(profile ? ['--profile', profile] : []),
-                      ...(region ? ['--region', region] : []), ...extraArgs, ...envArgs];
-        if (run) args.push('--run');
-        if (headless) args.push('--headless');
+        const args = launchArgs(o);
         const runDir = cwd ?? path.join(os.tmpdir(), `m2hle-run-${port}`);
         fs.mkdirSync(runDir, { recursive: true });
         const child = spawn(bin, args, {

@@ -263,6 +263,19 @@ static inline bool net_udp_send(net_sock_t s, uint32_t ip_be, uint16_t port,
     return sent == (int)len;
 }
 
+/* The port a socket is bound to (net_udp_open's 0 picks one), 0 if unknown. */
+static inline uint16_t net_udp_local_port(net_sock_t s) {
+    struct sockaddr_in self;
+    memset(&self, 0, sizeof(self));
+#ifdef _WIN32
+    int len = (int)sizeof(self);
+#else
+    socklen_t len = sizeof(self);
+#endif
+    if (!net_sock_valid(s) || getsockname(s, (struct sockaddr *)&self, &len) != 0) return 0;
+    return ntohs(self.sin_port);
+}
+
 /* Bytes received, or 0 when nothing is pending. Fills the sender so callers can
  * route by source — safer than sniffing content, whose leading bytes collide. */
 static inline int net_udp_recv(net_sock_t s, void *buf, uint32_t cap,
@@ -307,6 +320,12 @@ static inline uint32_t net_resolve_ipv4(const char *host) {
  * the field this feeds (rpcn_send_signaling_ping). */
 static inline uint32_t net_local_ipv4_towards(uint32_t dest_be) {
     (void)dest_be;
+    return 0;
+}
+
+/* The gateway picks the public port; the tab knows none. */
+static inline uint16_t net_udp_local_port(net_sock_t s) {
+    (void)s;
     return 0;
 }
 

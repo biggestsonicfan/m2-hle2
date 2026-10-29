@@ -223,9 +223,10 @@ static int load_rom(const char *zip, bool sound) {
         }
     }
     if (romset_load(&romset, g_active_profile->load_fn, zip, parent_ptr) != 0) return -1;
-    g_active_profile->install_fn(&romset, &cpu, &bus);
+    m2_spin_install(&romset, &cpu, &bus);
 
     if (sound && g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&bus);
         if (romset.audiocpu && romset.audiocpu_size > 0)
@@ -267,41 +268,45 @@ static void emu_slice_real(void) {
 
 /* --profile only: a copy of the slice with the per-address count inside the
  * loop. Everything else runs emu_slice_real, the loop the app runs. */
-__attribute__((noinline)) static void emu_slice(void) {
-    const game_quirks_t *q = &g_active_profile->quirks;
-    if (!(g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to)) { emu_slice_real(); return; }
-    int64_t a = now_us();
-    g_vblank_edge = 0;
-    emu_timers_slice_begin(&ctx);
-    emu_service_irq(&ctx);
+/* The profiled slice's i960 loop: a count per address; how far it ran. */
+static int emu_slice_prof_loop(void) {
     int i;
-    bool prof = g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to;
-    uint64_t steps = 0;
-    for (i = 0;
-         i < g_emu_steps_per_slice && !cpu.halted;
-         i++)
-    {
+    for (i = 0; i < g_emu_steps_per_slice && !cpu.halted; i++) {
         if (g_irqt_vblank) { g_irqt_vblank = 0; g_vblank_edge = 1; break; }
-        if (prof && cpu.sfr.ip < 0x400000) g_prof[cpu.sfr.ip >> 2]++;
+        if (cpu.sfr.ip < 0x400000) g_prof[cpu.sfr.ip >> 2]++;
         if (bp_check(cpu.sfr.ip)) break;
         if (i960_step_hot(&cpu, &bus) != 0) break;
         ctx.total_steps++;
-        steps++;
         if (s_irq_in_service && g_active_profile) emu_service_sound_again(&ctx);
         emu_timers_after_step(&ctx);
-        if (g_log.warn_triggered) break;
-        if (g_wp.hit) break;
-        if (g_sharc.unknown_triggered) break;
+        if (g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered) break;
     }
+    return i;
+}
+
+/* The profiled slice's end: the frame edge, the sound, the snapshots; whether
+ * a frame ended. */
+static bool emu_slice_prof_end(void) {
+    const game_quirks_t *q = &g_active_profile->quirks;
     bool frame = g_vblank_edge != 0;
     if (frame && q->board_vblank) { cop_geo_frame_edge(); dl_frame_edge(&bus, g_emu_frames); hle_match_replay_edge(&bus); }
-    (void)steps;
     if (g_with_68k) emu_sound_slice_end(frame);
     if (q->geo_displaylist) geodl_capture(&bus);
     ctx.cpu_prev_snapshot = ctx.cpu_snapshot;
     ctx.cpu_snapshot      = cpu;
     if (frame) g_dl_frame_now = ++g_emu_frames;
     g_log.warn_triggered = 0; g_wp.hit = 0; g_sharc.unknown_triggered = 0;
+    return frame;
+}
+
+__attribute__((noinline)) static void emu_slice(void) {
+    if (!(g_prof && g_es.frames >= g_prof_from && g_es.frames < g_prof_to)) { emu_slice_real(); return; }
+    int64_t a = now_us();
+    g_vblank_edge = 0;
+    emu_timers_slice_begin(&ctx);
+    emu_service_irq(&ctx);
+    int  i     = emu_slice_prof_loop();
+    bool frame = emu_slice_prof_end();
 
     int64_t d = now_us() - a;
     g_es.slices++;
@@ -400,31 +405,41 @@ static void tile_stats_report(void) {
 static bool     g_verify_atlas = false;
 static uint64_t g_atlas_checks = 0, g_atlas_bad = 0;
 
+/* Whether texture RAM holds anything: upload_atlas's empty-bank skip (no
+ * decode happened, nothing to hold it to). */
+static bool atlas_has_texels(void) {
+    size_t probe = 0;
+    for (size_t k = 0; k < TEXRAM0_SIZE && probe < 16; k += 0x1000) probe += bus.texram0[k] ? 1 : 0;
+    for (size_t k = 0; k < TEXRAM1_SIZE && probe < 16; k += 0x1000) probe += bus.texram1[k] ? 1 : 0;
+    return probe != 0;
+}
+
+/* The texel of sheet s at (x, y), from texture RAM, as the atlas holds it. */
+static uint8_t atlas_ref_texel(const uint32_t *sheet, int x, int y) {
+    size_t nwords = TEXRAM0_SIZE / 4;
+    int x2 = x, y2 = y;
+    if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
+    uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
+    uint32_t word = ((off >> 1) < nwords) ? sheet[off >> 1] : 0;
+    if (off & 1) word >>= 16;
+    if ((y & 1) == 0) word >>= 8;
+    if ((x & 1) == 0) word >>= 4;
+    return (uint8_t)((word & 0xf) * 17u);
+}
+
 static void verify_atlas(void) {
     static uint32_t last_gen = 0;
     static bool     have_gen = false;
     if (have_gen && bus.gen_tex == last_gen) return;
-    size_t probe = 0;   /* upload_atlas's empty-bank skip: no decode happened, nothing to hold it to */
-    for (size_t k = 0; k < TEXRAM0_SIZE && probe < 16; k += 0x1000) probe += bus.texram0[k] ? 1 : 0;
-    for (size_t k = 0; k < TEXRAM1_SIZE && probe < 16; k += 0x1000) probe += bus.texram1[k] ? 1 : 0;
-    if (probe == 0) return;
+    if (!atlas_has_texels()) return;
     last_gen = bus.gen_tex;
     have_gen = true;
     static uint8_t ref[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
     const uint32_t *sheets[2] = { (const uint32_t *)bus.texram0, (const uint32_t *)bus.texram1 };
-    size_t nwords = TEXRAM0_SIZE / 4;
     for (int s = 0; s < 2; s++)
         for (int y = 0; y < GEO3D_SHEET_H; y++)
-            for (int x = 0; x < GEO3D_ATLAS_W; x++) {
-                int x2 = x, y2 = y;
-                if (x2 >= 1024) { x2 -= 1024; y2 ^= 1024; }
-                uint32_t off = ((uint32_t)(y2 / 2) * 512u) + (uint32_t)(x2 / 2);
-                uint32_t word = ((off >> 1) < nwords) ? sheets[s][off >> 1] : 0;
-                if (off & 1) word >>= 16;
-                if ((y & 1) == 0) word >>= 8;
-                if ((x & 1) == 0) word >>= 4;
-                ref[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] = (uint8_t)((word & 0xf) * 17u);
-            }
+            for (int x = 0; x < GEO3D_ATLAS_W; x++)
+                ref[(s * GEO3D_SHEET_H + y) * GEO3D_ATLAS_W + x] = atlas_ref_texel(sheets[s], x, y);
     g_atlas_checks++;
     if (memcmp(ref, g_game_render_atlas_px, sizeof ref) != 0) {
         size_t i = 0;
@@ -502,38 +517,51 @@ static void report(const mark_t *a, const mark_t *b, double t) {
     fflush(stdout);
 }
 
-int main(int argc, char **argv) {
-    const char *zip = NULL;
-    double seconds = 60.0, report_s = 5.0, max_temp = 85.0, render_fps = 0.0;
-    const char *prof_path = NULL, *digest_path = NULL;
-    uint64_t max_frames = 0;
-    bool do_pace = false, threads = false, render = true;
+/* The command line. */
+typedef struct {
+    const char *zip, *prof_path, *digest_path;
+    double      seconds, report_s, max_temp, render_fps;
+    uint64_t    max_frames;
+    bool        do_pace, threads, render;
+    int64_t     render_period_us;
+} bench_opts_t;
+
+/* argv[i] is NAME, with a value after it. */
+static bool arg_val(int argc, char **argv, int i, const char *name) {
+    return !strcmp(argv[i], name) && i + 1 < argc;
+}
+
+static void parse_args(bench_opts_t *o, int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
-        if      (!strcmp(argv[i], "--seconds")  && i + 1 < argc) seconds  = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--report")   && i + 1 < argc) report_s = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--max-temp") && i + 1 < argc) max_temp = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--render-fps") && i + 1 < argc) render_fps = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) prof_path = argv[++i];
+        if      (arg_val(argc, argv, i, "--seconds"))  o->seconds  = atof(argv[++i]);
+        else if (arg_val(argc, argv, i, "--report"))   o->report_s = atof(argv[++i]);
+        else if (arg_val(argc, argv, i, "--max-temp")) o->max_temp = atof(argv[++i]);
+        else if (arg_val(argc, argv, i, "--render-fps")) o->render_fps = atof(argv[++i]);
+        else if (arg_val(argc, argv, i, "--profile")) o->prof_path = argv[++i];
         else if (!strcmp(argv[i], "--no-mesh-cache")) g_geo3d_mesh_cache = 0;
-        else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
+        else if (arg_val(argc, argv, i, "--steps-per-slice")) g_emu_steps_per_slice = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--live-timers")) ;   /* always on now */
         else if (!strcmp(argv[i], "--verify-atlas")) g_verify_atlas = true;
         else if (!strcmp(argv[i], "--tile-stats")) g_tile_stats = true;
-        else if (!strcmp(argv[i], "--draw-digest") && i + 1 < argc) digest_path = argv[++i];
-        else if (!strcmp(argv[i], "--frames") && i + 1 < argc) max_frames = strtoull(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--profile-from") && i + 1 < argc) g_prof_from = strtoull(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--profile-to") && i + 1 < argc) g_prof_to = strtoull(argv[++i], NULL, 0);
-        else if (!strcmp(argv[i], "--pace"))      do_pace = true;
-        else if (!strcmp(argv[i], "--threads"))   threads = do_pace = true;
+        else if (arg_val(argc, argv, i, "--draw-digest")) o->digest_path = argv[++i];
+        else if (arg_val(argc, argv, i, "--frames")) o->max_frames = strtoull(argv[++i], NULL, 0);
+        else if (arg_val(argc, argv, i, "--profile-from")) g_prof_from = strtoull(argv[++i], NULL, 0);
+        else if (arg_val(argc, argv, i, "--profile-to")) g_prof_to = strtoull(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "--pace"))      o->do_pace = true;
+        else if (!strcmp(argv[i], "--threads"))   o->threads = o->do_pace = true;
         else if (!strcmp(argv[i], "--sound"))     g_with_68k = true;
-        else if (!strcmp(argv[i], "--no-render")) render  = false;
-        else zip = argv[i];
+        else if (!strcmp(argv[i], "--no-render")) o->render  = false;
+        else o->zip = argv[i];
     }
-    if (!zip) { fprintf(stderr, "usage: arc_bench <romset.zip> [options]\n"); return 2; }
+}
+
+/* The board, the GPU side and the ROM set, up to a board ready to run.
+ * 0, or main's exit code. */
+static int bench_setup(bench_opts_t *o) {
     /* A render cap only makes sense with emu on its own 60 Hz thread (frameskip). */
-    if (render_fps > 0.0) threads = do_pace = true;
-    int64_t render_period_us = render_fps > 0.0 ? (int64_t)(1e6 / render_fps) : EMU_SLICE_US;
-    if (prof_path) g_prof = calloc(PROF_WORDS, sizeof(uint32_t));
+    if (o->render_fps > 0.0) o->threads = o->do_pace = true;
+    o->render_period_us = o->render_fps > 0.0 ? (int64_t)(1e6 / o->render_fps) : EMU_SLICE_US;
+    if (o->prof_path) g_prof = calloc(PROF_WORDS, sizeof(uint32_t));
 
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
@@ -546,9 +574,9 @@ int main(int argc, char **argv) {
                                   .depth_format = SG_PIXELFORMAT_DEPTH_STENCIL,
                                   .sample_count = 1 },
     });
-    if (digest_path) {
-        if (threads) { fprintf(stderr, "--draw-digest needs a single thread\n"); return 2; }
-        digest_install(digest_path);
+    if (o->digest_path) {
+        if (o->threads) { fprintf(stderr, "--draw-digest needs a single thread\n"); return 2; }
+        digest_install(o->digest_path);
     }
     video_init(&video);
     game_render_init();
@@ -556,65 +584,105 @@ int main(int argc, char **argv) {
     g_geo3d_state = &geo3d;
 
     int64_t t0 = now_us();
-    if (load_rom(zip, g_with_68k) != 0) { fprintf(stderr, "ROM load failed\n"); return 1; }
+    if (load_rom(o->zip, g_with_68k) != 0) { fprintf(stderr, "ROM load failed\n"); return 1; }
     printf("loaded %s as '%s' in %.2fs (threads=%d pace=%d render-fps=%.0f sound=%d render=%d max-temp=%.0fC)\n",
-           zip, g_active_profile->id, (now_us() - t0) / 1e6,
-           threads, do_pace, 1e6 / render_period_us, g_with_68k, render, max_temp);
+           o->zip, g_active_profile->id, (now_us() - t0) / 1e6,
+           o->threads, o->do_pace, 1e6 / o->render_period_us, g_with_68k, o->render, o->max_temp);
 
     memset(&ctx, 0, sizeof(ctx));
     ctx.cpu = &cpu;
     ctx.bus = &bus;
     ctx.run_state = EMU_RUNNING;
+    return 0;
+}
 
-    pthread_t emu_th;
-    if (threads) pthread_create(&emu_th, NULL, emu_thread_main, NULL);
+/* Every half second: past --max-temp, the last report and the abort. */
+static bool too_hot(const bench_opts_t *o, const mark_t *last, int64_t now, int64_t start) {
+    int ct, gt;
+    int hottest = hottest_milli(&ct, &gt);
+    if (hottest < (int)(o->max_temp * 1000)) return false;
+    mark_t m = mark_now();
+    report(last, &m, (now - start) / 1e6);
+    printf("ABORT: %.1fC reached the %.0fC limit\n", hottest / 1000.0, o->max_temp);
+    return true;
+}
 
-    mark_t first = mark_now(), last = first;
-    int64_t start = first.wall;
-    int64_t next_report = start + (int64_t)(report_s * 1e6), next_temp = start, deadline = 0;
-    int rc = 0;
+/* One step of the run: a slice (unless the emu thread runs them), a frame
+ * drawn, and the pace. */
+static void bench_step(const bench_opts_t *o, int64_t *deadline) {
+    int64_t a = now_us();
+    if (!o->threads) {
+        uint64_t f0 = g_es.frames;
+        emu_slice();
+        if (g_tile_stats && g_es.frames != f0) tile_stats_frame();
+    }
+    if (o->render) { render_frame(); if (g_verify_atlas && !o->threads) verify_atlas(); }
+    else if (o->threads) emu_sleep_us(EMU_SLICE_US);
+    if (o->do_pace && (o->render || !o->threads)) pace(deadline, a, o->render_period_us);
+}
 
-    while (now_us() - start < (int64_t)(seconds * 1e6)) {
-        int64_t a = now_us();
-        if (!threads) {
-            uint64_t f0 = g_es.frames;
-            emu_slice();
-            if (g_tile_stats && g_es.frames != f0) tile_stats_frame();
-        }
-        if (render) { render_frame(); if (g_verify_atlas && !threads) verify_atlas(); }
-        else if (threads) emu_sleep_us(EMU_SLICE_US);
-        if (do_pace && (render || !threads)) pace(&deadline, a, render_period_us);
+/* The profiled frames, or --frames, are done. */
+static bool bench_done(const bench_opts_t *o) {
+    if (g_prof && g_es.frames >= g_prof_to) return true;
+    return o->max_frames && g_es.frames >= o->max_frames;
+}
 
-        if (cpu.halted) { printf("CPU halted @ 0x%08X\n", cpu.sfr.ip); rc = 1; break; }
-        if (g_prof && g_es.frames >= g_prof_to) break;
-        if (max_frames && g_es.frames >= max_frames) break;
+/* Run for --seconds (or --frames), reporting every --report. Main's exit code. */
+static int bench_run(const bench_opts_t *o, const mark_t *first) {
+    mark_t last = *first;
+    int64_t start = first->wall;
+    int64_t next_report = start + (int64_t)(o->report_s * 1e6), next_temp = start, deadline = 0;
+
+    while (now_us() - start < (int64_t)(o->seconds * 1e6)) {
+        bench_step(o, &deadline);
+        if (cpu.halted) { printf("CPU halted @ 0x%08X\n", cpu.sfr.ip); return 1; }
+        if (bench_done(o)) break;
 
         int64_t now = now_us();
         if (now >= next_temp) {
-            int ct, gt;
-            int hottest = hottest_milli(&ct, &gt);
-            if (hottest >= (int)(max_temp * 1000)) {
-                mark_t m = mark_now();
-                report(&last, &m, (now - start) / 1e6);
-                printf("ABORT: %.1fC reached the %.0fC limit\n", hottest / 1000.0, max_temp);
-                rc = 3;
-                break;
-            }
+            if (too_hot(o, &last, now, start)) return 3;
             next_temp = now + 500000;
         }
         if (now >= next_report) {
             mark_t m = mark_now();
             report(&last, &m, (now - start) / 1e6);
             last = m;
-            next_report = now + (int64_t)(report_s * 1e6);
+            next_report = now + (int64_t)(o->report_s * 1e6);
         }
     }
+    return 0;
+}
+
+/* --profile: the i960's PC histogram over the profiled frames. */
+static void write_profile(const char *prof_path) {
+    FILE *pf = fopen(prof_path, "w");
+    if (!pf) return;
+    fprintf(pf, "# frames %llu..%llu\n", (unsigned long long)g_prof_from,
+            (unsigned long long)(g_es.frames < g_prof_to ? g_es.frames : g_prof_to));
+    for (uint32_t w = 0; w < PROF_WORDS; w++)
+        if (g_prof[w]) fprintf(pf, "%08X %u\n", w << 2, g_prof[w]);
+    fclose(pf);
+    printf("profile written to %s\n", prof_path);
+}
+
+int main(int argc, char **argv) {
+    bench_opts_t o = { .seconds = 60.0, .report_s = 5.0, .max_temp = 85.0, .render = true };
+    parse_args(&o, argc, argv);
+    if (!o.zip) { fprintf(stderr, "usage: arc_bench <romset.zip> [options]\n"); return 2; }
+    int rc = bench_setup(&o);
+    if (rc) return rc;
+
+    pthread_t emu_th;
+    if (o.threads) pthread_create(&emu_th, NULL, emu_thread_main, NULL);
+
+    mark_t first = mark_now();
+    rc = bench_run(&o, &first);
 
     g_run = 0;
-    if (threads) pthread_join(emu_th, NULL);
+    if (o.threads) pthread_join(emu_th, NULL);
     mark_t end = mark_now();
     printf("--- total ---\n");
-    report(&first, &end, (end.wall - start) / 1e6);
+    report(&first, &end, (end.wall - first.wall) / 1e6);
     printf("mesh cache: %s, %llu builds, %llu hits, %u meshes held\n", g_geo3d_mesh_cache ? "on" : "off",
            (unsigned long long)g_geo3d_mesh_builds, (unsigned long long)g_geo3d_mesh_hits, g_geo3d_mesh_count);
     if (g_tile_stats) tile_stats_report();
@@ -622,16 +690,6 @@ int main(int argc, char **argv) {
         printf("verify-atlas: %llu texture changes checked, %llu differed\n",
                (unsigned long long)g_atlas_checks, (unsigned long long)g_atlas_bad);
 
-    if (g_prof) {
-        FILE *pf = fopen(prof_path, "w");
-        if (pf) {
-            fprintf(pf, "# frames %llu..%llu\n", (unsigned long long)g_prof_from,
-                    (unsigned long long)(g_es.frames < g_prof_to ? g_es.frames : g_prof_to));
-            for (uint32_t w = 0; w < PROF_WORDS; w++)
-                if (g_prof[w]) fprintf(pf, "%08X %u\n", w << 2, g_prof[w]);
-            fclose(pf);
-            printf("profile written to %s\n", prof_path);
-        }
-    }
+    if (g_prof) write_profile(o.prof_path);
     return rc;
 }

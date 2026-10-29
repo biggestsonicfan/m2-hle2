@@ -682,7 +682,21 @@ static inline lua_State *m2lua_new_state(void) {
     return L;
 }
 
+static inline void m2lua_set_dir(const char *dir) {
+    snprintf(g_m2lua.dir, sizeof g_m2lua.dir, "%s", dir && dir[0] ? dir : "scripts");
+}
+
+static inline void m2lua_init_once(void) {
+    if (g_m2lua.draw_mutex_ready) return;
+    emu_mutex_init(&g_m2lua.draw_mutex);
+    g_m2lua.draw_mutex_ready = true;
+    if (!g_m2lua.dir[0]) m2lua_set_dir(NULL);
+}
+
+/* The first ROM load unloads before any script has run, and a zeroed
+ * CRITICAL_SECTION (unlike a zeroed pthread mutex) faults when entered. */
 static inline void m2lua_clear_media(void) {
+    m2lua_init_once();
     memset(g_m2lua.fonts, 0, sizeof g_m2lua.fonts);
     emu_mutex_lock(&g_m2lua.draw_mutex);
     for (int i = 0; i < M2LUA_SURFACE_MAX; i++) g_m2lua.surfaces[i].used = false;
@@ -706,17 +720,6 @@ static inline void m2lua_unload(void) {
     g_m2lua.path[0] = 0;
     memset(&g_m2lua.video, 0, sizeof g_m2lua.video);
     m2lua_clear_media();
-}
-
-static inline void m2lua_set_dir(const char *dir) {
-    snprintf(g_m2lua.dir, sizeof g_m2lua.dir, "%s", dir && dir[0] ? dir : "scripts");
-}
-
-static inline void m2lua_init_once(void) {
-    if (g_m2lua.draw_mutex_ready) return;
-    emu_mutex_init(&g_m2lua.draw_mutex);
-    g_m2lua.draw_mutex_ready = true;
-    if (!g_m2lua.dir[0]) m2lua_set_dir(NULL);
 }
 
 static inline bool m2lua_file_exists(const char *path) {

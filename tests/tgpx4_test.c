@@ -27,6 +27,12 @@ static float u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 #define ALU_NOP    ((uint64_t)7 << 56)
 #define MOV(sr, dr) ((uint64_t)1 << 61 | ALU_NOP | (uint64_t)(sr) << 19 | (uint64_t)(dr) << 12)
 #define CTL(cop, ef1, ef2) ((uint64_t)2 << 61 | ALU_NOP | (uint64_t)(cop) << 22 | (uint64_t)(ef1) << 16 | (uint64_t)(ef2))
+/* MOV2 (one ALU op, NOP): sr bits 31-37, dr 24-30, a 14-bit displacement.
+ * MOV3: dr bits 19-25, the 32-bit immediate from bit 27, a 12-bit
+ * displacement. The memory operand's mode is bits 0-3, its displacement from
+ * bit 7. */
+#define MOV2(sr, dr) ((uint64_t)5 << 61 | (uint64_t)7 << 56 | (uint64_t)1 << 41 | (uint64_t)(sr) << 31 | (uint64_t)(dr) << 24)
+#define MOV3(dr, imm) ((uint64_t)7 << 61 | (uint64_t)(imm) << 27 | (uint64_t)(dr) << 19)
 #define R_AA0 0x08u
 #define R_FI  0x31u
 #define R_FO0 0x32u
@@ -95,6 +101,36 @@ int main(void) {
     CHECK(g_tgx.aa[0] == 0u, "FLOG of 1 is 0");
     tgx_aluop(0x0C, f2u(8.0f), 0, 0, 0x10);
     CHECK(fabsf(u2f(g_tgx.aa[0]) - logf(8.0f) / 0.301030f) < 1e-5f, "FLOG is ln over 0.30103, as MAME");
+
+    /* The absolute address mode (EA type 0x0C): the displacement field is the
+     * address, no AR. Its AR field names AR0, set to 0x40 here so an added AR
+     * would miss by 0x40. MOV1, MOV2 and MOV3, and past 0x400 the external bus
+     * at EB (buffer RAM). */
+    {
+        static uint8_t buf[0x8000u * 4u];
+        memset(buf, 0, sizeof buf);
+        g_tgx_bufram = buf;
+        tgx_reset();
+        g_tgx.ar[0] = 0x40u;
+        g_tgx.eb = 0x400000u;
+        g_tgx.ram_b[0x15] = 0x77u;
+        buf[0x3F01u * 4u] = 0x99u;
+        g_tgx.prog[0] = MOV(R_FI, 0x40u) | 0xCu | (uint64_t)0x1B << 7;            /* MOV1 FI, A(1BH) */
+        g_tgx.prog[1] = MOV(0x60u, R_AA0) | 0xCu | (uint64_t)0x15 << 7;           /* MOV1 B(15H), AA0 */
+        g_tgx.prog[2] = MOV2(0x40u, R_AA0 + 1u) | 0xCu | (uint64_t)0x3F01 << 7;   /* MOV2 A(3F01H), AA1 */
+        g_tgx.prog[3] = MOV2(R_FI, 0x60u) | 0xCu | (uint64_t)0x2A5 << 7;          /* MOV2 FI, B(2A5H) */
+        g_tgx.prog[4] = MOV3(0x40u, 0xCAFEu) | 0xCu | (uint64_t)0xFF0 << 7;       /* MOV3 #CAFE, A(0FF0H) */
+        push(0x55u);
+        push(0x66u);
+        for (int i = 0; i < 5; i++) tgx_step();
+        CHECK(g_tgx.ram_a[0x1B] == 0x55u && g_tgx.ram_a[0x5B] == 0u, "MOV1 absolute write: no AR added");
+        CHECK(g_tgx.aa[0] == 0x77u, "MOV1 absolute read of B");
+        CHECK(g_tgx.aa[1] == 0x99u, "MOV2 absolute read past 400H goes to the external bus");
+        CHECK(g_tgx.ram_b[0x2A5] == 0x66u, "MOV2 absolute write to B");
+        CHECK(tgx_le32(buf + 0xFF0u * 4u) == 0xCAFEu, "MOV3 absolute write to the external bus");
+        CHECK(g_tgx.ar[0] == 0x40u, "and no AR moves");
+        g_tgx_bufram = NULL;
+    }
 
     double worst = 0.0;
     for (double x = 1e-30; x < 1e30; x *= 1.37) {

@@ -26,6 +26,7 @@
 #include "geo3d.h"
 #include "log.h"
 #include "rom_loader.h"
+#include "stereo.h"
 
 typedef struct {
     float x, y;
@@ -438,7 +439,8 @@ static const char *game_render_fill_vs_glsl =
     "flat out ivec2 tile_log2;\n"   /* log2 of the tile sides (GLSL ES 3.00 has no findMSB) */
     "flat out int ramp_row;\n"      /* colour alpha - 2: the face's colour ramp row, or -1 */
     "flat out float fdepth;\n"      /* the board's flat key as a window depth, or -1 (geo3d_flat_depth) */
-    "flat out vec3 pkey;\n"         /* per-pixel key (fdepth -2): the window's near and far depth, z_adjust's exponent */
+    "flat out vec4 pkey;\n"         /* per-pixel key (fdepth -2): the window's near and far depth, z_adjust's exponent + the face's key / 65536, the cap */
+    "flat out vec4 pbox;\n"         /* where the cap holds, in board pixels: x0, x1, y0, y1 */
     /* A decal is its surface's own faces drawn again, exactly on top, and passes on
      * a depth TIE (LESS_EQUAL). Since the fill was split, the surface can go through
      * the discard-free program and its decal through the discarding one, and two
@@ -465,7 +467,7 @@ static const char *game_render_fill_vs_glsl =
      * sort z is in front takes that z too: z/w is then the same at every
      * vertex, so the clipper cuts at w = 0, the eye plane, which is where the
      * board clips (geo3d.h GEO3D_ZSORT_KEY0), and not at the near plane. */
-    "  if (a_zs.x < 1.0e29) {\n"
+    "  if (a_zs.x < 1.0e29 && a_zs.y >= 0.0) {\n"
     "    float zc = mvp[0][2]*a_pos.x + mvp[1][2]*a_pos.y + mvp[2][2]*a_zs.x + mvp[3][2];\n"
     "    float zw = mvp[0][3]*a_pos.x + mvp[1][3]*a_pos.y + mvp[2][3]*a_zs.x + mvp[3][3];\n"
     "    if (gl_Position.w > 0.0) gl_Position.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * gl_Position.w;\n"
@@ -477,13 +479,15 @@ static const char *game_render_fill_vs_glsl =
     /* The board's own key (set_camera zflat): a depth in this window's slice,
      * the slice's near end (z = -0.05) to its far end, written per fragment. */
     "  fdepth = -1.0;\n"
-    "  pkey = vec3(0.0);\n"
+    "  pkey = vec4(0.0);\n"
+    "  pbox = vec4(0.0, -1.0, 0.0, -1.0);\n"
     /* Per-pixel depth (geo3d.h g_geo3d_pixel_depth, not the board): the fill
      * takes the key of each pixel's own z, so it writes the depth, and the
      * vertex z is 0, so the clipper cuts at the eye plane as for a flat key. */
     "  if (a_zs.y < -2.5) {\n"
     "    float zfar = -mvp[2][2], znear = zfar + 20.0 * mvp[3][2];\n"
-    "    pkey = vec3(znear, zfar, -a_zs.y - 3.0);\n"
+    "    pkey = vec4(znear, zfar, -a_zs.y - 3.0, a_p0.w);\n"
+    "    pbox = vec4(floor(a_p1.w / 1024.0), mod(a_p1.w, 1024.0), floor(a_p2.w / 1024.0), mod(a_p2.w, 1024.0));\n"
     "    fdepth = -2.0;\n"
     "    gl_Position.z = 0.0;\n"
     "  } else if (a_zs.y < 0.0) {\n"
@@ -542,15 +546,29 @@ static const char *game_render_fill_vs_glsl =
     "  return (((b >> 23) & 255) - 127) * 256 + LOG2[(b >> 16) & 127];\n" \
     "}\n"
 
+/* The microtexture's coordinates (geo3d.h GEO3D_FACE_MICRO): the board reads
+ * the square at u, v << (1 << minlod) (model2rd.ipp fetch_bilinear_texel,
+ * miplevel -1), so 2, 4, 16 or 256 of its texels to one of the tile's. The
+ * square repeats every 128 texels and mirrors every 256, so uv is taken modulo
+ * 256 / scale first: the same texels, and no float runs out of fraction bits
+ * at a scale of 256. */
+#define GAME_RENDER_MICRO_UV_GLSL \
+    "vec2 micro_uv(int minlod) {\n" \
+    "  float scale = float(2 << ((1 << minlod) - 1));\n" \
+    "  return (uv - floor(uv * (scale / 256.0)) * (256.0 / scale)) * scale;\n" \
+    "}\n"
+
 /* Per-pixel depth (geo3d.h g_geo3d_pixel_depth): the board's sort key, MAME's
  * float_to_zval as geo3d_board_zkey has it, taken of the pixel's own z (ez),
- * placed in the window's slice as a flat key is. */
+ * never nearer than the face's own key (pkey.z's fraction) nor, inside pbox,
+ * further than its cap (pkey.w, game_render__pixel_checker_caps), placed in
+ * the window's slice as a flat key is. */
 #define GAME_RENDER_PIXEL_KEY_GLSL \
     "float pixel_depth() {\n" \
     "  float key = 0.0;\n" \
     "  if (ez > 0.0) {\n" \
     "    uint u = floatBitsToUint(ez);\n" \
-    "    int e = int((u >> 23) & 255u) - int(pkey.z + 0.5);\n" \
+    "    int e = int((u >> 23) & 255u) - int(floor(pkey.z));\n" \
     "    uint mant = (u & 0x7fffffu) + 0x400u;\n" \
     "    if (mant > 0x7fffffu) { e++; mant = (mant & 0x7fffffu) >> 1; }\n" \
     "    mant >>= 11;\n" \
@@ -558,6 +576,9 @@ static const char *game_render_fill_vs_glsl =
     "    else if (e >= 0) key = float((uint(e + 1) << 12) | mant);\n" \
     "    else if (e >= -12) key = float((mant | 0x1000u) >> uint(-e));\n" \
     "  }\n" \
+    "  key = max(key, fract(pkey.z) * 65536.0);\n" \
+    "  vec2 bp = bpix.xy / bpix.z;\n" \
+    "  if (bp.x >= pbox.x && bp.x < pbox.y + 1.0 && bp.y >= pbox.z && bp.y < pbox.w + 1.0) key = min(key, pkey.w);\n" \
     "  return mix(pkey.x, pkey.y, (key + 0.5) * (1.0 / 65536.0)) * 0.5 + 0.5;\n" \
     "}\n"
 
@@ -613,7 +634,8 @@ static const char *game_render_fill_fs_ref_glsl =
     "flat in vec4 tile;\n"
     "flat in vec4 lbpl;\n"
     "flat in float fdepth;\n"
-    "flat in vec3 pkey;\n"
+    "flat in vec4 pkey;\n"
+    "flat in vec4 pbox;\n"
     "out vec4 frag_color;\n"
     GAME_RENDER_FAST_LOG2_GLSL
     GAME_RENDER_PIXEL_KEY_GLSL
@@ -634,9 +656,8 @@ static const char *game_render_fill_fs_ref_glsl =
     "  if (has(16) && (copy.y & 1) != 0) q.y = size.y - 1 - q.y;\n"
     "  return texelFetch(atlas_smp, (t.xy + q) & 2047, 0).r;\n"
     "}\n"
-    "vec2 sample_level(int L) {\n"
-    "  ivec4 t = level_tile(L);\n"
-    "  vec2 c = uv / pow(2.0, float(L)) - 0.5;\n"
+    "vec2 sample_tile(ivec4 t, vec2 c) {\n"
+    "  c -= 0.5;\n"
     "  ivec2 i0 = ivec2(floor(c));\n"
     "  vec2 f = fract(c);\n"
     "  ivec2 edge = ivec2(uvec2(i0 + t.zw * 8) % uvec2(t.zw));\n"
@@ -663,6 +684,13 @@ static const char *game_render_fill_fs_ref_glsl =
     "  }\n"
     "  return vec2(mix(row0, row1, f.y), a);\n"
     "}\n"
+    "vec2 sample_level(int L) { return sample_tile(level_tile(L), uv / pow(2.0, float(L))); }\n"
+    GAME_RENDER_MICRO_UV_GLSL
+    "vec2 sample_micro() {\n"
+    "  int fl = int(lbpl.z + 0.5);\n"
+    "  ivec4 t = ivec4(((fl >> 14) & 1) * 128, ((fl >> 15) & 3) * 128 + (has(4) ? 0 : 1024), 128, 128);\n"
+    "  return sample_tile(t, micro_uv((fl >> 12) & 3));\n"
+    "}\n"
     "void main() {\n"
     "  float lmax = floor(log2(max(min(tile.z, tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(dFdx(uv)), length(dFdy(uv)))), 0.0, lmax);\n"
@@ -674,13 +702,15 @@ static const char *game_render_fill_fs_ref_glsl =
     "  if (tile.z > 0.0) {\n"
     "    int L0 = int(floor(lod));\n"
     "    float blend = fract(lod);\n"
+    "    int mml = 0;\n"
     "    if (lbpl.w < 100000.0) {\n"
-    "      int mml = fast_log2(ez) - int(lbpl.w);\n"
+    "      mml = fast_log2(ez) - int(lbpl.w);\n"
     "      int maxl = int(lmax);\n"
     "      L0 = clamp(mml >> 7, 0, maxl);\n"
     "      blend = (mml > 0 && L0 < maxl) ? float((mml & 127) * 2) / 256.0 : 0.0;\n"
     "    }\n"
     "    vec2 tx = mix(sample_level(L0), sample_level(L0 + 1), blend);\n"
+    "    if (has(2048) && mml < 0) tx = mix(tx, sample_micro(), float(min(-mml >> ((int(lbpl.z + 0.5) >> 12) & 3), 127)) / 256.0);\n"
     "    if (has(1) && tx.y < 0.5) discard;\n"
     "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
@@ -750,17 +780,15 @@ static const char *game_render_fill_fs_glsl =
     "flat in ivec2 tile_log2;\n"
     "flat in int ramp_row;\n"
     "flat in float fdepth;\n"
-    "flat in vec3 pkey;\n"
+    "flat in vec4 pkey;\n"
+    "flat in vec4 pbox;\n"
     "out vec4 frag_color;\n"
     GAME_RENDER_FAST_LOG2_GLSL
     GAME_RENDER_PIXEL_KEY_GLSL
-    "vec2 sample_level(int L) {\n"
-    "  ivec2 sh = max(tile_log2 - ivec2(L), ivec2(0));\n"   /* log2 of the level's sides */
+    /* base: the tile's corner in the atlas, sh: log2 of its sides */
+    "vec2 sample_at(ivec2 base, ivec2 sh, vec2 c) {\n"
     "  ivec2 m = (ivec2(1) << sh) - 1;\n"
-    "  int sheet = (face.x >> 2) & 1;\n"
-    "  ivec2 base = ivec2((uvec2(ivec2(tile.xy) - ivec2(2048, 1024 + sheet * 1024)) >> uint(L)) & uvec2(2047u, 1023u));\n"
-    "  base.y += ((sheet + L) & 1) * 1024;\n"
-    "  vec2 c = uv * intBitsToFloat((127 - L) << 23) - 0.5;\n"   /* uv / 2^L */
+    "  c -= 0.5;\n"
     "  ivec2 i0 = ivec2(floor(c));\n"
     "  vec2 f = fract(c);\n"
     "  ivec2 i1 = i0 + 1;\n"
@@ -794,6 +822,18 @@ static const char *game_render_fill_fs_glsl =
     "  }\n"
     "  return vec2(mix(row0, row1, f.y), a);\n"
     "}\n"
+    "vec2 sample_level(int L) {\n"
+    "  ivec2 sh = max(tile_log2 - ivec2(L), ivec2(0));\n"   /* log2 of the level's sides */
+    "  int sheet = (face.x >> 2) & 1;\n"
+    "  ivec2 base = ivec2((uvec2(ivec2(tile.xy) - ivec2(2048, 1024 + sheet * 1024)) >> uint(L)) & uvec2(2047u, 1023u));\n"
+    "  base.y += ((sheet + L) & 1) * 1024;\n"
+    "  return sample_at(base, sh, uv * intBitsToFloat((127 - L) << 23));\n"   /* uv / 2^L */
+    "}\n"
+    GAME_RENDER_MICRO_UV_GLSL
+    "vec2 sample_micro() {\n"
+    "  ivec2 base = ivec2(((face.x >> 14) & 1) * 128, ((face.x >> 15) & 3) * 128 + (((face.x >> 2) & 1) ^ 1) * 1024);\n"
+    "  return sample_at(base, ivec2(7), micro_uv((face.x >> 12) & 3));\n"
+    "}\n"
     "vec3 ramp(int li) {\n"
     "  int br = ((face.y<<8)+li)*2, bg = 0x4000+((face.z<<8)+li)*2, bb = 0x8000+((face.w<<8)+li)*2;\n"
     "  float cr = texelFetch(cxlat_smp, ivec2(br & 255, br >> 8), 0).r * 255.0;\n"
@@ -815,14 +855,16 @@ static const char *game_render_fill_fs_glsl =
     "  if (tile.z > 0.0) {\n"
     "    int L0 = int(floor(lod));\n"
     "    float blend = fract(lod);\n"
+    "    int mml = 0;\n"
     "    if (lbpl.w < 100000.0) {\n"
-    "      int mml = fast_log2(ez) - int(lbpl.w);\n"
+    "      mml = fast_log2(ez) - int(lbpl.w);\n"
     "      int maxl = int(lmax);\n"
     "      L0 = clamp(mml >> 7, 0, maxl);\n"
     "      blend = (mml > 0 && L0 < maxl) ? float((mml & 127) * 2) / 256.0 : 0.0;\n"
     "    }\n"
     "    vec2 tx = sample_level(L0);\n"
     "    if (blend != 0.0) tx = mix(tx, sample_level(L0 + 1), blend);\n"
+    "    if ((face.x & 2048) != 0 && mml < 0) tx = mix(tx, sample_micro(), float(min(-mml >> ((face.x >> 12) & 3), 127)) / 256.0);\n"
     "    if ((face.x & 1) != 0 && tx.y < 0.5) discard;\n"
     "    float al = tx.x;\n"
     "    if (lbpl.x < 0.0) {\n"
@@ -853,7 +895,7 @@ static const char *game_render_fill_fs_glsl =
 static const char *game_render_fill_vs_hlsl =
     "cbuffer params : register(b0) { float4x4 mvp; };\n"
     "struct vs_in { float4 p0 : POSITION0; float4 p1 : POSITION1; float4 p2 : POSITION2; float4 uv01 : TEXCOORD0; float3 uv2zl : TEXCOORD1; float4 color : COLOR0; float4 tile : TEXCOORD2; float4 lbpl : TEXCOORD3; uint vid : SV_VertexID; };\n"
-    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; nointerpolation float fdepth : TEXCOORD5; nointerpolation float3 pkey : TEXCOORD6; };\n"
+    "struct vs_out { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; nointerpolation float fdepth : TEXCOORD5; nointerpolation float4 pkey : TEXCOORD6; nointerpolation float4 pbox : TEXCOORD7; };\n"
     "vs_out main(vs_in inp) {\n"
     "  vs_out outp;\n"
     /* The triangle's corner — see the GLSL vertex shader above. */
@@ -864,7 +906,7 @@ static const char *game_render_fill_vs_hlsl =
     "  outp.pos = mul(mvp, float4(pos, 1.0));\n"
     "  outp.bpix = float3((outp.pos.x + outp.pos.w) * 248.0, (outp.pos.w - outp.pos.y) * 192.0, outp.pos.w);\n"
     /* The board's polygon z-sort — see the GLSL vertex shader above. */
-    "  if (zs.x < 1.0e29) {\n"
+    "  if (zs.x < 1.0e29 && zs.y >= 0.0) {\n"
     "    float4 pz = float4(pos.xy, zs.x, 1.0);\n"
     "    float zc = dot(mvp[2], pz), zw = dot(mvp[3], pz);\n"
     "    if (outp.pos.w > 0.0) outp.pos.z = clamp(zc / max(zw, 1e-6), -1.0, 1.0) * outp.pos.w;\n"
@@ -872,10 +914,12 @@ static const char *game_render_fill_vs_hlsl =
     "  }\n"
     "  if (outp.pos.w > 0.0 && zs.y > 0.0) outp.pos.z -= zs.y * outp.pos.w;\n"
     "  outp.fdepth = -1.0;\n"
-    "  outp.pkey = float3(0.0, 0.0, 0.0);\n"
+    "  outp.pkey = float4(0.0, 0.0, 0.0, 0.0);\n"
+    "  outp.pbox = float4(0.0, -1.0, 0.0, -1.0);\n"
     "  if (zs.y < -2.5) {\n"
     "    float zfar = -mvp[2][2], znear = zfar + 20.0 * mvp[2][3];\n"
-    "    outp.pkey = float3(znear, zfar, -zs.y - 3.0);\n"
+    "    outp.pkey = float4(znear, zfar, -zs.y - 3.0, inp.p0.w);\n"
+    "    outp.pbox = float4(floor(inp.p1.w / 1024.0), fmod(inp.p1.w, 1024.0), floor(inp.p2.w / 1024.0), fmod(inp.p2.w, 1024.0));\n"
     "    outp.fdepth = -2.0;\n"
     "    outp.pos.z = 0.0;\n"
     "  } else if (zs.y < 0.0) {\n"
@@ -892,7 +936,7 @@ static const char *game_render_fill_fs_hlsl =
     "Texture2D<float4> lumat : register(t1);\n"
     "Texture2D<float4> cxlat : register(t2);\n"
     "SamplerState smp : register(s0);\n"
-    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; nointerpolation float fdepth : TEXCOORD5; nointerpolation float3 pkey : TEXCOORD6; };\n"
+    "struct fs_in { float4 pos : SV_Position; float4 color : COLOR0; float2 uv : TEXCOORD0; nointerpolation float4 tile : TEXCOORD1; nointerpolation float4 lbpl : TEXCOORD2; float ez : TEXCOORD3; float3 bpix : TEXCOORD4; nointerpolation float fdepth : TEXCOORD5; nointerpolation float4 pkey : TEXCOORD6; nointerpolation float4 pbox : TEXCOORD7; };\n"
     "static const int LOG2[128] = { " GAME_RENDER_LOG2_TABLE " };\n"
     "bool has(float fl, int bit) { return (((int)(fl + 0.5)) & bit) != 0; }\n"
     "int fast_log2(float z) {\n"
@@ -919,9 +963,8 @@ static const char *game_render_fill_fs_hlsl =
     "  if (has(fl, 16) && (copy.y & 1) != 0) q.y = size.y - 1 - q.y;\n"
     "  return atlas.Load(int3((t.xy + q) & 2047, 0)).r;\n"
     "}\n"
-    "float2 sample_level(float2 uv, float4 tile, float fl, int L) {\n"
-    "  int4 t = level_tile(tile, fl, L);\n"
-    "  float2 c = uv / pow(2.0, (float)L) - 0.5;\n"
+    "float2 sample_tile(int4 t, float fl, float2 c) {\n"
+    "  c -= 0.5;\n"
     "  int2 i0 = (int2)floor(c);\n"
     "  float2 f = frac(c);\n"
     "  int2 edge = (int2)((uint2)(i0 + t.zw * 8) % (uint2)t.zw);\n"
@@ -948,11 +991,22 @@ static const char *game_render_fill_fs_hlsl =
     "  }\n"
     "  return float2(lerp(row0, row1, f.y), a);\n"
     "}\n"
-    "float pixel_depth(float z, float3 pkey) {\n"
+    "float2 sample_level(float2 uv, float4 tile, float fl, int L) {\n"
+    "  return sample_tile(level_tile(tile, fl, L), fl, uv / pow(2.0, (float)L));\n"
+    "}\n"
+    /* the microtexture's coordinates: GAME_RENDER_MICRO_UV_GLSL */
+    "float2 sample_micro(float2 uv, float fl) {\n"
+    "  int f = (int)(fl + 0.5);\n"
+    "  float scale = (float)(2 << ((1 << ((f >> 12) & 3)) - 1));\n"
+    "  float2 mu = (uv - floor(uv * (scale / 256.0)) * (256.0 / scale)) * scale;\n"
+    "  int4 t = int4(((f >> 14) & 1) * 128, ((f >> 15) & 3) * 128 + (has(fl, 4) ? 0 : 1024), 128, 128);\n"
+    "  return sample_tile(t, fl, mu);\n"
+    "}\n"
+    "float pixel_depth(float z, float4 pkey, float3 bpix, float4 pbox) {\n"
     "  float key = 0.0;\n"
     "  if (z > 0.0) {\n"
     "    uint u = asuint(z);\n"
-    "    int e = (int)((u >> 23) & 255u) - (int)(pkey.z + 0.5);\n"
+    "    int e = (int)((u >> 23) & 255u) - (int)floor(pkey.z);\n"
     "    uint mant = (u & 0x7fffffu) + 0x400u;\n"
     "    if (mant > 0x7fffffu) { e++; mant = (mant & 0x7fffffu) >> 1; }\n"
     "    mant >>= 11;\n"
@@ -960,10 +1014,13 @@ static const char *game_render_fill_fs_hlsl =
     "    else if (e >= 0) key = (float)(((uint)(e + 1) << 12) | mant);\n"
     "    else if (e >= -12) key = (float)((mant | 0x1000u) >> (uint)(-e));\n"
     "  }\n"
+    "  key = max(key, frac(pkey.z) * 65536.0);\n"
+    "  float2 bp = bpix.xy / bpix.z;\n"
+    "  if (bp.x >= pbox.x && bp.x < pbox.y + 1.0 && bp.y >= pbox.z && bp.y < pbox.w + 1.0) key = min(key, pkey.w);\n"
     "  return lerp(pkey.x, pkey.y, (key + 0.5) * (1.0 / 65536.0));\n"
     "}\n"
     "float4 main(fs_in inp, out float depth : SV_Depth) : SV_Target0 {\n"
-    "  depth = inp.fdepth >= 0.0 ? inp.fdepth : inp.fdepth < -1.5 ? pixel_depth(inp.ez, inp.pkey) : inp.pos.z;\n"
+    "  depth = inp.fdepth >= 0.0 ? inp.fdepth : inp.fdepth < -1.5 ? pixel_depth(inp.ez, inp.pkey, inp.bpix, inp.pbox) : inp.pos.z;\n"
     "  float fl = inp.lbpl.z;\n"
     "  float lmax = floor(log2(max(min(inp.tile.z, inp.tile.w), 2.0)) + 0.5) - 1.0;\n"
     "  float lod = clamp(log2(max(length(ddx(inp.uv)), length(ddy(inp.uv)))), 0.0, lmax);\n"
@@ -972,14 +1029,17 @@ static const char *game_render_fill_fs_hlsl =
     "  if (inp.tile.z > 0.0) {\n"
     "    int L0 = (int)floor(lod);\n"
     "    float blend = frac(lod);\n"
+    "    int mml = 0;\n"
     "    if (inp.lbpl.w < 100000.0) {\n"
-    "      int mml = fast_log2(inp.ez) - (int)inp.lbpl.w;\n"
+    "      mml = fast_log2(inp.ez) - (int)inp.lbpl.w;\n"
     "      int maxl = (int)lmax;\n"
     "      L0 = clamp(mml >> 7, 0, maxl);\n"
     "      blend = (mml > 0 && L0 < maxl) ? (float)((mml & 127) * 2) / 256.0 : 0.0;\n"
     "    }\n"
     "    float2 tx = lerp(sample_level(inp.uv, inp.tile, fl, L0),\n"
     "                     sample_level(inp.uv, inp.tile, fl, L0 + 1), blend);\n"
+    "    if (has(fl, 2048) && mml < 0)\n"
+    "      tx = lerp(tx, sample_micro(inp.uv, fl), (float)min(-mml >> ((((int)(fl + 0.5)) >> 12) & 3), 127) / 256.0);\n"
     "    if (has(fl, 1) && tx.y < 0.5) discard;\n"
     "    float al = tx.x;\n"
     "    if (inp.lbpl.x < 0.0) {\n"
@@ -1874,6 +1934,30 @@ static inline void game_render__ramp_begin(void) {
     g_game_render.ramp_count = 0;
 }
 
+/* The row a shade key holds in the hash slots, made in the first free slot
+ * if new; -1 when it is new but no row can be made, or 64 probes find none. */
+static inline int game_render__shade_find(const game_render_shade_key_t *k) {
+    uint32_t h = (k->lb * 2654435761u) ^ ((uint32_t)k->poly * 40503u) ^ ((uint32_t)k->col * 2246822519u);
+    for (uint32_t probe = 0; probe < 64u; probe++) {
+        uint32_t s = (h + probe) & (GAME_RENDER_SHADE_SLOTS - 1u);
+        uint16_t held = g_shade_slot_row[s];
+        if (held) {
+            const game_render_shade_key_t *e = &g_shade_key[held - 1];
+            if (e->lb == k->lb && e->poly == k->poly && e->col == k->col) return held - 1;
+            continue;
+        }
+        if (g_ramp_uploaded || g_game_render.ramp_count == GAME_RENDER_RAMP_ROWS) return -1;
+        int row = g_game_render.ramp_count++;
+        g_shade_key[row]     = *k;
+        g_shade_is_row[row]  = 1;
+        g_shade_slot_row[s]  = (uint16_t)(row + 1);
+        game_render__shade_fill(row);
+        g_game_render.ramp_dirty = true;
+        return row;
+    }
+    return -1;
+}
+
 /* The shade row for a face's (luma band, poly_luma, colour), made if new; -1
  * when the face keeps the shader's lumaram + ramp lookups. */
 static inline int game_render__shade_row(float lb, float pl, float r, float g, float b) {
@@ -1884,25 +1968,7 @@ static inline int game_render__shade_row(float lb, float pl, float r, float g, f
     float plc = pl < 0.0f ? 0.0f : (pl > 1.0f ? 1.0f : pl);
     game_render_shade_key_t k = { (uint32_t)lb, (uint16_t)(plc * 255.0f + 0.5f),
                                   (uint16_t)((r5 << 10) | (g5 << 5) | b5) };
-    uint32_t h = (k.lb * 2654435761u) ^ ((uint32_t)k.poly * 40503u) ^ ((uint32_t)k.col * 2246822519u);
-    for (uint32_t probe = 0; probe < 64u; probe++) {
-        uint32_t s = (h + probe) & (GAME_RENDER_SHADE_SLOTS - 1u);
-        uint16_t held = g_shade_slot_row[s];
-        if (held) {
-            const game_render_shade_key_t *e = &g_shade_key[held - 1];
-            if (e->lb == k.lb && e->poly == k.poly && e->col == k.col) return held - 1;
-            continue;
-        }
-        if (g_ramp_uploaded || g_game_render.ramp_count == GAME_RENDER_RAMP_ROWS) return -1;
-        int row = g_game_render.ramp_count++;
-        g_shade_key[row]     = k;
-        g_shade_is_row[row]  = 1;
-        g_shade_slot_row[s]  = (uint16_t)(row + 1);
-        game_render__shade_fill(row);
-        g_game_render.ramp_dirty = true;
-        return row;
-    }
-    return -1;
+    return game_render__shade_find(&k);
 }
 
 /* The ramp row for a fill colour (as the shader rounds it to 5 bits a channel),
@@ -2333,6 +2399,123 @@ static inline void game_render__batch_run(const game_render_run_t *run, int nt, 
     }
 }
 
+/* Per-pixel depth against a checker face (geo3d.h g_geo3d_pixel_depth): the
+ * checker face keeps its key, so an opaque face the board sorts in front of it
+ * must not recede past that key where the two meet, or the effect shows
+ * through it: Daytona USA's tyre smoke over the player's number plate, an
+ * opponent's tinted glass over its own roof (Pinboard #1083). An opaque face
+ * whose key is at most a checker face's in the same window, and whose screen
+ * box meets that face's, gets a cap inside that box: its pixels go no further
+ * back than one under the checker's key (the key itself on a tie, which the
+ * later polygon takes). The box is the checker's part in front of the eye: a
+ * whole-screen box, for a checker reaching behind the camera, capped a wheel
+ * arch level with the body it sits under, and the arch, drawn later, came
+ * through it. The cap and the box ride in the corners' sort z, which a face
+ * with a flat key does not use. #1070's dust, keyed nearer than the bumper,
+ * still covers it; outside the box, or short of the cap, the face stays per
+ * pixel. */
+typedef struct { float x0, y0, x1, y1, slice[2]; uint32_t key; } game_render__chk_box_t;
+
+/* Triangle T's box in board pixels (the fill's bpix) under the run's matrix m
+ * (column-major), of its part in front of the eye, clamped to [0, 1023]. */
+static inline void game_render__tri_box(const geo3d_tri_t *T, const float *m, float *b) {
+    const float v[3][3] = { { T->x0, T->y0, T->z0 }, { T->x1, T->y1, T->z1 }, { T->x2, T->y2, T->z2 } };
+    float c[3][3];                                   /* clip x, y, w */
+    for (int i = 0; i < 3; i++)
+        for (int r = 0; r < 3; r++) {
+            const int k = r == 2 ? 3 : r;
+            c[i][r] = m[k] * v[i][0] + m[4 + k] * v[i][1] + m[8 + k] * v[i][2] + m[12 + k];
+        }
+    b[0] = b[1] = 1e30f; b[2] = b[3] = -1e30f;
+    const float w_near = 1e-3f;                  /* not "near": windows.h defines it */
+    for (int i = 0; i < 3; i++) {                    /* the corners in front, and the edges' cuts at w = near */
+        const float *p = c[i], *q = c[(i + 1) % 3];
+        float pt[2][3];
+        int np = 0;
+        if (p[2] >= w_near) { pt[np][0] = p[0]; pt[np][1] = p[1]; pt[np][2] = p[2]; np++; }
+        if ((p[2] >= w_near) != (q[2] >= w_near)) {
+            const float t = (w_near - p[2]) / (q[2] - p[2]);
+            pt[np][0] = p[0] + (q[0] - p[0]) * t; pt[np][1] = p[1] + (q[1] - p[1]) * t; pt[np][2] = w_near; np++;
+        }
+        for (int j = 0; j < np; j++) {
+            const float x = (pt[j][0] / pt[j][2] + 1.0f) * 248.0f, y = (1.0f - pt[j][1] / pt[j][2]) * 192.0f;
+            if (x < b[0]) b[0] = x;
+            if (y < b[1]) b[1] = y;
+            if (x > b[2]) b[2] = x;
+            if (y > b[3]) b[3] = y;
+        }
+    }
+    for (int k = 0; k < 4; k++) b[k] = b[k] < 0.0f ? 0.0f : b[k] > 1023.0f ? 1023.0f : floorf(b[k]);
+}
+
+#define GAME_RENDER_MAX_CHECKER 1024
+static game_render__chk_box_t g_game_render__chk[GAME_RENDER_MAX_CHECKER];
+
+/* The boxes of the batch's checkered faces into g_game_render__chk; how many. */
+static inline int game_render__checker_boxes(int nt) {
+    int nc = 0;
+    for (int r = 0; r < g_render_batch.count; r++) {
+        const game_render_run_t *run = &g_render_batch.runs[r];
+        for (int i = run->tri_first; i < run->tri_first + run->tri_count && i < nt; i++) {
+            const geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+            if (!((int)(T->fl + 0.5f) & (int)GEO3D_FACE_CHECKER) || T->zl > -1.0f || T->zl < -2.0f) continue;
+            if (nc == GAME_RENDER_MAX_CHECKER) break;
+            game_render__chk_box_t *c = &g_game_render__chk[nc++];
+            float b[4];
+            game_render__tri_box(T, run->mvp_t, b);
+            c->x0 = b[0]; c->y0 = b[1]; c->x1 = b[2]; c->y1 = b[3];
+            c->slice[0] = run->mvp_t[10]; c->slice[1] = run->mvp_t[14];
+            c->key = (uint32_t)floorf((-T->zl - 1.0f) * 65536.0f);
+        }
+    }
+    return nc;
+}
+
+/* u (x0, x1, y0, y1) grown to take in box c. */
+static inline void game_render__box_union(float u[4], const game_render__chk_box_t *c) {
+    if (c->x0 < u[0]) u[0] = c->x0;
+    if (c->x1 > u[1]) u[1] = c->x1;
+    if (c->y0 < u[2]) u[2] = c->y0;
+    if (c->y1 > u[3]) u[3] = c->y1;
+}
+
+/* Per-pixel face T of run: capped below the checkered faces it overlaps that
+ * sort in front of it, their boxes' union kept with the cap. */
+static inline void game_render__pixel_cap(geo3d_tri_t *T, const game_render_run_t *run, int nc) {
+    const float v = -T->zl - GEO3D_PIXEL_ZL;
+    const uint32_t key = (uint32_t)((v - floorf(v)) * 65536.0f + 0.5f);
+    uint32_t cap = 0xffffffffu;
+    float b[4], u[4] = { 1023.0f, 0.0f, 1023.0f, 0.0f };
+    bool boxed = false;
+    for (int k = 0; k < nc; k++) {
+        const game_render__chk_box_t *c = &g_game_render__chk[k];
+        if (key > c->key || c->slice[0] != run->mvp_t[10] || c->slice[1] != run->mvp_t[14]) continue;
+        if (!boxed) { game_render__tri_box(T, run->mvp_t, b); boxed = true; }
+        if (b[0] > c->x1 || b[2] < c->x0 || b[1] > c->y1 || b[3] < c->y0) continue;
+        uint32_t to = key < c->key ? c->key - 1u : c->key;
+        if (to < cap) cap = to;
+        game_render__box_union(u, c);
+    }
+    if (cap == 0xffffffffu) return;
+    T->zs0 = (float)cap;                     /* x0, x1 and y0, y1 packed by 1024 */
+    T->zs1 = u[0] * 1024.0f + u[1];
+    T->zs2 = u[2] * 1024.0f + u[3];
+}
+
+static inline void game_render__pixel_checker_caps(int nt) {
+    if (!g_geo3d_pixel_list) return;
+    int nc = game_render__checker_boxes(nt);
+    if (nc == 0) return;
+    for (int r = 0; r < g_render_batch.count; r++) {
+        const game_render_run_t *run = &g_render_batch.runs[r];
+        for (int i = run->tri_first; i < run->tri_first + run->tri_count && i < nt; i++) {
+            geo3d_tri_t *T = &g_geo3d_tris.tris[i];
+            if (T->zl > -(GEO3D_PIXEL_ZL - 0.5f)) continue;    /* not a per-pixel face */
+            game_render__pixel_cap(T, run, nc);
+        }
+    }
+}
+
 /* Upload the batch's geometry once and draw its runs in order, then empty it. */
 static inline void game_render_batch_flush(bool lines_only) {
     const int nt = g_geo3d_tris.count  > GEO3D_MAX_TRIS  ? GEO3D_MAX_TRIS  : g_geo3d_tris.count;
@@ -2344,6 +2527,7 @@ static inline void game_render_batch_flush(bool lines_only) {
      * drawn as consecutive stretches of alike triangles, in order, so the ones
      * that cannot go through the discard-free shader. */
     static uint8_t can_discard[GEO3D_MAX_TRIS];
+    if (fills) game_render__pixel_checker_caps(nt);
     if (fills) game_render__batch_fills(nt, can_discard);
     if (lines) game_render__batch_lines(nl);
 
@@ -2389,6 +2573,7 @@ static inline void gm_mat4_geo_projection(float *m, const float *gproj, int win,
         m[10] = z10;
         m[11] = z11;
     }
+    stereo_apply_projection(m);   /* the eye being drawn, with 3D on (stereo.h) */
 }
 
 /*

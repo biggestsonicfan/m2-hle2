@@ -858,17 +858,23 @@ static void ps3ui_osk_done(ps3ui_app_t *a)
     ps3ui_app_go(a, PS3UI_SCR_CONNECT);
 }
 
+/* The d-pad on the keyboard: rows wrap, and a column past the shorter
+ * action row is pulled back onto it. */
+static void ps3ui_osk_move(ps3ui_app_t *a)
+{
+    if (ps3ui_hit(a, PS3UI_PAD_UP)) a->osk_row = (a->osk_row + 4) % 5;
+    if (ps3ui_hit(a, PS3UI_PAD_DOWN)) a->osk_row = (a->osk_row + 1) % 5;
+    int cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
+    if (a->osk_col >= cols) a->osk_col = cols - 1;
+    if (ps3ui_hit(a, PS3UI_PAD_LEFT)) a->osk_col = (a->osk_col + cols - 1) % cols;
+    if (ps3ui_hit(a, PS3UI_PAD_RIGHT)) a->osk_col = (a->osk_col + 1) % cols;
+}
+
 static void ps3ui_update_osk(ps3ui_app_t *a)
 {
     char *t = a->osk_text[a->osk_field];
     size_t len = strlen(t);
-    int cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
-    if (ps3ui_hit(a, PS3UI_PAD_UP)) a->osk_row = (a->osk_row + 4) % 5;
-    if (ps3ui_hit(a, PS3UI_PAD_DOWN)) a->osk_row = (a->osk_row + 1) % 5;
-    cols = a->osk_row == 4 ? PS3UI_OSK_ACTS : 10;
-    if (a->osk_col >= cols) a->osk_col = cols - 1;
-    if (ps3ui_hit(a, PS3UI_PAD_LEFT)) a->osk_col = (a->osk_col + cols - 1) % cols;
-    if (ps3ui_hit(a, PS3UI_PAD_RIGHT)) a->osk_col = (a->osk_col + 1) % cols;
+    ps3ui_osk_move(a);
     if (ps3ui_hit(a, PS3UI_PAD_SQUARE) && len)   /* delete */
         t[len - 1] = 0;
     if (ps3ui_hit(a, PS3UI_PAD_TRIANGLE) && len + 1 < 20)
@@ -926,6 +932,36 @@ static uint8_t ps3ui_step(uint8_t v, int n, int d, int any)
     return any ? (pos == 0 ? MATCH_ANY : (uint8_t)(pos - 1)) : (uint8_t)pos;
 }
 
+/* The RULE MENU's players row stepped by d: 2 to 8 (any, too, in a search). */
+static void ps3ui_rule_players(ps3ui_app_t *a, match_rules_t *r, int d)
+{
+    if (a->rule_search) {
+        uint8_t p = r->players == MATCH_ANY ? MATCH_ANY : (uint8_t)(r->players - 2);
+        p = ps3ui_step(p, 7, d, 1);
+        r->players = p == MATCH_ANY ? MATCH_ANY : (uint8_t)(p + 2);
+    } else {
+        a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
+    }
+}
+
+/* RULE MENU row id stepped by d (left -1, right 1). */
+static void ps3ui_rule_change(ps3ui_app_t *a, int id, int d)
+{
+    int any = a->rule_search;
+    match_rules_t *r = any ? &a->want : &a->rule;
+    switch (id) {
+    case PS3UI_RULE_PLAYERS: ps3ui_rule_players(a, r, d); break;
+    case PS3UI_RULE_ROUNDS: r->rounds = ps3ui_step(r->rounds, 4, d, any); break;
+    case PS3UI_RULE_TIME:   r->time = ps3ui_step(r->time, 4, d, any); break;
+    case PS3UI_RULE_TYPE:   r->type = ps3ui_step(r->type, 4, d, any); break;
+    case PS3UI_RULE_SECRET: r->secret = ps3ui_step(r->secret, 2, d, any); break;
+    case PS3UI_RULE_RANGE:  r->range ^= 1; break;
+    case PS3UI_RULE_DELAY:  a->rule_delay = (a->rule_delay + d + 9) % 9; break;
+    case PS3UI_RULE_VS:     a->rule_vs ^= 1; break;
+    case PS3UI_RULE_DAMAGE: a->rule_damage_real ^= 1; break;
+    }
+}
+
 /* RULE MENU: Create Match's room (players, the PS3's rules, then ours), or the
  * rules Custom Match looks for. */
 static void ps3ui_update_rule(ps3ui_app_t *a)
@@ -934,28 +970,8 @@ static void ps3ui_update_rule(ps3ui_app_t *a)
     ps3ui_move(a, &a->cursor, n, 1);
     int d = ps3ui_hit(a, PS3UI_PAD_RIGHT) ? 1 : ps3ui_hit(a, PS3UI_PAD_LEFT) ? -1 : 0;
     int any = a->rule_search;
-    match_rules_t *r = any ? &a->want : &a->rule;
-    if (d && a->cursor < n) {
-        switch (ids[a->cursor]) {
-        case PS3UI_RULE_PLAYERS:
-            if (any) {
-                uint8_t p = r->players == MATCH_ANY ? MATCH_ANY : (uint8_t)(r->players - 2);
-                p = ps3ui_step(p, 7, d, 1);
-                r->players = p == MATCH_ANY ? MATCH_ANY : (uint8_t)(p + 2);
-            } else {
-                a->rule_players = 2 + (a->rule_players - 2 + d + 7) % 7;
-            }
-            break;
-        case PS3UI_RULE_ROUNDS: r->rounds = ps3ui_step(r->rounds, 4, d, any); break;
-        case PS3UI_RULE_TIME:   r->time = ps3ui_step(r->time, 4, d, any); break;
-        case PS3UI_RULE_TYPE:   r->type = ps3ui_step(r->type, 4, d, any); break;
-        case PS3UI_RULE_SECRET: r->secret = ps3ui_step(r->secret, 2, d, any); break;
-        case PS3UI_RULE_RANGE:  r->range ^= 1; break;
-        case PS3UI_RULE_DELAY:  a->rule_delay = (a->rule_delay + d + 9) % 9; break;
-        case PS3UI_RULE_VS:     a->rule_vs ^= 1; break;
-        case PS3UI_RULE_DAMAGE: a->rule_damage_real ^= 1; break;
-        }
-    }
+    if (d && a->cursor < n)
+        ps3ui_rule_change(a, ids[a->cursor], d);
     if (ps3ui_hit(a, PS3UI_PAD_CIRCLE)) {
         ps3ui_app_go(a, PS3UI_SCR_MENU);
     } else if (ps3ui_hit(a, PS3UI_PAD_CROSS)) {
@@ -1284,12 +1300,9 @@ static void ps3ui_app_ask_leave_link(ps3ui_app_t *a)
     ps3ui_app_ask(a, PS3UI_DLG_LEAVE, "Do you want to exit this session?");
 }
 
-/* In a room or at its barrier: the result first, then the room or VS screen. */
-static void ps3ui_follow_room(ps3ui_app_t *a)
+/* A new match number: note it, and with a result in the lobby, show it (1). */
+static int ps3ui_follow_result(ps3ui_app_t *a, const netplay_status_t *st)
 {
-    const netplay_status_t *st = &a->st;
-    if (ps3ui_follow_link(a) || a->scr == PS3UI_SCR_RESULT)
-        return;
     /* a result has come in: show it first */
     if (st->room.match != a->last_match) {
         uint16_t prev = a->last_match;
@@ -1298,9 +1311,20 @@ static void ps3ui_follow_room(ps3ui_app_t *a)
             a->result_side = st->room.last_result;
             a->result_t = 0.0f;
             ps3ui_app_go(a, PS3UI_SCR_RESULT);
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+
+/* In a room or at its barrier: the result first, then the room or VS screen. */
+static void ps3ui_follow_room(ps3ui_app_t *a)
+{
+    const netplay_status_t *st = &a->st;
+    if (ps3ui_follow_link(a) || a->scr == PS3UI_SCR_RESULT)
+        return;
+    if (ps3ui_follow_result(a, st))
+        return;
     int two = st->member_count <= 2 || st->max_slot <= 2;
     ps3ui_screen_t want = two && st->member_count >= 2 ? PS3UI_SCR_VS : PS3UI_SCR_ROOM;
     if (st->state == NETPLAY_SYNCING)
@@ -1639,23 +1663,37 @@ static const char *ps3ui_rules_text(int id, uint8_t v, char *buf, size_t n)
     }
 }
 
+/* The players row's value: any, or 2 to 8 (2 the default to create). */
+static const char *ps3ui_rule_players_value(const ps3ui_app_t *a, const match_rules_t *r, char *buf, size_t n,
+                                            int *is_def)
+{
+    if (a->rule_search) {
+        *is_def = r->players == MATCH_ANY;
+        if (*is_def)
+            return ps3ui_str_any;
+        snprintf(buf, n, "%u", (unsigned)r->players);
+    } else {
+        *is_def = a->rule_players == 2;
+        snprintf(buf, n, "%d", a->rule_players);
+    }
+    return buf;
+}
+
+static const char *ps3ui_rule_delay_value(const ps3ui_app_t *a, char *buf, size_t n)
+{
+    if (!a->rule_delay)
+        return "Auto";
+    snprintf(buf, n, "%d", a->rule_delay);
+    return buf;
+}
+
 /* One RULE MENU row's value, and whether it is the default (drawn green). */
 static const char *ps3ui_rule_value(const ps3ui_app_t *a, int id, char *buf, size_t n, int *is_def)
 {
     const match_rules_t *r = a->rule_search ? &a->want : &a->rule;
     const match_rules_t def = a->rule_search ? match_rules_any() : match_rules_ps3();
     switch (id) {
-    case PS3UI_RULE_PLAYERS:
-        if (a->rule_search) {
-            *is_def = r->players == MATCH_ANY;
-            if (*is_def)
-                return ps3ui_str_any;
-            snprintf(buf, n, "%u", (unsigned)r->players);
-        } else {
-            *is_def = a->rule_players == 2;
-            snprintf(buf, n, "%d", a->rule_players);
-        }
-        return buf;
+    case PS3UI_RULE_PLAYERS: return ps3ui_rule_players_value(a, r, buf, n, is_def);
     case PS3UI_RULE_ROUNDS: *is_def = r->rounds == def.rounds; return ps3ui_rules_text(id, r->rounds, buf, n);
     case PS3UI_RULE_TIME:   *is_def = r->time == def.time; return ps3ui_rules_text(id, r->time, buf, n);
     case PS3UI_RULE_TYPE:   *is_def = r->type == def.type; return ps3ui_rules_text(id, r->type, buf, n);
@@ -1663,10 +1701,7 @@ static const char *ps3ui_rule_value(const ps3ui_app_t *a, int id, char *buf, siz
     case PS3UI_RULE_RANGE:  *is_def = r->range == def.range; return ps3ui_rules_text(id, r->range, buf, n);
     case PS3UI_RULE_DELAY:
         *is_def = !a->rule_delay;
-        if (!a->rule_delay)
-            return "Auto";
-        snprintf(buf, n, "%d", a->rule_delay);
-        return buf;
+        return ps3ui_rule_delay_value(a, buf, n);
     case PS3UI_RULE_VS:     *is_def = !a->rule_vs; return a->rule_vs ? "On" : "Off";
     case PS3UI_RULE_DAMAGE: *is_def = !a->rule_damage_real; return a->rule_damage_real ? "REAL" : "NORMAL";
     default:                *is_def = 1; return "";
@@ -2109,6 +2144,77 @@ static const char *ps3ui_hints(const ps3ui_app_t *a)
     }
 }
 
+/* ONLINE BATTLE: the sign-in menu, and what the picked row means. */
+static void ps3ui_draw_signin(ps3ui_canvas_t *cv, ps3ui_app_t *a)
+{
+    static const char *const rows[4] = { "Sign in with Twitch", "Sign in with an RPCN account", "Server",
+                                         "Back" };
+    const char *values[4] = { NULL, NULL, ps3ui_server_label(a), NULL };
+    ps3ui_draw_menu(cv, a, "ONLINE BATTLE", rows, 4, values);
+    ps3ui_draw_message(cv, a, a->cursor == 0
+        ? "Twitch sign-in is on the sonicthefighte.rs server."
+        : ps3ui_on_community(a)
+        ? "sonicthefighte.rs: this emulator's own rooms, with Twitch sign-in."
+        : netplay_server_is_official(a->cfg.server)
+        ? "The official RPCN server (np.rpcs3.net), shared with RPCS3's players."
+        : "Sign in to RPCN to play online.");
+}
+
+/* Twitch's device code, once it has come. */
+static void ps3ui_draw_twitch(ps3ui_canvas_t *cv, ps3ui_app_t *a)
+{
+    char t[512];
+    if (a->st.twitch_user_code[0])
+        snprintf(t, sizeof t, "Go to %s and enter the code\n%s", a->st.twitch_uri[0] ? a->st.twitch_uri
+                                                                      : "twitch.tv/activate",
+                 a->st.twitch_user_code);
+    else
+        snprintf(t, sizeof t, "Accessing...");
+    ps3ui_draw_status(cv, a, t);
+}
+
+/* RULE MENU: each row's value, the defaults green. */
+static void ps3ui_draw_rule(ps3ui_canvas_t *cv, ps3ui_app_t *a)
+{
+    int ids[PS3UI_VALUE_ROWS];
+    ps3ui_value_list_t l = { .title = ps3ui_str_title, .n = ps3ui_rule_list(a, ids) };
+    char buf[PS3UI_VALUE_ROWS][24];
+    for (int i = 0; i < l.n; i++) {
+        l.labels[i] = ps3ui_rule_label[ids[i]];
+        l.values[i] = ps3ui_rule_value(a, ids[i], buf[i], sizeof buf[i], &l.is_default[i]);
+    }
+    ps3ui_draw_values(cv, &a->main, a->cursor, a->cursor_t, &l);
+}
+
+/* The screen under the hint bar (not VS, the AGAIN prompt or a dialog). */
+static void ps3ui_draw_screen(ps3ui_canvas_t *cv, ps3ui_app_t *a)
+{
+    switch (a->scr) {
+    case PS3UI_SCR_SIGNIN: ps3ui_draw_signin(cv, a); break;
+    case PS3UI_SCR_TWITCH: ps3ui_draw_twitch(cv, a); break;
+    case PS3UI_SCR_OSK: ps3ui_draw_osk(cv, a); break;
+    case PS3UI_SCR_MENU: ps3ui_draw_menu(cv, a, ps3ui_str_title, ps3ui_str_menu, 5, NULL); break;
+    case PS3UI_SCR_RULE: ps3ui_draw_rule(cv, a); break;
+    case PS3UI_SCR_CONNECT:
+        ps3ui_draw_status(cv, a, a->searching ? "Searching for sessions..." : "Accessing...");
+        break;
+    case PS3UI_SCR_SEARCH: {
+        char m[128];
+        ps3ui_draw_search(cv, a);
+        ps3ui_draw_message(cv, a, ps3ui_search_message(a, m, sizeof m));
+        break;
+    }
+    case PS3UI_SCR_ROOM:
+        if (a->st.member_count >= 3)
+            ps3ui_draw_room_list(cv, a);
+        else
+            ps3ui_draw_status(cv, a, "Waiting for an opponent.");
+        break;
+    case PS3UI_SCR_RESULT: ps3ui_draw_result(cv, a); break;
+    default: break;
+    }
+}
+
 static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
 {
     if (!ps3ui_app_visible(a))
@@ -2121,63 +2227,7 @@ static void ps3ui_app_draw(ps3ui_app_t *a, ps3ui_canvas_t *cv)
         ps3ui_draw_hint_text(cv, &bar, ps3ui_hints(a));
     } else {
         ps3ui_draw_bg(cv, a->bg_t);
-        switch (a->scr) {
-        case PS3UI_SCR_SIGNIN: {
-            static const char *const rows[4] = { "Sign in with Twitch", "Sign in with an RPCN account", "Server",
-                                                 "Back" };
-            const char *values[4] = { NULL, NULL, ps3ui_server_label(a), NULL };
-            ps3ui_draw_menu(cv, a, "ONLINE BATTLE", rows, 4, values);
-            ps3ui_draw_message(cv, a, a->cursor == 0
-                ? "Twitch sign-in is on the sonicthefighte.rs server."
-                : ps3ui_on_community(a)
-                ? "sonicthefighte.rs: this emulator's own rooms, with Twitch sign-in."
-                : netplay_server_is_official(a->cfg.server)
-                ? "The official RPCN server (np.rpcs3.net), shared with RPCS3's players."
-                : "Sign in to RPCN to play online.");
-            break;
-        }
-        case PS3UI_SCR_TWITCH: {
-            char t[512];
-            if (a->st.twitch_user_code[0])
-                snprintf(t, sizeof t, "Go to %s and enter the code\n%s", a->st.twitch_uri[0] ? a->st.twitch_uri
-                                                                              : "twitch.tv/activate",
-                         a->st.twitch_user_code);
-            else
-                snprintf(t, sizeof t, "Accessing...");
-            ps3ui_draw_status(cv, a, t);
-            break;
-        }
-        case PS3UI_SCR_OSK: ps3ui_draw_osk(cv, a); break;
-        case PS3UI_SCR_MENU: ps3ui_draw_menu(cv, a, ps3ui_str_title, ps3ui_str_menu, 5, NULL); break;
-        case PS3UI_SCR_RULE: {
-            int ids[PS3UI_VALUE_ROWS];
-            ps3ui_value_list_t l = { .title = ps3ui_str_title, .n = ps3ui_rule_list(a, ids) };
-            char buf[PS3UI_VALUE_ROWS][24];
-            for (int i = 0; i < l.n; i++) {
-                l.labels[i] = ps3ui_rule_label[ids[i]];
-                l.values[i] = ps3ui_rule_value(a, ids[i], buf[i], sizeof buf[i], &l.is_default[i]);
-            }
-            ps3ui_draw_values(cv, &a->main, a->cursor, a->cursor_t, &l);
-            break;
-        }
-        case PS3UI_SCR_CONNECT:
-            ps3ui_draw_status(cv, a, a->searching ? "Searching for sessions..." : "Accessing...");
-            break;
-        case PS3UI_SCR_SEARCH: {
-            char m[128];
-            ps3ui_draw_search(cv, a);
-            ps3ui_draw_message(cv, a, ps3ui_search_message(a, m, sizeof m));
-            break;
-        }
-        case PS3UI_SCR_ROOM:
-            if (a->st.member_count >= 3)
-                ps3ui_draw_room_list(cv, a);
-            else
-                ps3ui_draw_status(cv, a, "Waiting for an opponent.");
-            break;
-        case PS3UI_SCR_RESULT: ps3ui_draw_result(cv, a); break;
-        default: break;
-        }
+        ps3ui_draw_screen(cv, a);
         ps3ui_slot_t bar = ps3ui_draw_hint_bar(cv, a->bar.t);
         ps3ui_draw_hint_text(cv, &bar, ps3ui_hints(a));
     }

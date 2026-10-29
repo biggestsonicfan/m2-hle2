@@ -135,7 +135,8 @@ idle                           22.8         1395.6   61.26x
 
 - **With `-O3 -march=native`** the ratios were 84x, 20x, 6.2x and 4.2x.
 - **Why Mednafen is slower:** it runs every slot's full pipeline every sample, whether the slot is keyed or not, and interprets the DSP (its dynarec is compiled out here).
-- **Why scsp.h is faster:** it skips idle slots, and it runs STF's reverb as compiled C (`scsp_dsp_known.h`).
+- **Why scsp.h is faster:** it skips idle slots, and it runs STF's reverb as compiled C (`scsp_dsp_known.h`; since #1713 the other games' programs too).
+
 - **STF holds 5-16 voices,** where scsp.h is roughly 14-20x faster.
 
 So swapping in Mednafen's chip would cost speed, not save it. Where hardware sides with Mednafen, the thing to port is the behaviour, into scsp.h.

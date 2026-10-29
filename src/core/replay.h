@@ -203,9 +203,10 @@ typedef struct {
     size_t   len, cap;
     bool     full;
     uint32_t frame, slice;
-    bool     held_known, set_known, board_known;
+    bool     held_known, set_known, board_known, gun_known;
     uint32_t held, board;
     int32_t  set[FOLLOW_SET_WORDS];
+    uint8_t  gun[LIGHTGUN_FEED_BYTES];
     int      use_net_was;
     bool     latched;
     uint32_t tail;              /* frames still to record after the result; 0 = none yet */
@@ -267,9 +268,10 @@ typedef struct {
     int      at;                /* GGPO's frame number, -1 none */
     uint32_t id;                /* the replay it belongs to, 0 none */
     size_t   len;
-    bool     full, held_known, set_known, board_known;
+    bool     full, held_known, set_known, board_known, gun_known;
     uint32_t frame, slice, held, board, tail;
     int32_t  set[FOLLOW_SET_WORDS];
+    uint8_t  gun[LIGHTGUN_FEED_BYTES];
     int      native_n;
     replay_meta_t meta;
 } replay_mark_t;
@@ -686,7 +688,7 @@ static inline void replay__begin(emu_thread_ctx_t *ctx, bool local) {
     R->len = 0;
     R->full = false;
     R->frame = R->slice = 0;
-    R->held_known = R->set_known = R->board_known = false;
+    R->held_known = R->set_known = R->board_known = R->gun_known = false;
     R->tail = 0;
     R->id++;
     R->local = local;
@@ -829,6 +831,15 @@ static inline void replay__rec_state(void) {
         R->held = held;
         R->held_known = true;
     }
+    if (follow_has_gun()) {   /* the guns' pointers, as the leader keeps them */
+        uint8_t gun[LIGHTGUN_FEED_BYTES];
+        lightgun_latch(gun);
+        if (!R->gun_known || memcmp(gun, R->gun, sizeof gun)) {
+            replay__rec(FOLLOW_GUN, R->slice, gun, sizeof gun);
+            memcpy(R->gun, gun, sizeof gun);
+            R->gun_known = true;
+        }
+    }
 }
 
 /* Is the player's own game on, the profile says (not attract or a replay)? */
@@ -899,6 +910,7 @@ static inline void replay_slice_end(emu_thread_ctx_t *ctx, bool frame_end) {
         g_input.use_net = R->use_net_was;
         R->latched = false;
     }
+    if (!g_follow_lead.on) lightgun_unlatch();   /* a leader's slice ends in follow.h */
     replay__take_native();
     if (!R->on) return;
     if (!frame_end) { R->slice++; return; }
@@ -971,6 +983,7 @@ static inline void replay_ggpo_mark(int at) {
     m->frame = R->frame; m->slice = R->slice; m->tail = R->tail;
     m->held = R->held;  m->held_known = R->held_known;
     m->board = R->board; m->board_known = R->board_known;
+    memcpy(m->gun, R->gun, sizeof m->gun); m->gun_known = R->gun_known;
     memcpy(m->set, R->set, sizeof m->set);
     m->set_known = R->set_known;
     m->native_n = R->native.n;
@@ -989,6 +1002,7 @@ static inline void replay_ggpo_rewind(int at) {
         R->frame = m->frame; R->slice = m->slice; R->tail = m->tail;
         R->held = m->held;  R->held_known = m->held_known;
         R->board = m->board; R->board_known = m->board_known;
+        memcpy(R->gun, m->gun, sizeof R->gun); R->gun_known = m->gun_known;
         memcpy(R->set, m->set, sizeof R->set);
         R->set_known = m->set_known;
         replay__natives_cut(&R->native, m->native_n);

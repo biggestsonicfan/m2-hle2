@@ -48,7 +48,8 @@ function resolveNoclip() {
 export const NOCLIP = resolveNoclip();
 
 /** Import one of the explorer's modules by file name, e.g. `nc('model.js')`. */
-export const nc = (name) => import(pathToFileURL(path.join(NOCLIP, 'js', name)).href);
+const ncFile = (name) => pathToFileURL(path.join(NOCLIP, 'js', name)).href;
+export const nc = (name) => import(ncFile(name));
 
 /** The commit the grade was measured against, for a report to name. */
 export function noclipVersion() {

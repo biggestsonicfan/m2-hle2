@@ -36,6 +36,14 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   list as u16 shifts every entry two bytes and yields plausible-but-wrong world ids.
 - **Every room REPLY is `[u32 LE length][protobuf]`** (`Client::add_data_packet`). Strip it, or the
   length parses as a tag and the message reads as empty.
+- **Login's password is RPCS3's KEY, not what the player typed** (#548). RPCS3 sends
+  PBKDF2-HMAC-SHA3-256 of it (200,000 rounds, salt "No matter where you go, everybody's connected.",
+  64 uppercase hex: `derive_password`, `rpcn_settings_dialog.cpp`) at sign-up and login alike, so an
+  account RPCS3 made refuses the typed password as ErrorType=8. `rpcn_password.h` makes the key;
+  `netplay_password_pick` sends it first, and once more the other form after a refusal
+  (`netplay_password_refused`), since accounts m2hle made before took the password as typed. A
+  64-hex password is already a key (rpcs3.yml's) and goes as is; a working key replaces the typed
+  password in the settings file.
 - **Login's third string is the e-mail verification token, not a second password**, and the server
   compares it only when it has e-mail validation on (off by default). Empty is the normal value.
 - **When two peers share a public IPv4, RPCN hands out the peer's LOCAL address with port 3658
@@ -218,7 +226,7 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   and nothing runs it faster (fast-forward, unthrottled, a watcher's catch-up). Only the SLAVE
   trims (one frame early after 30 frame edges with 2+ of the master's messages waiting): a
   master that trimmed on the slave's answers would chase the slave's backlog. The board's
-  frame stays 416,667 cycles; a linked board refuses a state load and rewind.
+  frame stays 434,600 cycles; a linked board refuses a state load and rewind.
 - **A linked game's room match opens the link, not a lockstep session** (`netplay_member_start_link`,
   Pinboard #983). For a profile with a `link_role`, each fighter takes the match's side and
   generation (the datagram header) and calls `netplay_comm_open`; the room stays in its lobby
@@ -231,6 +239,8 @@ are **silently wrong** rather than loudly wrong when you get them half right.
   MASTER's m2hle starts a second one (`--versus-slave PORT:TOKEN`) and the two link as a room's
   pair does: the same `comm_link.h` datagrams, role boot and pace, over a UDP socket on
   127.0.0.1 with no RPCN. The MASTER sends nothing until the SLAVE's hello (magic and the token
-  from its command line) pins its port, then takes datagrams from that port only. The child dies
+  from its command line) pins its port, then takes datagrams from that port only, until that
+  port has been quiet 2 s (`COMM_LOCAL_GONE_MS`): then a hello with the token re-pins it, so a
+  SLAVE closed and started again links again, as a cable pulled and put back (Pinboard #1632). The child dies
   with its parent (`PR_SET_PDEATHSIG`; a kill-on-close job on Windows) and the MASTER quits when
   it is gone. No board path changes, so the proto does not move.

@@ -43,11 +43,11 @@ static uint32_t enc_ctrl(uint32_t op, int32_t disp) {
 static int s_empty_resets;
 static void empty_room_reset(void *c) { (void)c; s_empty_resets++; }
 
-int main(void) {
-    static memory_bus_t bus;
-    static i960_cpu_t   cpu;
-    static emu_thread_ctx_t ctx;
+static memory_bus_t bus;
+static i960_cpu_t   cpu;
+static emu_thread_ctx_t ctx;
 
+static void test_free_run(void) {
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
 
@@ -95,158 +95,160 @@ int main(void) {
 
     emu_thread_shutdown(&ctx);
     CHECK(!ctx.thread_alive, "emu thread shut down cleanly");
+}
 
-    /* run_frames (issue #98): the board stops itself at the edge of the N-th
-     * frame, from inside the slice's bookkeeping, not when a stop arrives.
-     * Driven through emu_slice_finish directly, with the vblank set by hand. */
-    {
-        unsigned f0 = g_emu_frames;
-        emu_run_frames(&ctx, 3);
-        for (int i = 0; i < 2; i++) {
-            g_vblank_edge = 1;
-            CHECK(emu_slice_finish(&ctx) == EMU_SLICE_FRAME && ctx.run_state == EMU_RUNNING,
-                  "run_frames: frames before the last keep running");
-        }
-        g_vblank_edge = 0;
-        CHECK(emu_slice_finish(&ctx) == EMU_SLICE_NO_FRAME && ctx.run_state == EMU_RUNNING,
-              "run_frames: a slice that ends mid-frame spends nothing");
+/* run_frames (issue #98): the board stops itself at the edge of the N-th
+ * frame, from inside the slice's bookkeeping, not when a stop arrives.
+ * Driven through emu_slice_finish directly, with the vblank set by hand. */
+static void test_run_frames(void) {
+    unsigned f0 = g_emu_frames;
+    emu_run_frames(&ctx, 3);
+    for (int i = 0; i < 2; i++) {
         g_vblank_edge = 1;
-        CHECK(emu_slice_finish(&ctx) == EMU_SLICE_FRAME, "run_frames: the last frame is still a frame");
-        CHECK(ctx.run_state == EMU_STOPPED && ctx.frame_budget == 0 && ctx.frame_budget_hit,
-              "run_frames: the board stops at the end of frame N");
-        CHECK(g_emu_frames == f0 + 3, "run_frames: exactly N frames counted");
-        ctx.frame_budget_hit = 0;
-
-        emu_run_frames(&ctx, 5);
-        ctx.request_stop = 1;
-        g_vblank_edge = 0;
-        emu_slice_finish(&ctx);
-        CHECK(ctx.run_state == EMU_STOPPED && ctx.frame_budget == 0,
-              "run_frames: a stop from elsewhere drops the rest of the budget");
-
-        emu_run(&ctx);
-        CHECK(ctx.frame_budget == 0, "run_frames: a plain run carries no budget");
-        g_vblank_edge = 1;
-        emu_slice_finish(&ctx);
-        CHECK(ctx.run_state == EMU_RUNNING && !ctx.frame_budget_hit, "run_frames: ...and never stops itself");
-        g_vblank_edge = 0;
-        ctx.run_state = EMU_STOPPED;
+        CHECK(emu_slice_finish(&ctx) == EMU_SLICE_FRAME && ctx.run_state == EMU_RUNNING,
+              "run_frames: frames before the last keep running");
     }
+    g_vblank_edge = 0;
+    CHECK(emu_slice_finish(&ctx) == EMU_SLICE_NO_FRAME && ctx.run_state == EMU_RUNNING,
+          "run_frames: a slice that ends mid-frame spends nothing");
+    g_vblank_edge = 1;
+    CHECK(emu_slice_finish(&ctx) == EMU_SLICE_FRAME, "run_frames: the last frame is still a frame");
+    CHECK(ctx.run_state == EMU_STOPPED && ctx.frame_budget == 0 && ctx.frame_budget_hit,
+          "run_frames: the board stops at the end of frame N");
+    CHECK(g_emu_frames == f0 + 3, "run_frames: exactly N frames counted");
+    ctx.frame_budget_hit = 0;
 
-    /* The sound board comes off the bus mid-run (sound_detach: the libretro
-     * core's heat guard): the UART is a plain region again, the 68000 + SCSP
-     * step nothing, and sound_attach puts it all back. The 68000 boots into
-     * zeroed RAM here; what it executes is beside the point, the SCSP's
-     * sample clock is what sound_run has to stop and restart. */
-    {
-        static const uint8_t vectors[16] = { 0, 0, 0x10, 0, 0, 0, 0, 0x10 };   /* SSP 0x1000, PC 0x10 */
-        sound_load_rom(vectors, sizeof vectors);
+    emu_run_frames(&ctx, 5);
+    ctx.request_stop = 1;
+    g_vblank_edge = 0;
+    emu_slice_finish(&ctx);
+    CHECK(ctx.run_state == EMU_STOPPED && ctx.frame_budget == 0,
+          "run_frames: a stop from elsewhere drops the rest of the budget");
+
+    emu_run(&ctx);
+    CHECK(ctx.frame_budget == 0, "run_frames: a plain run carries no budget");
+    g_vblank_edge = 1;
+    emu_slice_finish(&ctx);
+    CHECK(ctx.run_state == EMU_RUNNING && !ctx.frame_budget_hit, "run_frames: ...and never stops itself");
+    g_vblank_edge = 0;
+    ctx.run_state = EMU_STOPPED;
+}
+
+/* The sound board comes off the bus mid-run (sound_detach: the libretro
+ * core's heat guard): the UART is a plain region again, the 68000 + SCSP
+ * step nothing, and sound_attach puts it all back. The 68000 boots into
+ * zeroed RAM here; what it executes is beside the point, the SCSP's
+ * sample clock is what sound_run has to stop and restart. */
+static void test_sound_detach(void) {
+    static const uint8_t vectors[16] = { 0, 0, 0x10, 0, 0, 0, 0, 0x10 };   /* SSP 0x1000, PC 0x10 */
+    sound_load_rom(vectors, sizeof vectors);
+    sound_reset();
+    sound_attach(&bus);
+    uint64_t t0 = g_sound.out_total;
+    sound_run(64);
+    CHECK(g_sound.out_total == t0 + 64, "sound attached: sound_run(64) makes 64 samples");
+    CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "sound attached: the UART answers transmitter-ready");
+    uint64_t w0 = g_sound.write_count;
+    mem_write8(&bus, MIDI_BASE, 0x80);
+    CHECK(g_sound.write_count == w0 + 1, "sound attached: a UART byte reaches the board");
+    sound_detach(&bus);
+    CHECK(g_sound.detached, "sound_detach: marked detached");
+    t0 = g_sound.out_total;
+    sound_run(64);
+    CHECK(g_sound.out_total == t0, "detached: sound_run steps nothing");
+    mem_write8(&bus, MIDI_BASE, 0x81);
+    CHECK(g_sound.write_count == w0 + 1, "detached: a UART byte no longer reaches the board");
+    CHECK(bus.midi[0] == 0x81, "detached: it lands in the plain region instead");
+    CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x00, "detached: the UART status is the region's own byte");
+    sound_reset();
+    sound_attach(&bus);
+    CHECK(!g_sound.detached, "attached again: the flag is cleared");
+    t0 = g_sound.out_total;
+    sound_run(64);
+    CHECK(g_sound.out_total == t0 + 64, "attached again: the board runs");
+
+    /* Backpressure (sound_uart_make_room). A writer that is not the game
+     * fills the UART's 32-deep queue without running the board; the 33rd
+     * byte runs it early -- at most a slice -- until the line has carried
+     * one out, and queues. The samples run early belong to the slice and
+     * are owed back, so the clock comes out exact. This 68000 never reads
+     * MIDI, so once the slice has carried all 33 down the line (320 us
+     * each), the SCSP's 31-byte ring is full and it has dropped two. */
+    sound_reset();
+    t0 = g_sound.out_total;
+    for (int i = 0; i < 32; i++) mem_write8(&bus, MIDI_BASE, 0x10);
+    CHECK(g_sound.uart.count == 32 && g_sound.out_total == t0,
+          "backpressure: 32 bytes fill the UART's queue without running the board");
+    mem_write8(&bus, MIDI_BASE, 0x11);
+    CHECK(g_sound.uart.drops == 0 && g_sound.uart.count == 32,
+          "backpressure: the 33rd byte waited for the line and queued");
+    CHECK(g_sound.ahead > 0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
+          g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
+          "backpressure: the board ran early, by no more than a slice");
+    /* A program that polls TxRDY (m2-pacman's flush loop) runs the board on
+     * from the status read, the same accounted way, until the holding
+     * register empties: with nothing clocking the line it would read
+     * "full" for the rest of the slice. */
+    int32_t ahead0 = g_sound.ahead;
+    CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x01 && g_sound.uart.count == 1,
+          "backpressure: polling the status runs the line until TxRDY rises");
+    CHECK(g_sound.ahead > ahead0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
+          g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
+          "backpressure: the poll's samples are run early too, within the slice");
+    sound_run_slice(60);
+    CHECK(g_sound.ahead == 0 && g_sound.out_due == t0 + 735,
+          "backpressure: the frame clock knows where the slice ends before it has run");
+    sound_settle();   /* the rest of the slice ran on the sound thread */
+    CHECK(g_sound.ahead == 0 && g_sound.out_total == t0 + 735,
+          "backpressure: the slice owes the early samples back (735 in all)");
+    CHECK(g_sound.uart.count == 0 && g_sound.uart.sent == 33 && scsp_midi_room(&g_sound.scsp) == 0 &&
+          g_sound.scsp.mi_drops == 2,
+          "backpressure: the line carried all 33 in the slice; the ring took 31 and dropped two");
+    CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "backpressure: TxRDY and TxEMPTY are up again");
+    sound_run_slice(60);
+    sound_settle();
+    CHECK(g_sound.out_total == t0 + 1470, "backpressure: the next slice is a whole one");
+    sound_reset();
+    CHECK(g_sound.ahead == 0 && g_sound.slice_frac == 0,
+          "sound_reset clears the slice carry (two cold-booted boards must agree)");
+
+    /* The sound thread (sound.h) changes when the samples are made, never
+     * what they are: the same slices and UART traffic, run with it and
+     * without, leave the same board and the same output. */
+    uint64_t digest[2];
+    for (int pass = 0; pass < 2; pass++) {
+        g_sound_thread_want = pass == 0;
         sound_reset();
         sound_attach(&bus);
-        uint64_t t0 = g_sound.out_total;
-        sound_run(64);
-        CHECK(g_sound.out_total == t0 + 64, "sound attached: sound_run(64) makes 64 samples");
-        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "sound attached: the UART answers transmitter-ready");
-        uint64_t w0 = g_sound.write_count;
-        mem_write8(&bus, MIDI_BASE, 0x80);
-        CHECK(g_sound.write_count == w0 + 1, "sound attached: a UART byte reaches the board");
-        sound_detach(&bus);
-        CHECK(g_sound.detached, "sound_detach: marked detached");
-        t0 = g_sound.out_total;
-        sound_run(64);
-        CHECK(g_sound.out_total == t0, "detached: sound_run steps nothing");
-        mem_write8(&bus, MIDI_BASE, 0x81);
-        CHECK(g_sound.write_count == w0 + 1, "detached: a UART byte no longer reaches the board");
-        CHECK(bus.midi[0] == 0x81, "detached: it lands in the plain region instead");
-        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x00, "detached: the UART status is the region's own byte");
-        sound_reset();
-        sound_attach(&bus);
-        CHECK(!g_sound.detached, "attached again: the flag is cleared");
-        t0 = g_sound.out_total;
-        sound_run(64);
-        CHECK(g_sound.out_total == t0 + 64, "attached again: the board runs");
-
-        /* Backpressure (sound_uart_make_room). A writer that is not the game
-         * fills the UART's 32-deep queue without running the board; the 33rd
-         * byte runs it early -- at most a slice -- until the line has carried
-         * one out, and queues. The samples run early belong to the slice and
-         * are owed back, so the clock comes out exact. This 68000 never reads
-         * MIDI, so once the slice has carried all 33 down the line (320 us
-         * each), the SCSP's 31-byte ring is full and it has dropped two. */
-        sound_reset();
-        t0 = g_sound.out_total;
-        for (int i = 0; i < 32; i++) mem_write8(&bus, MIDI_BASE, 0x10);
-        CHECK(g_sound.uart.count == 32 && g_sound.out_total == t0,
-              "backpressure: 32 bytes fill the UART's queue without running the board");
-        mem_write8(&bus, MIDI_BASE, 0x11);
-        CHECK(g_sound.uart.drops == 0 && g_sound.uart.count == 32,
-              "backpressure: the 33rd byte waited for the line and queued");
-        CHECK(g_sound.ahead > 0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
-              g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
-              "backpressure: the board ran early, by no more than a slice");
-        /* A program that polls TxRDY (m2-pacman's flush loop) runs the board on
-         * from the status read, the same accounted way, until the holding
-         * register empties: with nothing clocking the line it would read
-         * "full" for the rest of the slice. */
-        int32_t ahead0 = g_sound.ahead;
-        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x01 && g_sound.uart.count == 1,
-              "backpressure: polling the status runs the line until TxRDY rises");
-        CHECK(g_sound.ahead > ahead0 && g_sound.ahead <= SOUND_AHEAD_MAX &&
-              g_sound.out_total == t0 + (uint64_t)g_sound.ahead,
-              "backpressure: the poll's samples are run early too, within the slice");
-        sound_run_slice(60);
-        CHECK(g_sound.ahead == 0 && g_sound.out_due == t0 + 735,
-              "backpressure: the frame clock knows where the slice ends before it has run");
-        sound_settle();   /* the rest of the slice ran on the sound thread */
-        CHECK(g_sound.ahead == 0 && g_sound.out_total == t0 + 735,
-              "backpressure: the slice owes the early samples back (735 in all)");
-        CHECK(g_sound.uart.count == 0 && g_sound.uart.sent == 33 && scsp_midi_room(&g_sound.scsp) == 0 &&
-              g_sound.scsp.mi_drops == 2,
-              "backpressure: the line carried all 33 in the slice; the ring took 31 and dropped two");
-        CHECK(mem_read8(&bus, MIDI_BASE + 4) == 0x05, "backpressure: TxRDY and TxEMPTY are up again");
-        sound_run_slice(60);
+        g_sound.out_r = g_sound.out_w;   /* nobody drains the ring here */
+        uint32_t r0 = g_sound.out_w;
+        for (int sl = 0; sl < 12; sl++) {
+            for (int b = 0; b < 3 + sl % 5; b++) mem_write8(&bus, MIDI_BASE, (uint8_t)(0x90 + sl + b));
+            (void)mem_read8(&bus, MIDI_BASE + 4);
+            sound_run_slice(60);
+        }
         sound_settle();
-        CHECK(g_sound.out_total == t0 + 1470, "backpressure: the next slice is a whole one");
-        sound_reset();
-        CHECK(g_sound.ahead == 0 && g_sound.slice_frac == 0,
-              "sound_reset clears the slice carry (two cold-booted boards must agree)");
-
-        /* The sound thread (sound.h) changes when the samples are made, never
-         * what they are: the same slices and UART traffic, run with it and
-         * without, leave the same board and the same output. */
-        uint64_t digest[2];
-        for (int pass = 0; pass < 2; pass++) {
-            g_sound_thread_want = pass == 0;
-            sound_reset();
-            sound_attach(&bus);
-            g_sound.out_r = g_sound.out_w;   /* nobody drains the ring here */
-            uint32_t r0 = g_sound.out_w;
-            for (int sl = 0; sl < 12; sl++) {
-                for (int b = 0; b < 3 + sl % 5; b++) mem_write8(&bus, MIDI_BASE, (uint8_t)(0x90 + sl + b));
-                (void)mem_read8(&bus, MIDI_BASE + 4);
-                sound_run_slice(60);
-            }
-            sound_settle();
-            uint64_t h = 0xcbf29ce484222325ull;
-            #define EMU_TEST_FNV(p, n) do { const uint8_t *q_ = (const uint8_t *)(p); \
-                for (size_t k_ = 0; k_ < (size_t)(n); k_++) { h ^= q_[k_]; h *= 0x100000001b3ull; } } while (0)
-            EMU_TEST_FNV(g_sound.ram, sizeof g_sound.ram);
-            EMU_TEST_FNV(&g_sound.m68k.cpu, sizeof g_sound.m68k.cpu);
-            EMU_TEST_FNV(&g_sound.uart, sizeof g_sound.uart);
-            for (uint32_t r = r0; r != g_sound.out_w; r = (r + 1) & (SOUND_OUT_FRAMES - 1))
-                EMU_TEST_FNV(&g_sound.out[r * 2], 4);
-            #undef EMU_TEST_FNV
-            digest[pass] = h;
-            if (pass == 0)
-                CHECK(sound_thread_on() && g_emu_times.sound_jobs > 0, "sound thread: slices went to the sound thread");
-        }
-        g_sound_thread_want = 1;
-        CHECK(digest[0] == digest[1], "sound thread: the same board and output with it and without");
-        sound_reset();
+        uint64_t h = 0xcbf29ce484222325ull;
+        #define EMU_TEST_FNV(p, n) do { const uint8_t *q_ = (const uint8_t *)(p); \
+            for (size_t k_ = 0; k_ < (size_t)(n); k_++) { h ^= q_[k_]; h *= 0x100000001b3ull; } } while (0)
+        EMU_TEST_FNV(g_sound.ram, sizeof g_sound.ram);
+        EMU_TEST_FNV(&g_sound.m68k.cpu, sizeof g_sound.m68k.cpu);
+        EMU_TEST_FNV(&g_sound.uart, sizeof g_sound.uart);
+        for (uint32_t r = r0; r != g_sound.out_w; r = (r + 1) & (SOUND_OUT_FRAMES - 1))
+            EMU_TEST_FNV(&g_sound.out[r * 2], 4);
+        #undef EMU_TEST_FNV
+        digest[pass] = h;
+        if (pass == 0)
+            CHECK(sound_thread_on() && g_emu_times.sound_jobs > 0, "sound thread: slices went to the sound thread");
     }
+    g_sound_thread_want = 1;
+    CHECK(digest[0] == digest[1], "sound thread: the same board and output with it and without");
+    sound_reset();
+}
 
-    /* The sound UART's interrupt is offered when the game enables its line
-     * (emu_offer_sound), so the enable write kicks -- on the rising edge only. */
+/* The sound UART's interrupt is offered when the game enables its line
+ * (emu_offer_sound), so the enable write kicks -- on the rising edge only. */
+static void test_irq_kick(void) {
     irqt_reset();
     irqt_enable_write(0x021);
     CHECK(!g_irqt_sound_kick, "irq kick: enabling other lines does not kick the sound pin");
@@ -257,36 +259,44 @@ int main(void) {
     CHECK(!g_irqt_sound_kick, "irq kick: rewriting an enabled line does not");
     irqt_reset();
     CHECK(!g_irqt_sound_kick, "irq kick: irqt_reset clears it");
+}
 
-    /* A room left the board in VS mode and then emptied (netplay_empty_room_pump):
-     * the player is asked for a button, a button already down does not count, a
-     * fresh press cold boots the board in the player's own VS mode and region. */
-    {
-        g_netplay.reset_board = empty_room_reset;
-        g_netplay.own_saved   = true;
-        g_netplay.own_vs_mode = 0;
-        g_netplay.own_region  = GAME_REGION_USA;
-        g_vs_mode = 1;
-        g_region  = GAME_REGION_JAPAN;
-        g_netplay.vs_board = true;
-        g_input.held = 0x10;
-        netplay_empty_room_pump();
-        CHECK(g_netplay.empty_prompt, "empty room: a VS board with nobody else in the room asks for a button");
-        netplay_empty_room_pump();
-        CHECK(!netplay_take_empty_restart(), "empty room: a button held from before does not restart");
-        g_input.held = 0;
-        netplay_empty_room_pump();
-        g_input.held = 0x10;
-        netplay_empty_room_pump();
-        CHECK(!g_netplay.empty_prompt && netplay_take_empty_restart(), "empty room: pressing it again does");
-        CHECK(!netplay_take_empty_restart(), "empty room: the press is taken once");
-        netplay_restart_alone();
-        CHECK(s_empty_resets == 1, "empty room: the restart resets the board");
-        CHECK(g_vs_mode == 0 && g_region == GAME_REGION_USA, "empty room: ...in the player's own VS mode and region");
-        g_input.held = 0;
-        netplay_empty_room_pump();
-        CHECK(!g_netplay.empty_prompt, "empty room: a board that is not in VS mode is not asked");
-    }
+/* A room left the board in VS mode and then emptied (netplay_empty_room_pump):
+ * the player is asked for a button, a button already down does not count, a
+ * fresh press cold boots the board in the player's own VS mode and region. */
+static void test_empty_room(void) {
+    g_netplay.reset_board = empty_room_reset;
+    g_netplay.own_saved   = true;
+    g_netplay.own_vs_mode = 0;
+    g_netplay.own_region  = GAME_REGION_USA;
+    g_vs_mode = 1;
+    g_region  = GAME_REGION_JAPAN;
+    g_netplay.vs_board = true;
+    g_input.held = 0x10;
+    netplay_empty_room_pump();
+    CHECK(g_netplay.empty_prompt, "empty room: a VS board with nobody else in the room asks for a button");
+    netplay_empty_room_pump();
+    CHECK(!netplay_take_empty_restart(), "empty room: a button held from before does not restart");
+    g_input.held = 0;
+    netplay_empty_room_pump();
+    g_input.held = 0x10;
+    netplay_empty_room_pump();
+    CHECK(!g_netplay.empty_prompt && netplay_take_empty_restart(), "empty room: pressing it again does");
+    CHECK(!netplay_take_empty_restart(), "empty room: the press is taken once");
+    netplay_restart_alone();
+    CHECK(s_empty_resets == 1, "empty room: the restart resets the board");
+    CHECK(g_vs_mode == 0 && g_region == GAME_REGION_USA, "empty room: ...in the player's own VS mode and region");
+    g_input.held = 0;
+    netplay_empty_room_pump();
+    CHECK(!g_netplay.empty_prompt, "empty room: a board that is not in VS mode is not asked");
+}
+
+int main(void) {
+    test_free_run();
+    test_run_frames();
+    test_sound_detach();
+    test_irq_kick();
+    test_empty_room();
 
     mem_shutdown(&bus);
     printf("\n%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

@@ -23,7 +23,7 @@
 
 typedef enum {
     ROM_MAINCPU, ROM_MAIN_DATA, ROM_COPRO_DATA, ROM_POLYGONS, ROM_TEXTURES,
-    ROM_AUDIOCPU, ROM_SAMPLES, ROM_TGP_TABLES,
+    ROM_AUDIOCPU, ROM_SAMPLES, ROM_TGP_TABLES, ROM_IOCPU,
     ROM_REGION_COUNT
 } rom_region_id_t;
 _Static_assert(ROM_REGION_COUNT == ROMSET_FILES, "a region the directory form does not know");
@@ -54,6 +54,10 @@ typedef struct {
      * same name (MAME's hotdo in a hotd.zip) still loads. */
     const rom_part_t *older;
     size_t            older_count;
+    /* A third zip in the child's folder, for a chip neither the child nor its
+     * parent holds: MAME's model1io.zip under a Daytona clone, whose parent is
+     * daytona.zip (game_profile_t has room for one parent). */
+    const char       *bios;
 } rom_recipe_t;
 
 /* The regions are romset_region's, in its order. */
@@ -63,9 +67,33 @@ static inline uint8_t **rom_recipe_region(romset_t *rs, rom_region_id_t r, size_
     return NULL;
 }
 
+/* `name` in the same folder as `zip` (rom_recipe_t.bios), or NULL. */
+static inline const char *rom_recipe_sibling(const char *zip, const char *name, char *buf, size_t cap) {
+    if (!zip || !name) return NULL;
+    const char *f = strrchr(zip, '/'), *b = strrchr(zip, '\\');
+    const char *sep = f > b ? f : b;
+    size_t dir = sep ? (size_t)(sep - zip + 1) : 0;
+    if (dir + strlen(name) + 1 > cap) return NULL;
+    memcpy(buf, zip, dir);
+    strcpy(buf + dir, name);
+    return buf;
+}
+
+/* A chip from the child or the parent, else from the recipe's bios zip. */
+static inline uint8_t *rom_recipe_extract(const rom_recipe_t *rc, const char *child, const char *parent,
+                                          const char *name, size_t *n, uint32_t crc) {
+    char path[1024];
+    const char *bios = rc && g_rl_mem_zip.count == 0 ? rom_recipe_sibling(child, rc->bios, path, sizeof path) : NULL;
+    if (!bios) return zip_extract_from_set(child, parent, name, n, crc);
+    g_rl_quiet_missing++;
+    uint8_t *d = zip_extract_from_set(child, parent, name, n, crc);
+    g_rl_quiet_missing--;
+    return d ? d : zip_extract_from_set(bios, NULL, name, n, crc);
+}
+
 /* One part into its region, which rom_recipe_load has allocated. */
 static inline int rom_recipe_part(romset_t *rs, const char *child, const char *parent,
-                                  const rom_part_t *p) {
+                                  const rom_part_t *p, const rom_recipe_t *rc) {
     size_t *dsz;
     uint8_t **dst = rom_recipe_region(rs, p->region, &dsz);
     if (!dst || !*dst) { LOG_ERROR("rom recipe: %s goes to a region the set has none of", p->name ? p->name : "a mirror"); return -1; }
@@ -75,13 +103,13 @@ static inline int rom_recipe_part(romset_t *rs, const char *child, const char *p
         return 0;
     }
     size_t n = 0, nh = 0;
-    uint8_t *lo = zip_extract_from_set(child, parent, p->name, &n, p->crc);
+    uint8_t *lo = rom_recipe_extract(rc, child, parent, p->name, &n, p->crc);
     if (!lo) return -1;
-    int rc = 0;
+    int err = 0;
     if (p->kind == ROM_PART_PAIR32) {
-        uint8_t *hi = zip_extract_from_set(child, parent, p->hi, &nh, p->hi_crc);
+        uint8_t *hi = rom_recipe_extract(rc, child, parent, p->hi, &nh, p->hi_crc);
         if (hi) interleave_32_word(*dst, *dsz, lo, n, hi, nh, p->offset);
-        else    rc = -1;
+        else    err = -1;
         free(hi);
     } else if (p->kind == ROM_PART_SWAP16) {
         load_16_word_swap(*dst, *dsz, lo, n, p->offset);
@@ -90,22 +118,31 @@ static inline int rom_recipe_part(romset_t *rs, const char *child, const char *p
         memcpy(*dst + p->offset, lo, n < room ? n : room);
     }
     free(lo);
-    return rc;
+    return err;
 }
 
-/* Part i, or the older revision's chip at its place when the zip lacks it. */
+/* Part i, or the older revision's chip at its place when the zip lacks it.
+ * A chip with a stand-in is tried quietly: a hotdo in a hotd.zip is no error
+ * (Pinboard #1040). When neither is there, the newer one is tried again aloud,
+ * so the log and the page's missing list (rl_mem_zip_note_missing) name it. */
 static inline int rom_recipe_part_any(romset_t *rs, const char *child, const char *parent,
                                       const rom_recipe_t *rc, size_t i) {
     const rom_part_t *p = &rc->parts[i];
-    if (rom_recipe_part(rs, child, parent, p) == 0) return 0;
-    for (size_t k = 0; k < rc->older_count; k++) {
+    bool stand_in = false;
+    for (size_t k = 0; k < rc->older_count; k++)
+        stand_in |= rc->older[k].region == p->region && rc->older[k].offset == p->offset;
+    if (!stand_in) return rom_recipe_part(rs, child, parent, p, rc);
+    g_rl_quiet_missing++;
+    int got = rom_recipe_part(rs, child, parent, p, rc);
+    for (size_t k = 0; got != 0 && k < rc->older_count; k++) {
         const rom_part_t *o = &rc->older[k];
         if (o->region != p->region || o->offset != p->offset) continue;
-        if (rom_recipe_part(rs, child, parent, o) != 0) continue;
+        if (rom_recipe_part(rs, child, parent, o, rc) != 0) continue;
         LOG_INFO("%s: %s is the earlier revision's", rc->set, o->name);
-        return 0;
+        got = 0;
     }
-    return -1;
+    g_rl_quiet_missing--;
+    return got == 0 ? 0 : rom_recipe_part(rs, child, parent, p, rc);
 }
 
 /* Every region the recipe names, zeroed, then every part in order (a mirror

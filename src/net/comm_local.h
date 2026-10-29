@@ -21,7 +21,9 @@
  * another program on the loopback is not a cabinet. Until the hello the
  * MASTER sends nothing (its ROM's first messages are the ring token, which it
  * repeats). The SLAVE says hello again from its recv until the MASTER is
- * heard, in case the first went before the MASTER's socket was read.
+ * heard, in case the first went before the MASTER's socket was read. A SLAVE
+ * started again with the same token takes the old one's place once the old
+ * one has gone quiet; while it talks, a second hello is a stranger's.
  *
  * Drained from the peer's recv and pending, which m2comm.h calls from the
  * board's slice (emu thread, emu mutex held): the socket never blocks.
@@ -39,6 +41,7 @@
 
 #define COMM_LOCAL_MAGIC   0x5356324Du   /* "M2VS" */
 #define COMM_LOCAL_REHELLO 60u           /* SLAVE recv calls between hellos */
+#define COMM_LOCAL_GONE_MS 2000u         /* MASTER: the pinned end this quiet is gone */
 
 #pragma pack(push, 1)
 typedef struct {
@@ -58,6 +61,7 @@ typedef struct {
     comm_link_t      link;
     m2comm_peer_t    peer;
     uint32_t         strangers;  /* datagrams from anyone else, dropped */
+    uint64_t         from_ms;    /* MASTER: when the pinned end was pinned or last heard */
 } comm_local_t;
 
 static comm_local_t g_comm_local = { .sock = NET_SOCK_INVALID };
@@ -98,15 +102,27 @@ static inline void comm_local__transmit(void *ud, const void *buf, uint32_t len)
 }
 
 /* One datagram from the loopback: the hello pins the MASTER's other end; a
- * comm datagram from that end goes to the link. */
+ * comm datagram from that end goes to the link. A hello with the token from
+ * another port, once the pinned end has been quiet COMM_LOCAL_GONE_MS, is the
+ * SLAVE closed and started again (Pinboard #1632): the MASTER moves to it, and
+ * the boards link again as they would after a cable pulled and put back. */
 static inline void comm_local__take(comm_local_t *c, const uint8_t *buf, int got, uint32_t ip, uint16_t port) {
     if (ip != htonl(INADDR_LOOPBACK)) { c->strangers++; return; }
     comm_local_hello_t h;
     if (got == (int)sizeof h) {
         memcpy(&h, buf, sizeof h);
-        if (c->role == GAME_LINK_MASTER && h.magic == COMM_LOCAL_MAGIC && h.token == c->token
-                && (!c->to_port || c->to_port == port)) {
-            c->to_port = port;
+        if (c->role == GAME_LINK_MASTER && h.magic == COMM_LOCAL_MAGIC && h.token == c->token) {
+            uint64_t now = net_now_ms();
+            if (!c->to_port) {
+                c->to_port = port;
+                c->from_ms = now;
+            } else if (c->to_port != port && now - c->from_ms >= COMM_LOCAL_GONE_MS) {
+                c->to_port = port;               /* the SLAVE started again: a new cabinet */
+                c->from_ms = now;
+                c->link.heard = false;           /* its messages count from one again */
+            } else if (c->to_port != port) {
+                c->strangers++;                  /* the SLAVE still talks: not it */
+            }
             return;
         }
         c->strangers++;
@@ -117,6 +133,7 @@ static inline void comm_local__take(comm_local_t *c, const uint8_t *buf, int got
         return;
     }
     c->heard = true;
+    c->from_ms = net_now_ms();
     comm_link_on_datagram(&c->link, buf, (uint32_t)got);
 }
 

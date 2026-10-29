@@ -38,15 +38,15 @@
   const list = document.getElementById('games');
   for (const id of Object.keys(m2hleGames.GAMES)) list.append(box(id));
 
-  /* The language switch: this page in each of the site's languages. */
+  /* The language switch: this page in each of the site's languages. Each link
+   * names its language, English too, so the choice beats the guess for Japan
+   * (m2hle-lang.js remembers it). */
   const langs = document.getElementById('langs');
   if (langs) {
     for (const [code, l] of Object.entries(m2hleLang.LANGS)) {
-      const q = new URLSearchParams(code === m2hleLang.DEFAULT ? {} : { lang: code });
-      const s = q.toString();
       langs.append(' ', code === m2hleLang.lang
         ? make('strong', { lang: code }, l.name)
-        : make('a', { href: './' + (s ? '?' + s : ''), lang: code, hreflang: code }, l.name));
+        : make('a', { href: './?lang=' + code, lang: code, hreflang: code }, l.name));
     }
   }
 })();

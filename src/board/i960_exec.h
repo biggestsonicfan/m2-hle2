@@ -419,7 +419,9 @@ static inline void i960_ret_mem(i960_cpu_t *cpu, memory_bus_t *bus) {
  * (hle_filter_sync), fixed for a slice: the run loop, which would otherwise
  * reload it per instruction. `room` is the
  * slice's instructions left, this one included, for a hook that stands in for
- * several (g_hle_room, hle_hooks.h). */
+ * several (g_hle_room, hle_hooks.h). `bt` is g_i960_bt_on, which the run loop
+ * reads once a slice: a global's load is not hoisted past the stores an
+ * instruction makes. */
 static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t ip,
                                           uint32_t word1, uint32_t word2);
 
@@ -439,7 +441,7 @@ static I960_HOT_INLINE int i960_exec_tab(i960_cpu_t *cpu, memory_bus_t *bus, uin
                                          uint32_t word1, uint32_t word2);
 #endif
 
-static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t room) {
+static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t room, bool bt) {
     // Check HLE hooks before executing
     if (M2_UNLIKELY(hle_check_synced(cpu, bus, room) == 0)) {
         return 0;  // hook handled it, IP already updated
@@ -450,7 +452,7 @@ static I960_HOT_INLINE int i960_step_core(i960_cpu_t *cpu, memory_bus_t *bus, ui
     uint32_t word1, word2;
     mem_fetch2(bus, ip, &word1, &word2);       // word2 read speculatively
     /* The board's clock: the timers and the vblank count these (irq_timer.h). */
-    if (M2_UNLIKELY(g_i960_bt_on)) i960_bt_charge(cpu, ip, word1, word2, i960_cycle_cost(word1));
+    if (M2_UNLIKELY(bt)) i960_bt_charge(cpu, ip, word1, word2, i960_cycle_cost(word1));
     else cpu->cycles += i960_cycle_cost(word1);
 #if I960_OPTABLE
     return i960_exec_tab(cpu, bus, ip, word1, word2);
@@ -977,8 +979,9 @@ static I960_HOT_INLINE int i960_exec_word(i960_cpu_t *cpu, memory_bus_t *bus, ui
                                 cpu->frame_flushed = 0;
                                 cpu->frame_mem = 0;
                                 cpu->prcb = new_prcb;
+                                i960_prcb_cache(cpu, bus);
 
-                                uint32_t new_isp = mem_read32(bus, new_prcb + PRCB_INTR_STACK);
+                                uint32_t new_isp = cpu->intr_stack;
                                 if (new_isp) {
                                     cpu->locals.sp = new_isp;
                                 }
@@ -1544,7 +1547,7 @@ static I960_HOT_INLINE int i960_exec_tab(i960_cpu_t *cpu, memory_bus_t *bus, uin
 /* One instruction, from anywhere: syncs the hook filter itself. */
 static I960_HOT_INLINE int i960_step_hot(i960_cpu_t *cpu, memory_bus_t *bus) {
     hle_filter_sync();
-    return i960_step_core(cpu, bus, 1);
+    return i960_step_core(cpu, bus, 1, g_i960_bt_on);
 }
 
 static inline int i960_step(i960_cpu_t *cpu, memory_bus_t *bus) {

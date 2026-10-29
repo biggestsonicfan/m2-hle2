@@ -7,6 +7,8 @@
  *
  *   arcade=0|1                (the board's picture, under the filter)
  *   pixdepth=0|1              (depth per pixel, not the board's one key a polygon; geo3d.h)
+ *   cabinet=twin|deluxe       (whose colour tables a game like Daytona shows; absent
+ *                              the board's own, as its test menu is set: cabinet_picture.h)
  *   filter=off|crt|custom     (an old filter=arcade is arcade=1 with the CRT)
  *   preset=<path to the .glslp or .glsl>
  *   input_scale=0..4          (0 = automatic)
@@ -26,7 +28,10 @@
 #include "cimgui.h"
 #include "ImGuiFileDialog.h"
 #include "post_shader.h"
+#include "stereo.h"
+#include "cabinet_picture.h"
 #include "log.h"
+#include "lightgun_ui.h"   /* Light gun crosshair (Pinboard #1496) */
 
 static struct {
     bool show_params;
@@ -66,6 +71,7 @@ static inline void shader_ui_save(void) {
     const post_shader_mode_t m = post_shader_mode();
     fprintf(f, "arcade=%d\n", post_shader_arcade() ? 1 : 0);
     fprintf(f, "pixdepth=%d\n", g_geo3d_pixel_depth ? 1 : 0);
+    if (cabinet_picture_chosen()[0]) fprintf(f, "cabinet=%s\n", cabinet_picture_chosen());
     fprintf(f, "filter=%s\n", shader_ui_filter_name[m]);
     if (post_shader_custom_path()[0]) fprintf(f, "preset=%s\n", post_shader_custom_path());
     fprintf(f, "input_scale=%d\n", post_shader_input_scale());
@@ -116,6 +122,7 @@ static inline void shader_ui_load(void) {
         if (!strcmp(k, "filter"))           snprintf(filter, sizeof filter, "%s", v);
         else if (!strcmp(k, "arcade"))      post_shader_set_arcade(atoi(v) != 0);
         else if (!strcmp(k, "pixdepth"))    g_geo3d_pixel_depth = atoi(v) != 0;
+        else if (!strcmp(k, "cabinet"))     cabinet_picture_choose(v);
         else if (!strcmp(k, "preset"))      snprintf(preset, sizeof preset, "%s", v);
         else if (!strcmp(k, "input_scale")) post_shader_set_input_scale(atoi(v));
         else if (!strncmp(k, "param.", 6) && n_params < RS_MAX_PARAMS) {
@@ -136,6 +143,25 @@ static inline void shader_ui_open_dialog(ImGuiFileDialog *fd) {
     IGFD_OpenDialog(fd, "OpenShader", "Load a libretro GLSL shader", "Libretro GLSL{.glslp,.glsl}", cfg);
 }
 
+/* Side-by-side 3D (stereo.h): the switch, and its settings while it is on. */
+static inline void shader_ui_stereo_items(void) {
+    if (igMenuItemEx("Side-by-side 3D (Cardboard)", NULL, g_stereo.on != 0, true))
+        stereo_set(!g_stereo.on, g_stereo.depth, g_stereo.focus, g_stereo.spacing, g_stereo.size, g_stereo.swap);
+    igSetItemTooltip("The 3D drawn twice, once for each eye, side by side, for a phone in a Cardboard "
+                     "viewer or for crossing your eyes (Swap). Only the picture changes; the board is the same.");
+    if (!g_stereo.on) return;
+    float depth = g_stereo.depth * 1000.0f, focus = g_stereo.focus, spacing = g_stereo.spacing, size = g_stereo.size;
+    bool swap = g_stereo.swap != 0, moved = false;
+    igPushItemWidth(160.0f);
+    moved |= igSliderFloatEx("Depth", &depth, 0.0f, STEREO_DEPTH_MAX * 1000.0f, "%.0f", 0);
+    moved |= igSliderFloatEx("Focus", &focus, STEREO_FOCUS_MIN, STEREO_FOCUS_MAX, "%.2f", ImGuiSliderFlags_Logarithmic);
+    moved |= igSliderFloatEx("Eye spacing", &spacing, STEREO_SPACING_MIN, STEREO_SPACING_MAX, "%.2f", 0);
+    moved |= igSliderFloatEx("Picture size", &size, STEREO_SIZE_MIN, 1.0f, "%.2f", 0);
+    moved |= igCheckbox("Swap eyes", &swap);
+    igPopItemWidth();
+    if (moved) stereo_set(1, depth / 1000.0f, focus, spacing, size, swap);
+}
+
 /* The Video menu's Arcade switch, then the built-in filters: none, the CRT. */
 static inline void shader_ui_builtin_items(post_shader_mode_t m) {
     if (igMenuItemEx("Arcade (the real board's picture)", NULL, post_shader_arcade(), true)) {
@@ -153,6 +179,31 @@ static inline void shader_ui_builtin_items(post_shader_mode_t m) {
                      "camera covers what stands on it (the Tornado's wing hides the backs of Sonic's shoes "
                      "in the attract intro, on the real board too). This sorts every pixel by its own depth "
                      "instead. Off is the board.");
+    shader_ui_stereo_items();
+    /* A game whose colour tables follow its cabinet (Daytona: Twin, Deluxe). */
+    const game_profile_t *p = g_active_profile;
+    if (p && p->cabinets && p->cabinet_xlat_fn) {
+        igSeparator();
+        const char *want = cabinet_picture_chosen();
+        const bool own = cabinet_picture_index(p, want) < 0;
+        if (igMenuItemEx("Cabinet: as the test menu sets it", NULL, own, true)) {
+            cabinet_picture_choose(NULL);
+            shader_ui_save();
+        }
+        igSetItemTooltip("The colours of the cabinet the game's test menu is set to (CABINET in GAME "
+                         "ASSIGNMENTS), as the board shows them after a reboot.");
+        for (int i = 0; i < p->cabinet_count; i++) {
+            char label[64];
+            snprintf(label, sizeof label, "Cabinet: %s", p->cabinets[i].label);
+            if (igMenuItemEx(label, NULL, !own && !strcmp(want, p->cabinets[i].id), true)) {
+                cabinet_picture_choose(p->cabinets[i].id);
+                shader_ui_save();
+            }
+            igSetItemTooltip("This cabinet's colours, at once: the colour tables the game builds at boot "
+                             "for it. Deluxe's projector is darker in the shadows than Twin's monitor. "
+                             "Only the picture changes; the board and its settings do not.");
+        }
+    }
     igSeparator();
     if (igMenuItemEx("No filter", NULL, m == POST_SHADER_OFF, true)) {
         post_shader_set_mode(POST_SHADER_OFF);
@@ -206,6 +257,8 @@ static inline void shader_ui_menu(ImGuiFileDialog *fd) {
     }
     igSetItemTooltip("The resolution the game is drawn at before the filter reads it. Automatic is the "
                      "window's size for the CRT and the Arcade and 1x for a custom shader.");
+    if (lightgun_ui_on()) igSeparator();
+    lightgun_ui_menu();
     igSeparator();
     igTextDisabled("Filters can cut performance. Turn one off if the game slows down.");
     if (post_shader_error()[0]) {

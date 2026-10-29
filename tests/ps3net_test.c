@@ -94,6 +94,38 @@ static void inbox_deliver(void *ctx, uint16_t vport, const uint8_t *p, uint32_t 
 
 /* ---- (A) Against a real PS3 ---------------------------------------------- */
 
+/* Every datagram on the wire, RPCS3's 6-byte P2P header taken off and the
+ * rest joined in got. Returns whether each had the header (vport 1 -> 1, DGRAM_P2P). */
+static bool take_framed(wire_t *w, uint8_t *got, uint32_t *gn) {
+    dgram_t d;
+    bool framed = true;
+    while (wire_take(w, &d)) {
+        framed = framed && d.len > 6 && d.data[0] == 1 && d.data[1] == 0 && d.data[2] == 1
+                 && d.data[3] == 0 && d.data[4] == 1 && d.data[5] == 0;
+        memcpy(got + *gn, d.data + 6, d.len - 6);
+        *gn += d.len - 6;
+    }
+    return framed;
+}
+
+/* The SYN-ACKs on the wire: how many, whether each acknowledges its channel's
+ * isn_plus1, and whether each carries the PS3's syn_flags. */
+static uint32_t take_synacks(wire_t *w, const uint16_t isn_plus1[3], bool *acks_ok, bool *flags_ok) {
+    dgram_t d;
+    uint32_t synacks = 0;
+    while (wire_take(w, &d)) {
+        const uint8_t *r = d.data + 10;
+        uint16_t vport = (uint16_t)((d.data[8] << 8) | d.data[9]);
+        if (r[0] != 0xA0) continue;      /* SYN | ACK */
+        synacks++;
+        uint16_t ack = (uint16_t)((r[4] << 8) | r[5]);
+        uint16_t sf  = (uint16_t)((r[6] << 8) | r[7]);
+        if (vport < 1 || vport > 3 || ack != isn_plus1[vport - 1]) *acks_ok = false;
+        if (sf != (vport == 1 ? 0x0201 : 0x0000)) *flags_ok = false;
+    }
+    return synacks;
+}
+
 static void test_capture(void) {
     printf("-- (A) RUDP against a captured PS3\n");
 
@@ -119,13 +151,7 @@ static void test_capture(void) {
     uint8_t got[128];
     uint32_t gn = 0;
     dgram_t d;
-    bool framed = true;
-    while (wire_take(w, &d)) {
-        framed = framed && d.len > 6 && d.data[0] == 1 && d.data[1] == 0 && d.data[2] == 1
-                 && d.data[3] == 0 && d.data[4] == 1 && d.data[5] == 0;
-        memcpy(got + gn, d.data + 6, d.len - 6);
-        gn += d.len - 6;
-    }
+    bool framed = take_framed(w, got, &gn);
     CHECK(framed, "each datagram carries RPCS3's P2P header: vport 1 -> 1, DGRAM_P2P");
     CHECK(gn == wn && memcmp(got, want, wn) == 0, "our three SYNs are the PS3's, byte for byte");
 
@@ -137,19 +163,9 @@ static void test_capture(void) {
     uint8_t dg[256] = { 1, 0, 1, 0, 1, 0 };
     uint32_t n = 6 + hex(ps3_syns, dg + 6);
     rudp_on_datagram(&q, dg, n, 2000);
-    uint32_t synacks = 0;
     bool acks_ok = true, flags_ok = true;
     static const uint16_t isn_plus1[3] = { 0x4A3B, 0xBF93, 0xBD3B };
-    while (wire_take(w, &d)) {
-        const uint8_t *r = d.data + 10;
-        uint16_t vport = (uint16_t)((d.data[8] << 8) | d.data[9]);
-        if (r[0] != 0xA0) continue;      /* SYN | ACK */
-        synacks++;
-        uint16_t ack = (uint16_t)((r[4] << 8) | r[5]);
-        uint16_t sf  = (uint16_t)((r[6] << 8) | r[7]);
-        if (vport < 1 || vport > 3 || ack != isn_plus1[vport - 1]) acks_ok = false;
-        if (sf != (vport == 1 ? 0x0201 : 0x0000)) flags_ok = false;
-    }
+    uint32_t synacks = take_synacks(w, isn_plus1, &acks_ok, &flags_ok);
     CHECK(synacks == 3, "the PS3's three SYNs are each answered with a SYN-ACK");
     CHECK(acks_ok, "each SYN-ACK acknowledges the PS3's ISN + 1");
     CHECK(flags_ok, "syn_flags 0x0201 on channel 1 and 0 on 2 and 3, as the PS3 sends");

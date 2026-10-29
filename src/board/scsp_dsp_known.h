@@ -5,112 +5,1690 @@
  * DSP microprograms compiled to straight-line C, each with the interpreter's
  * semantics (scsp.h, scsp_dsp_step) and its fields folded to constants.
  * scsp_dsp_decode picks one when MPRO and the program length match an entry
- * word for word; anything else runs on the interpreter.
+ * word for word; anything else runs on the interpreter. MEMS, the inputs and
+ * the coefficients and tap addresses are read once into locals, and a TEMP
+ * word written earlier in the sample is read back from its local.
  */
 #ifndef SCSP_DSP_KNOWN_H
 #define SCSP_DSP_KNOWN_H
 
-static void scsp_dsp_prog_sfight_fvipers(scsp_t *s) {
+/*
+ * Delay-memory access. A program's ring (RBP, RBL) is checked against the end
+ * of RAM once per sample, and a ring past it runs on the interpreter instead;
+ * within it the accesses are the plain big-endian word reads and writes
+ * scsp_ram_w/ww make, without their per-access bounds test. The largest
+ * address a ring can reach (RBP 0x3F << 12, plus 0xFFFF, doubled) is below the
+ * 1 MB mask, so the mask is never needed.
+ */
+static inline uint16_t scsp_dsp_ring_rd(const uint8_t *ram, uint32_t a) {
+    return (uint16_t)((ram[a] << 8) | ram[a + 1]);
+}
+static inline void scsp_dsp_ring_wr(uint8_t *ram, uint32_t a, uint16_t v) {
+    ram[a] = (uint8_t)(v >> 8); ram[a + 1] = (uint8_t)v;
+}
+
+static int scsp_dsp_prog_sfight_fvipers(scsp_t *s) {
     scsp_dsp_t *d = &s->dsp;
-    int32_t *mems = d->mems, *temp = d->temp;
-    int16_t efreg[16] = {0};
     const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
     int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
     uint32_t adrs = 0, addr;
     int64_t v;
-    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)rbl_mask; (void)rbp;
-    /*   0 */ { inputs = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[5] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*   1 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(127u + dec) & 0x7F] = shifted; }
-    /*   2 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(127u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[0] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*   3 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(1u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[9] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(0u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[10] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*   4 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(3u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[10] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*   5 */ { inputs = scsp_sext(mems[0], 24); inputs = memval; mems[0] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[8] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[11] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*   6 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(3u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[12] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(2u + dec) & 0x7F] = shifted; }
-    /*   7 */ { inputs = scsp_sext(mems[0], 24); mems[1] = memval; tr = scsp_sext(temp[(5u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[13] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[12] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*   8 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(2u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[11] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*   9 */ { inputs = scsp_sext(mems[0], 24); mems[2] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[14] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(4u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[15] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  10 */ { inputs = scsp_sext(mems[1], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[15] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  11 */ { inputs = scsp_sext(mems[2], 24); mems[3] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[19] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(6u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[15] + dec + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  12 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(6u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[18] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  13 */ { inputs = scsp_sext(mems[0], 24); mems[4] = memval; tr = scsp_sext(temp[(9u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[30] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(7u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[18] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  14 */ { inputs = scsp_sext(mems[3], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[32] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  15 */ { inputs = scsp_sext(mems[4], 24); mems[5] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[32] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[18] + dec + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  16 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(7u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[31] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(8u + dec) & 0x7F] = shifted; }
-    /*  17 */ { inputs = scsp_sext(mems[0], 24); mems[6] = memval; tr = scsp_sext(temp[(12u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[30] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(10u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[21] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  18 */ { inputs = scsp_sext(mems[5], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[34] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  19 */ { inputs = scsp_sext(mems[6], 24); mems[7] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[34] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[21] + dec + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  20 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(7u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[33] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(11u + dec) & 0x7F] = shifted; }
-    /*  21 */ { inputs = scsp_sext(mems[0], 24); mems[8] = memval; tr = scsp_sext(temp[(15u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[30] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(13u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[24] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  22 */ { inputs = scsp_sext(mems[7], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[36] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  23 */ { inputs = scsp_sext(mems[8], 24); mems[9] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[36] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[24] + dec + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  24 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(7u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[35] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(14u + dec) & 0x7F] = shifted; }
-    /*  25 */ { inputs = scsp_sext(mems[0], 24); mems[10] = memval; tr = scsp_sext(temp[(18u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[30] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(16u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[16] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  26 */ { inputs = scsp_sext(mems[9], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[38] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  27 */ { inputs = scsp_sext(mems[10], 24); mems[11] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[38] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[17] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  28 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(7u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[37] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(17u + dec) & 0x7F] = shifted; }
-    /*  29 */ { inputs = scsp_sext(mems[11], 24); mems[12] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[6] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(19u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[19] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  30 */ { inputs = scsp_sext(mems[12], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[7] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(20u + dec) & 0x7F] = shifted; }
-    /*  31 */ { inputs = scsp_sext(mems[0], 24); mems[13] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(21u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[20] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  32 */ { inputs = scsp_sext(mems[13], 24); tr = scsp_sext(temp[(20u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[6] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  33 */ { inputs = scsp_sext(mems[0], 24); mems[14] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(20u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[22] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  34 */ { inputs = scsp_sext(mems[14], 24); tr = scsp_sext(temp[(21u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[7] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  35 */ { inputs = scsp_sext(mems[0], 24); mems[15] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(21u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[23] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  36 */ { inputs = scsp_sext(mems[15], 24); tr = scsp_sext(temp[(20u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[6] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  37 */ { inputs = scsp_sext(mems[0], 24); mems[16] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(20u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[25] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  38 */ { inputs = scsp_sext(mems[16], 24); tr = scsp_sext(temp[(21u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[7] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  39 */ { inputs = scsp_sext(mems[0], 24); mems[17] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(21u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[26] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  40 */ { inputs = scsp_sext(mems[17], 24); tr = scsp_sext(temp[(20u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[6] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  41 */ { inputs = scsp_sext(mems[0], 24); mems[18] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(20u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[13] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  42 */ { inputs = scsp_sext(mems[18], 24); tr = scsp_sext(temp[(21u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[7] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  43 */ { inputs = scsp_sext(mems[0], 24); mems[19] = memval; tr = scsp_sext(temp[(20u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[22] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(21u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[14] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  44 */ { inputs = scsp_sext(mems[19], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[23] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  45 */ { inputs = scsp_sext(mems[0], 24); mems[20] = memval; tr = scsp_sext(temp[(21u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[26] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(22u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[27] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  46 */ { inputs = scsp_sext(mems[20], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[27] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  47 */ { inputs = scsp_sext(mems[0], 24); mems[21] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(23u + dec) & 0x7F] = shifted; addr = ((((uint32_t)d->madrs[28] + dec) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_ram_w(s, addr)); }
-    /*  48 */ { inputs = scsp_sext(mems[21], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[39] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  49 */ { inputs = scsp_sext(mems[0], 24); mems[22] = memval; tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(24u + dec) & 0x7F] = shifted; }
-    /*  50 */ { inputs = scsp_sext(mems[22], 24); tr = scsp_sext(temp[(24u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[40] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  51 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(4u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[42] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(24u + dec) & 0x7F] = shifted; }
-    /*  52 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(24u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[41] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  53 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[9] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  54 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(4u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[2] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  55 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = 0; x = inputs; y = scsp_sext((d->coef[16] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[0] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  56 */ { inputs = scsp_sext(mems[1], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[17] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  57 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(6u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[20] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[1] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  58 */ { inputs = scsp_sext(mems[2], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[21] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  59 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[2] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  60 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(10u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[2] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  61 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[5] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  62 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(13u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[2] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  63 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[6] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  64 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(16u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[2] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  65 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[7] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  66 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(19u + dec) & 0x7F], 24); b = tr; x = inputs; y = scsp_sext((d->coef[2] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  67 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(20u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[24] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[8] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  68 */ { inputs = scsp_sext(mems[19], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[25] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  69 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(21u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[28] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[3] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  70 */ { inputs = scsp_sext(mems[20], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = acc; x = inputs; y = scsp_sext((d->coef[29] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  71 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(22u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[0] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = ((((uint32_t)d->madrs[4] + dec) & rbl_mask) + rbp) << 1; scsp_ram_ww(s, addr, scsp_dsp_pack(shifted)); }
-    /*  72 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(23u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[0] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(25u + dec) & 0x7F] = shifted; }
-    /*  73 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(25u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[43] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(26u + dec) & 0x7F] = shifted; }
-    /*  74 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(24u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[44] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  75 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(127u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[45] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  76 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(26u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[43] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(126u + dec) & 0x7F] = shifted; }
-    /*  77 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(24u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[44] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  78 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(127u + dec) & 0x7F], 24); b = acc; x = tr; y = scsp_sext((d->coef[45] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  79 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; temp[(125u + dec) & 0x7F] = shifted; }
-    /*  80 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(126u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[46] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  81 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; efreg[0] = (int16_t)(efreg[0] + (shifted >> 8)); }
-    /*  82 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(125u + dec) & 0x7F], 24); b = 0; x = tr; y = scsp_sext((d->coef[47] >> 3) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; }
-    /*  83 */ { inputs = scsp_sext(mems[0], 24); tr = scsp_sext(temp[(0u + dec) & 0x7F], 24); b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 0); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; efreg[1] = (int16_t)(efreg[1] + (shifted >> 8)); }
-    memcpy(d->efreg, efreg, sizeof d->efreg);
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const int32_t c43 = d->coef[43] >> 3;
+    const int32_t c44 = d->coef[44] >> 3;
+    const int32_t c45 = d->coef[45] >> 3;
+    const int32_t c46 = d->coef[46] >> 3;
+    const int32_t c47 = d->coef[47] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const uint32_t ma13 = d->madrs[13] + dec;
+    const uint32_t ma14 = d->madrs[14] + dec;
+    const uint32_t ma15 = d->madrs[15] + dec;
+    const uint32_t ma16 = d->madrs[16] + dec;
+    const uint32_t ma17 = d->madrs[17] + dec;
+    const uint32_t ma18 = d->madrs[18] + dec;
+    const uint32_t ma19 = d->madrs[19] + dec;
+    const uint32_t ma20 = d->madrs[20] + dec;
+    const uint32_t ma21 = d->madrs[21] + dec;
+    const uint32_t ma22 = d->madrs[22] + dec;
+    const uint32_t ma23 = d->madrs[23] + dec;
+    const uint32_t ma24 = d->madrs[24] + dec;
+    const uint32_t ma25 = d->madrs[25] + dec;
+    const uint32_t ma26 = d->madrs[26] + dec;
+    const uint32_t ma27 = d->madrs[27] + dec;
+    const uint32_t ma28 = d->madrs[28] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8], m9 = d->mems[9], m10 = d->mems[10], m11 = d->mems[11], m12 = d->mems[12], m13 = d->mems[13], m14 = d->mems[14], m15 = d->mems[15], m16 = d->mems[16], m17 = d->mems[17], m18 = d->mems[18], m19 = d->mems[19], m20 = d->mems[20], m21 = d->mems[21], m22 = d->mems[22];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = mx0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = 0; x = tr; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t3 = shifted; temp[(0u + dec) & 0x7F] = t3; addr = (((ma10) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   4 */ inputs = m0; tr = temp[(3u + dec) & 0x7F]; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; inputs = memval; m0 = memval; tr = t3; b = acc; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   6 */ inputs = m0; tr = temp[(3u + dec) & 0x7F]; b = 0; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t6 = shifted; temp[(2u + dec) & 0x7F] = t6;
+    /*   7 */ inputs = m0; m1 = memval; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   8 */ inputs = m0; tr = t6; b = acc; x = tr; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; m2 = memval; tr = t3; b = 0; x = inputs; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(4u + dec) & 0x7F] = t9; addr = (((ma15) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  10 */ inputs = m1; tr = t3; b = acc; x = inputs; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m2; m3 = memval; tr = t3; b = 0; x = inputs; y = c19; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t11 = shifted; temp[(6u + dec) & 0x7F] = t11; addr = (((ma15 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  12 */ inputs = m0; tr = t11; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m0; m4 = memval; tr = temp[(9u + dec) & 0x7F]; b = 0; x = tr; y = c30; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t13 = shifted; temp[(7u + dec) & 0x7F] = t13; addr = (((ma18) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  14 */ inputs = m3; tr = t3; b = acc; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m4; m5 = memval; tr = t3; b = acc; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma18 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  16 */ inputs = m0; tr = t13; b = acc; x = tr; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t16 = shifted; temp[(8u + dec) & 0x7F] = t16;
+    /*  17 */ inputs = m0; m6 = memval; tr = temp[(12u + dec) & 0x7F]; b = 0; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t17 = shifted; temp[(10u + dec) & 0x7F] = t17; addr = (((ma21) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  18 */ inputs = m5; tr = t3; b = acc; x = inputs; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m6; m7 = memval; tr = t3; b = acc; x = inputs; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma21 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  20 */ inputs = m0; tr = t13; b = acc; x = tr; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t20 = shifted; temp[(11u + dec) & 0x7F] = t20;
+    /*  21 */ inputs = m0; m8 = memval; tr = temp[(15u + dec) & 0x7F]; b = 0; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t21 = shifted; temp[(13u + dec) & 0x7F] = t21; addr = (((ma24) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  22 */ inputs = m7; tr = t3; b = acc; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m8; m9 = memval; tr = t3; b = acc; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma24 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  24 */ inputs = m0; tr = t13; b = acc; x = tr; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t24 = shifted; temp[(14u + dec) & 0x7F] = t24;
+    /*  25 */ inputs = m0; m10 = memval; tr = temp[(18u + dec) & 0x7F]; b = 0; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t25 = shifted; temp[(16u + dec) & 0x7F] = t25; addr = (((ma16) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  26 */ inputs = m9; tr = t3; b = acc; x = inputs; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m10; m11 = memval; tr = t3; b = acc; x = inputs; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma17) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  28 */ inputs = m0; tr = t13; b = acc; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t28 = shifted; temp[(17u + dec) & 0x7F] = t28;
+    /*  29 */ inputs = m11; m12 = memval; tr = t3; b = 0; x = inputs; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t29 = shifted; temp[(19u + dec) & 0x7F] = t29; addr = (((ma19) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  30 */ inputs = m12; tr = t3; b = 0; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t30 = shifted; temp[(20u + dec) & 0x7F] = t30;
+    /*  31 */ inputs = m0; m13 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t31 = shifted; temp[(21u + dec) & 0x7F] = t31; addr = (((ma20) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  32 */ inputs = m13; tr = t30; b = tr; x = inputs; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; m14 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t33 = shifted; temp[(20u + dec) & 0x7F] = t33; addr = (((ma22) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  34 */ inputs = m14; tr = t31; b = tr; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; m15 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t35 = shifted; temp[(21u + dec) & 0x7F] = t35; addr = (((ma23) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  36 */ inputs = m15; tr = t33; b = tr; x = inputs; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m0; m16 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(20u + dec) & 0x7F] = t37; addr = (((ma25) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  38 */ inputs = m16; tr = t35; b = tr; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m0; m17 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t39 = shifted; temp[(21u + dec) & 0x7F] = t39; addr = (((ma26) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  40 */ inputs = m17; tr = t37; b = tr; x = inputs; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; m18 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t41 = shifted; temp[(20u + dec) & 0x7F] = t41; addr = (((ma13) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  42 */ inputs = m18; tr = t39; b = tr; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  43 */ inputs = m0; m19 = memval; tr = t41; b = 0; x = tr; y = c22; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t43 = shifted; temp[(21u + dec) & 0x7F] = t43; addr = (((ma14) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  44 */ inputs = m19; tr = t3; b = acc; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; m20 = memval; tr = t43; b = 0; x = tr; y = c26; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t45 = shifted; temp[(22u + dec) & 0x7F] = t45; addr = (((ma27) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  46 */ inputs = m20; tr = t3; b = acc; x = inputs; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m0; m21 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t47 = shifted; temp[(23u + dec) & 0x7F] = t47; addr = (((ma28) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  48 */ inputs = m21; tr = t3; b = 0; x = inputs; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; m22 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t49 = shifted; temp[(24u + dec) & 0x7F] = t49;
+    /*  50 */ inputs = m22; tr = t49; b = tr; x = inputs; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m0; tr = t9; b = 0; x = tr; y = c42; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t51 = shifted; temp[(24u + dec) & 0x7F] = t51;
+    /*  52 */ inputs = m0; tr = t51; b = acc; x = tr; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma9) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  54 */ inputs = m0; tr = t9; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m0; tr = t3; b = 0; x = inputs; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  56 */ inputs = m1; tr = t3; b = acc; x = inputs; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  57 */ inputs = m0; tr = t11; b = 0; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  58 */ inputs = m2; tr = t3; b = acc; x = inputs; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  60 */ inputs = m0; tr = t17; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  62 */ inputs = m0; tr = t21; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  64 */ inputs = m0; tr = t25; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  66 */ inputs = m0; tr = t29; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m0; tr = t41; b = 0; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  68 */ inputs = m19; tr = t3; b = acc; x = inputs; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  69 */ inputs = m0; tr = t43; b = 0; x = tr; y = c28; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  70 */ inputs = m20; tr = t3; b = acc; x = inputs; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m0; tr = t45; b = 0; x = tr; y = c0; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  72 */ inputs = m0; tr = t47; b = 0; x = tr; y = c0; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t72 = shifted; temp[(25u + dec) & 0x7F] = t72;
+    /*  73 */ inputs = m0; tr = t72; b = 0; x = tr; y = c43; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t73 = shifted; temp[(26u + dec) & 0x7F] = t73;
+    /*  74 */ inputs = m0; tr = t51; b = acc; x = tr; y = c44; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m0; tr = t1; b = acc; x = tr; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  76 */ inputs = m0; tr = t73; b = 0; x = tr; y = c43; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t76 = shifted; temp[(126u + dec) & 0x7F] = t76;
+    /*  77 */ inputs = m0; tr = t51; b = acc; x = tr; y = c44; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  78 */ inputs = m0; tr = t1; b = acc; x = tr; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t79 = shifted; temp[(125u + dec) & 0x7F] = t79;
+    /*  80 */ inputs = m0; tr = t76; b = 0; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /*  82 */ inputs = m0; tr = t79; b = 0; x = tr; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  83 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8; d->mems[9] = m9; d->mems[10] = m10; d->mems[11] = m11; d->mems[12] = m12; d->mems[13] = m13; d->mems[14] = m14; d->mems[15] = m15; d->mems[16] = m16; d->mems[17] = m17; d->mems[18] = m18; d->mems[19] = m19; d->mems[20] = m20; d->mems[21] = m21; d->mems[22] = m22;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
     d->dec--;
     memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_hotd_dynamcop(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const int32_t c43 = d->coef[43] >> 3;
+    const int32_t c44 = d->coef[44] >> 3;
+    const int32_t c45 = d->coef[45] >> 3;
+    const int32_t c46 = d->coef[46] >> 3;
+    const int32_t c47 = d->coef[47] >> 3;
+    const int32_t c48 = d->coef[48] >> 3;
+    const int32_t c49 = d->coef[49] >> 3;
+    const int32_t c50 = d->coef[50] >> 3;
+    const int32_t c51 = d->coef[51] >> 3;
+    const int32_t c52 = d->coef[52] >> 3;
+    const int32_t c53 = d->coef[53] >> 3;
+    const int32_t c54 = d->coef[54] >> 3;
+    const int32_t c55 = d->coef[55] >> 3;
+    const int32_t c56 = d->coef[56] >> 3;
+    const int32_t c57 = d->coef[57] >> 3;
+    const int32_t c58 = d->coef[58] >> 3;
+    const int32_t c59 = d->coef[59] >> 3;
+    const int32_t c60 = d->coef[60] >> 3;
+    const int32_t c61 = d->coef[61] >> 3;
+    const int32_t c62 = d->coef[62] >> 3;
+    const int32_t c63 = d->coef[63] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const uint32_t ma13 = d->madrs[13] + dec;
+    const uint32_t ma14 = d->madrs[14] + dec;
+    const uint32_t ma15 = d->madrs[15] + dec;
+    const uint32_t ma16 = d->madrs[16] + dec;
+    const uint32_t ma17 = d->madrs[17] + dec;
+    const uint32_t ma18 = d->madrs[18] + dec;
+    const uint32_t ma19 = d->madrs[19] + dec;
+    const uint32_t ma20 = d->madrs[20] + dec;
+    const uint32_t ma21 = d->madrs[21] + dec;
+    const uint32_t ma22 = d->madrs[22] + dec;
+    const uint32_t ma23 = d->madrs[23] + dec;
+    const uint32_t ma24 = d->madrs[24] + dec;
+    const uint32_t ma25 = d->madrs[25] + dec;
+    const uint32_t ma26 = d->madrs[26] + dec;
+    const uint32_t ma27 = d->madrs[27] + dec;
+    const uint32_t ma28 = d->madrs[28] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    const int32_t ex0 = scsp_sext(d->exts[0] * 256, 24);
+    const int32_t ex1 = scsp_sext(d->exts[1] * 256, 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8], m9 = d->mems[9], m10 = d->mems[10], m11 = d->mems[11], m12 = d->mems[12], m13 = d->mems[13], m14 = d->mems[14], m15 = d->mems[15], m16 = d->mems[16], m17 = d->mems[17], m18 = d->mems[18], m19 = d->mems[19], m20 = d->mems[20], m21 = d->mems[21], m22 = d->mems[22];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = ex0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e14 += shifted >> 8;
+    /*   4 */ inputs = ex1; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t5 = shifted; temp[(126u + dec) & 0x7F] = t5;
+    /*   6 */ inputs = m0; tr = t5; b = 0; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e15 += shifted >> 8;
+    /*   8 */ inputs = mx1; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(125u + dec) & 0x7F] = t9;
+    /*  10 */ inputs = m0; tr = t9; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t11 = shifted; temp[(0u + dec) & 0x7F] = t11;
+    /*  12 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = acc; x = tr; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m0; tr = t11; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  14 */ inputs = m0; tr = temp[(4u + dec) & 0x7F]; b = acc; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m0; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  16 */ inputs = m0; tr = t11; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t16 = shifted; temp[(3u + dec) & 0x7F] = t16;
+    /*  17 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t17 = shifted; temp[(124u + dec) & 0x7F] = t17;
+    /*  18 */ inputs = m0; tr = t17; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m0; tr = temp[(8u + dec) & 0x7F]; b = 0; x = tr; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t19 = shifted; temp[(6u + dec) & 0x7F] = t19;
+    /*  20 */ inputs = m0; tr = temp[(7u + dec) & 0x7F]; b = acc; x = tr; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t19; b = acc; x = tr; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  22 */ inputs = m0; tr = temp[(10u + dec) & 0x7F]; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; tr = temp[(11u + dec) & 0x7F]; b = acc; x = tr; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  24 */ inputs = m0; tr = t19; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t24 = shifted; temp[(9u + dec) & 0x7F] = t24;
+    /*  25 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t25 = shifted; temp[(123u + dec) & 0x7F] = t25;
+    /*  26 */ inputs = m0; tr = t25; b = 0; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /*  28 */ inputs = mx0; tr = t11; b = 0; x = inputs; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t29 = shifted; temp[(122u + dec) & 0x7F] = t29;
+    /*  30 */ inputs = m0; tr = t29; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; tr = temp[(13u + dec) & 0x7F]; b = 0; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t31 = shifted; temp[(12u + dec) & 0x7F] = t31; addr = (((ma10) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  32 */ inputs = m0; tr = temp[(15u + dec) & 0x7F]; b = acc; x = tr; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; inputs = memval; m0 = memval; tr = t31; b = acc; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  34 */ inputs = m0; tr = temp[(15u + dec) & 0x7F]; b = 0; x = tr; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t34 = shifted; temp[(14u + dec) & 0x7F] = t34;
+    /*  35 */ inputs = m0; m1 = memval; tr = temp[(17u + dec) & 0x7F]; b = acc; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  36 */ inputs = m0; tr = t34; b = acc; x = tr; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m0; m2 = memval; tr = t11; b = 0; x = inputs; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(16u + dec) & 0x7F] = t37; addr = (((ma15) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  38 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m2; m3 = memval; tr = t11; b = 0; x = inputs; y = c35; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t39 = shifted; temp[(18u + dec) & 0x7F] = t39; addr = (((ma15 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  40 */ inputs = m0; tr = t39; b = acc; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; m4 = memval; tr = temp[(21u + dec) & 0x7F]; b = 0; x = tr; y = c46; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t41 = shifted; temp[(19u + dec) & 0x7F] = t41; addr = (((ma18) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  42 */ inputs = m3; tr = t11; b = acc; x = inputs; y = c48; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  43 */ inputs = m4; m5 = memval; tr = t11; b = acc; x = inputs; y = c48; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma18 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  44 */ inputs = m0; tr = t41; b = acc; x = tr; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t44 = shifted; temp[(20u + dec) & 0x7F] = t44;
+    /*  45 */ inputs = m0; m6 = memval; tr = temp[(24u + dec) & 0x7F]; b = 0; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t45 = shifted; temp[(22u + dec) & 0x7F] = t45; addr = (((ma21) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  46 */ inputs = m5; tr = t11; b = acc; x = inputs; y = c50; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m6; m7 = memval; tr = t11; b = acc; x = inputs; y = c50; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma21 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  48 */ inputs = m0; tr = t41; b = acc; x = tr; y = c49; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t48 = shifted; temp[(23u + dec) & 0x7F] = t48;
+    /*  49 */ inputs = m0; m8 = memval; tr = temp[(27u + dec) & 0x7F]; b = 0; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t49 = shifted; temp[(25u + dec) & 0x7F] = t49; addr = (((ma24) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  50 */ inputs = m7; tr = t11; b = acc; x = inputs; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m8; m9 = memval; tr = t11; b = acc; x = inputs; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma24 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  52 */ inputs = m0; tr = t41; b = acc; x = tr; y = c51; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t52 = shifted; temp[(26u + dec) & 0x7F] = t52;
+    /*  53 */ inputs = m0; m10 = memval; tr = temp[(30u + dec) & 0x7F]; b = 0; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t53 = shifted; temp[(28u + dec) & 0x7F] = t53; addr = (((ma16) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  54 */ inputs = m9; tr = t11; b = acc; x = inputs; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m10; m11 = memval; tr = t11; b = acc; x = inputs; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma17) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  56 */ inputs = m0; tr = t41; b = acc; x = tr; y = c53; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t56 = shifted; temp[(29u + dec) & 0x7F] = t56;
+    /*  57 */ inputs = m11; m12 = memval; tr = t11; b = 0; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t57 = shifted; temp[(31u + dec) & 0x7F] = t57; addr = (((ma19) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  58 */ inputs = m12; tr = t11; b = 0; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t58 = shifted; temp[(32u + dec) & 0x7F] = t58;
+    /*  59 */ inputs = m0; m13 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t59 = shifted; temp[(33u + dec) & 0x7F] = t59; addr = (((ma20) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  60 */ inputs = m13; tr = t58; b = tr; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; m14 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t61 = shifted; temp[(32u + dec) & 0x7F] = t61; addr = (((ma22) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  62 */ inputs = m14; tr = t59; b = tr; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; m15 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t63 = shifted; temp[(33u + dec) & 0x7F] = t63; addr = (((ma23) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  64 */ inputs = m15; tr = t61; b = tr; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; m16 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t65 = shifted; temp[(32u + dec) & 0x7F] = t65; addr = (((ma25) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  66 */ inputs = m16; tr = t63; b = tr; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m0; m17 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t67 = shifted; temp[(33u + dec) & 0x7F] = t67; addr = (((ma26) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  68 */ inputs = m17; tr = t65; b = tr; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  69 */ inputs = m0; m18 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t69 = shifted; temp[(32u + dec) & 0x7F] = t69; addr = (((ma13) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  70 */ inputs = m18; tr = t67; b = tr; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m0; m19 = memval; tr = t69; b = 0; x = tr; y = c38; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t71 = shifted; temp[(33u + dec) & 0x7F] = t71; addr = (((ma14) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  72 */ inputs = m19; tr = t11; b = acc; x = inputs; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  73 */ inputs = m0; m20 = memval; tr = t71; b = 0; x = tr; y = c42; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t73 = shifted; temp[(34u + dec) & 0x7F] = t73; addr = (((ma27) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  74 */ inputs = m20; tr = t11; b = acc; x = inputs; y = c43; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m0; m21 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t75 = shifted; temp[(35u + dec) & 0x7F] = t75; addr = (((ma28) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  76 */ inputs = m21; tr = t11; b = 0; x = inputs; y = c55; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  77 */ inputs = m0; m22 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t77 = shifted; temp[(36u + dec) & 0x7F] = t77;
+    /*  78 */ inputs = m22; tr = t77; b = tr; x = inputs; y = c56; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t37; b = 0; x = tr; y = c58; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t79 = shifted; temp[(36u + dec) & 0x7F] = t79;
+    /*  80 */ inputs = m0; tr = t79; b = acc; x = tr; y = c57; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma9) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  82 */ inputs = m0; tr = t37; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  83 */ inputs = m0; tr = t11; b = 0; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  84 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  85 */ inputs = m0; tr = t39; b = 0; x = tr; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  86 */ inputs = m2; tr = t11; b = acc; x = inputs; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  87 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  88 */ inputs = m0; tr = t45; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  89 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  90 */ inputs = m0; tr = t49; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  91 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  92 */ inputs = m0; tr = t53; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  93 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  94 */ inputs = m0; tr = t57; b = tr; x = inputs; y = c2; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  95 */ inputs = m0; tr = t69; b = 0; x = tr; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  96 */ inputs = m19; tr = t11; b = acc; x = inputs; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  97 */ inputs = m0; tr = t71; b = 0; x = tr; y = c44; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  98 */ inputs = m20; tr = t11; b = acc; x = inputs; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  99 */ inputs = m0; tr = t73; b = 0; x = tr; y = c0; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /* 100 */ inputs = m0; tr = t75; b = 0; x = tr; y = c0; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t100 = shifted; temp[(37u + dec) & 0x7F] = t100;
+    /* 101 */ inputs = m0; tr = t100; b = 0; x = tr; y = c59; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t101 = shifted; temp[(38u + dec) & 0x7F] = t101;
+    /* 102 */ inputs = m0; tr = t79; b = acc; x = tr; y = c60; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 103 */ inputs = m0; tr = t29; b = acc; x = tr; y = c61; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 104 */ inputs = m0; tr = t101; b = 0; x = tr; y = c59; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t104 = shifted; temp[(121u + dec) & 0x7F] = t104;
+    /* 105 */ inputs = m0; tr = t79; b = acc; x = tr; y = c60; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 106 */ inputs = m0; tr = t29; b = acc; x = tr; y = c61; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 107 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t107 = shifted; temp[(120u + dec) & 0x7F] = t107;
+    /* 108 */ inputs = m0; tr = t104; b = 0; x = tr; y = c62; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 109 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /* 110 */ inputs = m0; tr = t107; b = 0; x = tr; y = c63; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 111 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8; d->mems[9] = m9; d->mems[10] = m10; d->mems[11] = m11; d->mems[12] = m12; d->mems[13] = m13; d->mems[14] = m14; d->mems[15] = m15; d->mems[16] = m16; d->mems[17] = m17; d->mems[18] = m18; d->mems[19] = m19; d->mems[20] = m20; d->mems[21] = m21; d->mems[22] = m22;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_motoraid(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const int32_t c43 = d->coef[43] >> 3;
+    const int32_t c44 = d->coef[44] >> 3;
+    const int32_t c45 = d->coef[45] >> 3;
+    const int32_t c46 = d->coef[46] >> 3;
+    const int32_t c47 = d->coef[47] >> 3;
+    const int32_t c48 = d->coef[48] >> 3;
+    const int32_t c49 = d->coef[49] >> 3;
+    const int32_t c50 = d->coef[50] >> 3;
+    const int32_t c51 = d->coef[51] >> 3;
+    const int32_t c52 = d->coef[52] >> 3;
+    const int32_t c53 = d->coef[53] >> 3;
+    const int32_t c54 = d->coef[54] >> 3;
+    const int32_t c55 = d->coef[55] >> 3;
+    const int32_t c56 = d->coef[56] >> 3;
+    const int32_t c57 = d->coef[57] >> 3;
+    const int32_t c58 = d->coef[58] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    const int32_t mx2 = scsp_sext((int32_t)((uint32_t)d->mixs[2] << 4), 24);
+    const int32_t ex0 = scsp_sext(d->exts[0] * 256, 24);
+    const int32_t ex1 = scsp_sext(d->exts[1] * 256, 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = ex0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e14 += shifted >> 8;
+    /*   4 */ inputs = ex1; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t5 = shifted; temp[(126u + dec) & 0x7F] = t5;
+    /*   6 */ inputs = m0; tr = t5; b = 0; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e15 += shifted >> 8;
+    /*   8 */ inputs = mx2; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(125u + dec) & 0x7F] = t9;
+    /*  10 */ inputs = m0; tr = t9; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t11 = shifted; temp[(0u + dec) & 0x7F] = t11;
+    /*  12 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = acc; x = tr; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m0; tr = t11; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  14 */ inputs = m0; tr = temp[(4u + dec) & 0x7F]; b = acc; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m0; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  16 */ inputs = m0; tr = t11; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t16 = shifted; temp[(3u + dec) & 0x7F] = t16;
+    /*  17 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t17 = shifted; temp[(124u + dec) & 0x7F] = t17;
+    /*  18 */ inputs = m0; tr = t17; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m0; tr = temp[(8u + dec) & 0x7F]; b = 0; x = tr; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t19 = shifted; temp[(6u + dec) & 0x7F] = t19;
+    /*  20 */ inputs = m0; tr = temp[(7u + dec) & 0x7F]; b = acc; x = tr; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t19; b = acc; x = tr; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  22 */ inputs = m0; tr = temp[(10u + dec) & 0x7F]; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; tr = temp[(11u + dec) & 0x7F]; b = acc; x = tr; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  24 */ inputs = m0; tr = t19; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t24 = shifted; temp[(9u + dec) & 0x7F] = t24;
+    /*  25 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t25 = shifted; temp[(123u + dec) & 0x7F] = t25;
+    /*  26 */ inputs = m0; tr = t25; b = 0; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e4 += shifted >> 8;
+    /*  28 */ inputs = mx0; tr = t11; b = 0; x = inputs; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t29 = shifted; temp[(122u + dec) & 0x7F] = t29;
+    /*  30 */ inputs = m0; tr = t29; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; tr = temp[(14u + dec) & 0x7F]; b = 0; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t31 = shifted; temp[(12u + dec) & 0x7F] = t31;
+    /*  32 */ inputs = m0; tr = temp[(13u + dec) & 0x7F]; b = acc; x = tr; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; tr = t31; b = acc; x = tr; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  34 */ inputs = m0; tr = temp[(16u + dec) & 0x7F]; b = acc; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; tr = temp[(17u + dec) & 0x7F]; b = acc; x = tr; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  36 */ inputs = m0; tr = t31; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t36 = shifted; temp[(15u + dec) & 0x7F] = t36;
+    /*  37 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(121u + dec) & 0x7F] = t37;
+    /*  38 */ inputs = m0; tr = t37; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m0; tr = temp[(20u + dec) & 0x7F]; b = 0; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t39 = shifted; temp[(18u + dec) & 0x7F] = t39;
+    /*  40 */ inputs = m0; tr = temp[(19u + dec) & 0x7F]; b = acc; x = tr; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; tr = t39; b = acc; x = tr; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  42 */ inputs = m0; tr = temp[(22u + dec) & 0x7F]; b = acc; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  43 */ inputs = m0; tr = temp[(23u + dec) & 0x7F]; b = acc; x = tr; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  44 */ inputs = m0; tr = t39; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t44 = shifted; temp[(21u + dec) & 0x7F] = t44;
+    /*  45 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t45 = shifted; temp[(120u + dec) & 0x7F] = t45;
+    /*  46 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  48 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  50 */ inputs = m0; tr = temp[(25u + dec) & 0x7F]; b = 0; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m0; m1 = memval; tr = t11; b = acc; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  52 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m0; m2 = memval; tr = temp[(26u + dec) & 0x7F]; b = 0; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t53 = shifted; temp[(24u + dec) & 0x7F] = t53; addr = (((ma2 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  54 */ inputs = m2; tr = t11; b = acc; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m3; inputs = memval; m3 = memval; tr = t11; b = acc; x = inputs; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  56 */ inputs = m0; tr = t53; b = 0; x = tr; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t56 = shifted; temp[(25u + dec) & 0x7F] = t56;
+    /*  57 */ inputs = m0; tr = t56; b = acc; x = tr; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  58 */ inputs = m0; tr = t45; b = acc; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; tr = t11; b = 0; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  60 */ inputs = m0; tr = t45; b = acc; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m2; tr = t11; b = 0; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t61 = shifted; temp[(119u + dec) & 0x7F] = t61;
+    /*  62 */ inputs = m0; tr = t45; b = acc; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t63 = shifted; temp[(118u + dec) & 0x7F] = t63;
+    /*  64 */ inputs = m0; tr = t61; b = 0; x = tr; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /*  66 */ inputs = m0; tr = t63; b = 0; x = tr; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    /*  68 */ inputs = mx1; tr = t11; b = 0; x = inputs; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  69 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t69 = shifted; temp[(117u + dec) & 0x7F] = t69;
+    /*  70 */ inputs = m0; tr = t69; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m0; tr = temp[(29u + dec) & 0x7F]; b = 0; x = tr; y = c43; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t71 = shifted; temp[(27u + dec) & 0x7F] = t71;
+    /*  72 */ inputs = m0; tr = temp[(28u + dec) & 0x7F]; b = acc; x = tr; y = c42; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  73 */ inputs = m0; tr = t71; b = acc; x = tr; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  74 */ inputs = m0; tr = temp[(31u + dec) & 0x7F]; b = acc; x = tr; y = c44; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m0; tr = temp[(32u + dec) & 0x7F]; b = acc; x = tr; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  76 */ inputs = m0; tr = t71; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t76 = shifted; temp[(30u + dec) & 0x7F] = t76;
+    /*  77 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t77 = shifted; temp[(116u + dec) & 0x7F] = t77;
+    /*  78 */ inputs = m0; tr = t77; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = temp[(35u + dec) & 0x7F]; b = 0; x = tr; y = c48; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t79 = shifted; temp[(33u + dec) & 0x7F] = t79;
+    /*  80 */ inputs = m0; tr = temp[(34u + dec) & 0x7F]; b = acc; x = tr; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m0; tr = t79; b = acc; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  82 */ inputs = m0; tr = temp[(37u + dec) & 0x7F]; b = acc; x = tr; y = c49; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  83 */ inputs = m0; tr = temp[(38u + dec) & 0x7F]; b = acc; x = tr; y = c50; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  84 */ inputs = m0; tr = t79; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t84 = shifted; temp[(36u + dec) & 0x7F] = t84;
+    /*  85 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t85 = shifted; temp[(115u + dec) & 0x7F] = t85;
+    /*  86 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  87 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  88 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  89 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  90 */ inputs = m0; tr = temp[(40u + dec) & 0x7F]; b = 0; x = tr; y = c53; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  91 */ inputs = m0; m1 = memval; tr = t11; b = acc; x = inputs; y = c51; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  92 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  93 */ inputs = m0; m2 = memval; tr = temp[(41u + dec) & 0x7F]; b = 0; x = tr; y = c53; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t93 = shifted; temp[(39u + dec) & 0x7F] = t93; addr = (((ma5 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  94 */ inputs = m2; tr = t11; b = acc; x = inputs; y = c51; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  95 */ inputs = m3; inputs = memval; m3 = memval; tr = t11; b = acc; x = inputs; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  96 */ inputs = m0; tr = t93; b = 0; x = tr; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t96 = shifted; temp[(40u + dec) & 0x7F] = t96;
+    /*  97 */ inputs = m0; tr = t96; b = acc; x = tr; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  98 */ inputs = m0; tr = t85; b = acc; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  99 */ inputs = m0; tr = t11; b = 0; x = inputs; y = c55; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /* 100 */ inputs = m0; tr = t85; b = acc; x = tr; y = c56; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 101 */ inputs = m2; tr = t11; b = 0; x = inputs; y = c55; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t101 = shifted; temp[(114u + dec) & 0x7F] = t101;
+    /* 102 */ inputs = m0; tr = t85; b = acc; x = tr; y = c56; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 103 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t103 = shifted; temp[(113u + dec) & 0x7F] = t103;
+    /* 104 */ inputs = m0; tr = t101; b = 0; x = tr; y = c57; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 105 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /* 106 */ inputs = m0; tr = t103; b = 0; x = tr; y = c58; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 107 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e3 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_vf2(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = mx0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t3 = shifted; temp[(0u + dec) & 0x7F] = t3;
+    /*   4 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = acc; x = tr; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = t3; b = acc; x = tr; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   6 */ inputs = m0; tr = temp[(4u + dec) & 0x7F]; b = acc; x = tr; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   8 */ inputs = m0; tr = t3; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t8 = shifted; temp[(3u + dec) & 0x7F] = t8;
+    /*   9 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(126u + dec) & 0x7F] = t9;
+    /*  10 */ inputs = m0; tr = t9; b = 0; x = tr; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; tr = t1; b = acc; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  12 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t12 = shifted; temp[(125u + dec) & 0x7F] = t12;
+    /*  13 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  14 */ inputs = m0; tr = t12; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  16 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  17 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  18 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m0; inputs = memval; m0 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  20 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; m1 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  22 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; m2 = memval; tr = temp[(7u + dec) & 0x7F]; b = 0; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  24 */ inputs = m1; tr = t3; b = acc; x = inputs; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  25 */ inputs = m2; m3 = memval; tr = t3; b = acc; x = inputs; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  26 */ inputs = m0; tr = t3; b = acc; x = inputs; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t26 = shifted; temp[(6u + dec) & 0x7F] = t26;
+    /*  27 */ inputs = m0; m4 = memval; tr = temp[(8u + dec) & 0x7F]; b = 0; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  28 */ inputs = m3; tr = t3; b = acc; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m4; tr = t3; b = acc; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  30 */ inputs = m0; tr = t3; b = acc; x = inputs; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t30 = shifted; temp[(7u + dec) & 0x7F] = t30;
+    /*  31 */ inputs = m0; m5 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  32 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  34 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m5; m7 = memval; tr = t3; b = 0; x = inputs; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  36 */ inputs = m7; tr = t3; b = acc; x = inputs; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m0; m6 = memval; tr = t12; b = 0; x = tr; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(9u + dec) & 0x7F] = t37; addr = (((ma9) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  38 */ inputs = m0; tr = t37; b = acc; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m6; m8 = memval; tr = t3; b = 0; x = inputs; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t39 = shifted; temp[(124u + dec) & 0x7F] = t39;
+    /*  40 */ inputs = m8; tr = t3; b = acc; x = inputs; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; tr = t12; b = 0; x = tr; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t41 = shifted; temp[(10u + dec) & 0x7F] = t41;
+    /*  42 */ inputs = m0; tr = t41; b = acc; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  43 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t43 = shifted; temp[(123u + dec) & 0x7F] = t43;
+    /*  44 */ inputs = m0; tr = t39; b = 0; x = tr; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /*  46 */ inputs = m0; tr = t43; b = 0; x = tr; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    /*  48 */ inputs = mx1; tr = t3; b = 0; x = inputs; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t49 = shifted; temp[(122u + dec) & 0x7F] = t49;
+    /*  50 */ inputs = m0; tr = t49; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m0; tr = temp[(13u + dec) & 0x7F]; b = 0; x = tr; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t51 = shifted; temp[(11u + dec) & 0x7F] = t51;
+    /*  52 */ inputs = m0; tr = temp[(12u + dec) & 0x7F]; b = acc; x = tr; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m0; tr = t51; b = acc; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  54 */ inputs = m0; tr = temp[(15u + dec) & 0x7F]; b = acc; x = tr; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m0; tr = temp[(16u + dec) & 0x7F]; b = acc; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  56 */ inputs = m0; tr = t51; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t56 = shifted; temp[(14u + dec) & 0x7F] = t56;
+    /*  57 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t57 = shifted; temp[(121u + dec) & 0x7F] = t57;
+    /*  58 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  60 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; inputs = memval; m0 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  62 */ inputs = m0; tr = temp[(18u + dec) & 0x7F]; b = 0; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; m1 = memval; tr = t3; b = acc; x = inputs; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  64 */ inputs = m1; tr = t3; b = acc; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; m2 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t65 = shifted; temp[(17u + dec) & 0x7F] = t65; addr = (((ma12 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  66 */ inputs = m0; tr = temp[(19u + dec) & 0x7F]; b = 0; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m2; m3 = memval; tr = t3; b = acc; x = inputs; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  68 */ inputs = m3; tr = t3; b = acc; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  69 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t69 = shifted; temp[(18u + dec) & 0x7F] = t69;
+    /*  70 */ inputs = m0; tr = t65; b = 0; x = tr; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m0; tr = t69; b = acc; x = tr; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  72 */ inputs = m0; tr = t57; b = acc; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  73 */ inputs = m0; tr = t3; b = 0; x = inputs; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  74 */ inputs = m0; tr = t57; b = acc; x = tr; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m2; tr = t3; b = 0; x = inputs; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t75 = shifted; temp[(120u + dec) & 0x7F] = t75;
+    /*  76 */ inputs = m0; tr = t57; b = acc; x = tr; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  77 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t77 = shifted; temp[(119u + dec) & 0x7F] = t77;
+    /*  78 */ inputs = m0; tr = t75; b = 0; x = tr; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /*  80 */ inputs = m0; tr = t77; b = 0; x = tr; y = c42; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e3 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_vonj_von(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const int32_t c43 = d->coef[43] >> 3;
+    const int32_t c44 = d->coef[44] >> 3;
+    const int32_t c45 = d->coef[45] >> 3;
+    const int32_t c46 = d->coef[46] >> 3;
+    const int32_t c47 = d->coef[47] >> 3;
+    const int32_t c48 = d->coef[48] >> 3;
+    const int32_t c49 = d->coef[49] >> 3;
+    const int32_t c50 = d->coef[50] >> 3;
+    const int32_t c51 = d->coef[51] >> 3;
+    const int32_t c52 = d->coef[52] >> 3;
+    const int32_t c53 = d->coef[53] >> 3;
+    const int32_t c54 = d->coef[54] >> 3;
+    const int32_t c55 = d->coef[55] >> 3;
+    const int32_t c56 = d->coef[56] >> 3;
+    const int32_t c57 = d->coef[57] >> 3;
+    const int32_t c58 = d->coef[58] >> 3;
+    const int32_t c59 = d->coef[59] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx2 = scsp_sext((int32_t)((uint32_t)d->mixs[2] << 4), 24);
+    const int32_t mx4 = scsp_sext((int32_t)((uint32_t)d->mixs[4] << 4), 24);
+    const int32_t mx5 = scsp_sext((int32_t)((uint32_t)d->mixs[5] << 4), 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = mx2; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t3 = shifted; temp[(0u + dec) & 0x7F] = t3;
+    /*   4 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = acc; x = tr; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = t3; b = acc; x = tr; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   6 */ inputs = m0; tr = temp[(4u + dec) & 0x7F]; b = acc; x = tr; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   8 */ inputs = m0; tr = t3; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t8 = shifted; temp[(3u + dec) & 0x7F] = t8;
+    /*   9 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(126u + dec) & 0x7F] = t9;
+    /*  10 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  12 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m0; inputs = memval; m0 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  14 */ inputs = m0; tr = temp[(7u + dec) & 0x7F]; b = 0; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m0; m1 = memval; tr = t3; b = acc; x = inputs; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  16 */ inputs = m1; tr = t3; b = acc; x = inputs; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  17 */ inputs = m0; m2 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t17 = shifted; temp[(6u + dec) & 0x7F] = t17; addr = (((ma2 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  18 */ inputs = m0; tr = temp[(8u + dec) & 0x7F]; b = 0; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m2; m3 = memval; tr = t3; b = acc; x = inputs; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  20 */ inputs = m3; tr = t3; b = acc; x = inputs; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t21 = shifted; temp[(7u + dec) & 0x7F] = t21;
+    /*  22 */ inputs = m0; tr = t17; b = 0; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; tr = t21; b = acc; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  24 */ inputs = m0; tr = t9; b = acc; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  25 */ inputs = m0; tr = t3; b = 0; x = inputs; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  26 */ inputs = m0; tr = t9; b = acc; x = tr; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m2; tr = t3; b = 0; x = inputs; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t27 = shifted; temp[(125u + dec) & 0x7F] = t27;
+    /*  28 */ inputs = m0; tr = t9; b = acc; x = tr; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t29 = shifted; temp[(124u + dec) & 0x7F] = t29;
+    /*  30 */ inputs = m0; tr = t27; b = 0; x = tr; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /*  32 */ inputs = m0; tr = t29; b = 0; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e3 += shifted >> 8;
+    /*  34 */ inputs = mx4; tr = t3; b = 0; x = inputs; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t35 = shifted; temp[(123u + dec) & 0x7F] = t35;
+    /*  36 */ inputs = m0; tr = t35; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m0; tr = temp[(11u + dec) & 0x7F]; b = 0; x = tr; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(9u + dec) & 0x7F] = t37;
+    /*  38 */ inputs = m0; tr = temp[(10u + dec) & 0x7F]; b = acc; x = tr; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m0; tr = t37; b = acc; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  40 */ inputs = m0; tr = temp[(13u + dec) & 0x7F]; b = acc; x = tr; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; tr = temp[(14u + dec) & 0x7F]; b = acc; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  42 */ inputs = m0; tr = t37; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t42 = shifted; temp[(12u + dec) & 0x7F] = t42;
+    /*  43 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t43 = shifted; temp[(122u + dec) & 0x7F] = t43;
+    /*  44 */ inputs = m0; tr = t43; b = 0; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e4 += shifted >> 8;
+    /*  46 */ inputs = mx5; tr = t3; b = 0; x = inputs; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t47 = shifted; temp[(121u + dec) & 0x7F] = t47;
+    /*  48 */ inputs = m0; tr = t47; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; tr = temp[(17u + dec) & 0x7F]; b = 0; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t49 = shifted; temp[(15u + dec) & 0x7F] = t49;
+    /*  50 */ inputs = m0; tr = temp[(16u + dec) & 0x7F]; b = acc; x = tr; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m0; tr = t49; b = acc; x = tr; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  52 */ inputs = m0; tr = temp[(19u + dec) & 0x7F]; b = acc; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m0; tr = temp[(20u + dec) & 0x7F]; b = acc; x = tr; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  54 */ inputs = m0; tr = t49; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t54 = shifted; temp[(18u + dec) & 0x7F] = t54;
+    /*  55 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t55 = shifted; temp[(120u + dec) & 0x7F] = t55;
+    /*  56 */ inputs = m0; tr = t55; b = 0; x = tr; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  57 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e5 += shifted >> 8;
+    /*  58 */ inputs = mx0; tr = t3; b = 0; x = inputs; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t59 = shifted; temp[(119u + dec) & 0x7F] = t59;
+    /*  60 */ inputs = m0; tr = t59; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  62 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  64 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; inputs = memval; m0 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  66 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m0; m1 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  68 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  69 */ inputs = m0; m2 = memval; tr = temp[(22u + dec) & 0x7F]; b = 0; x = tr; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  70 */ inputs = m1; tr = t3; b = acc; x = inputs; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m2; m3 = memval; tr = t3; b = acc; x = inputs; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  72 */ inputs = m0; tr = t3; b = acc; x = inputs; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t72 = shifted; temp[(21u + dec) & 0x7F] = t72;
+    /*  73 */ inputs = m0; m4 = memval; tr = temp[(23u + dec) & 0x7F]; b = 0; x = tr; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  74 */ inputs = m3; tr = t3; b = acc; x = inputs; y = c43; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m4; tr = t3; b = acc; x = inputs; y = c44; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  76 */ inputs = m0; tr = t3; b = acc; x = inputs; y = c42; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t76 = shifted; temp[(22u + dec) & 0x7F] = t76;
+    /*  77 */ inputs = m0; m5 = memval; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  78 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  80 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m5; m7 = memval; tr = t3; b = 0; x = inputs; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma9) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  82 */ inputs = m7; tr = t3; b = acc; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  83 */ inputs = m0; m6 = memval; tr = t59; b = 0; x = tr; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t83 = shifted; temp[(24u + dec) & 0x7F] = t83; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  84 */ inputs = m0; tr = t83; b = acc; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  85 */ inputs = m6; m8 = memval; tr = t3; b = 0; x = inputs; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t85 = shifted; temp[(118u + dec) & 0x7F] = t85;
+    /*  86 */ inputs = m8; tr = t3; b = acc; x = inputs; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  87 */ inputs = m0; tr = t59; b = 0; x = tr; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t87 = shifted; temp[(25u + dec) & 0x7F] = t87;
+    /*  88 */ inputs = m0; tr = t87; b = acc; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  89 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t89 = shifted; temp[(117u + dec) & 0x7F] = t89;
+    /*  90 */ inputs = m0; tr = t85; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  91 */ inputs = m0; tr = temp[(28u + dec) & 0x7F]; b = 0; x = tr; y = c50; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t91 = shifted; temp[(26u + dec) & 0x7F] = t91;
+    /*  92 */ inputs = m0; tr = temp[(27u + dec) & 0x7F]; b = acc; x = tr; y = c49; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  93 */ inputs = m0; tr = t91; b = acc; x = tr; y = c48; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  94 */ inputs = m0; tr = temp[(30u + dec) & 0x7F]; b = acc; x = tr; y = c51; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  95 */ inputs = m0; tr = temp[(31u + dec) & 0x7F]; b = acc; x = tr; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  96 */ inputs = m0; tr = t91; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t96 = shifted; temp[(29u + dec) & 0x7F] = t96;
+    /*  97 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t97 = shifted; temp[(116u + dec) & 0x7F] = t97;
+    /*  98 */ inputs = m0; tr = t89; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  99 */ inputs = m0; tr = temp[(34u + dec) & 0x7F]; b = 0; x = tr; y = c55; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t99 = shifted; temp[(32u + dec) & 0x7F] = t99;
+    /* 100 */ inputs = m0; tr = temp[(33u + dec) & 0x7F]; b = acc; x = tr; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 101 */ inputs = m0; tr = t99; b = acc; x = tr; y = c53; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 102 */ inputs = m0; tr = temp[(36u + dec) & 0x7F]; b = acc; x = tr; y = c56; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 103 */ inputs = m0; tr = temp[(37u + dec) & 0x7F]; b = acc; x = tr; y = c57; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 104 */ inputs = m0; tr = t99; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t104 = shifted; temp[(35u + dec) & 0x7F] = t104;
+    /* 105 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t105 = shifted; temp[(115u + dec) & 0x7F] = t105;
+    /* 106 */ inputs = m0; tr = t97; b = 0; x = tr; y = c58; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 107 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /* 108 */ inputs = m0; tr = t105; b = 0; x = tr; y = c59; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 109 */ inputs = m0; tr = t3; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_doa(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = mx0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = mx1; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t3 = shifted; temp[(126u + dec) & 0x7F] = t3;
+    /*   4 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   6 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; inputs = memval; m0 = memval; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   8 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = 0; x = tr; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; m1 = memval; tr = temp[(0u + dec) & 0x7F]; b = acc; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  10 */ inputs = m1; tr = temp[(0u + dec) & 0x7F]; b = acc; x = inputs; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; m2 = memval; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t11 = shifted; temp[(0u + dec) & 0x7F] = t11; addr = (((ma2 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  12 */ inputs = m2; tr = t11; b = acc; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m3; inputs = memval; m3 = memval; tr = t11; b = acc; x = inputs; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  14 */ inputs = m0; tr = t11; b = 0; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t14 = shifted; temp[(1u + dec) & 0x7F] = t14;
+    /*  15 */ inputs = m0; tr = t14; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  16 */ inputs = m0; tr = t3; b = acc; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  17 */ inputs = m0; tr = t11; b = 0; x = inputs; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  18 */ inputs = m0; tr = t3; b = acc; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m2; tr = t11; b = 0; x = inputs; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t19 = shifted; temp[(125u + dec) & 0x7F] = t19;
+    /*  20 */ inputs = m0; tr = t3; b = acc; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t21 = shifted; temp[(124u + dec) & 0x7F] = t21;
+    /*  22 */ inputs = m0; tr = t1; b = 0; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; tr = t19; b = acc; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  24 */ inputs = m0; tr = t21; b = acc; x = tr; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  25 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t25 = shifted; temp[(123u + dec) & 0x7F] = t25;
+    /*  26 */ inputs = m0; tr = t25; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  28 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  30 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  32 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; m1 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  34 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; m2 = memval; tr = temp[(4u + dec) & 0x7F]; b = 0; x = tr; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  36 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m2; m3 = memval; tr = t11; b = acc; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  38 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t38 = shifted; temp[(3u + dec) & 0x7F] = t38;
+    /*  39 */ inputs = m0; m4 = memval; tr = temp[(5u + dec) & 0x7F]; b = 0; x = tr; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  40 */ inputs = m3; tr = t11; b = acc; x = inputs; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m4; tr = t11; b = acc; x = inputs; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  42 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t42 = shifted; temp[(4u + dec) & 0x7F] = t42;
+    /*  43 */ inputs = m0; m5 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  44 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  46 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m5; m7 = memval; tr = t11; b = 0; x = inputs; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma9) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  48 */ inputs = m7; tr = t11; b = acc; x = inputs; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; m6 = memval; tr = t25; b = 0; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t49 = shifted; temp[(6u + dec) & 0x7F] = t49; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  50 */ inputs = m0; tr = t49; b = acc; x = tr; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m6; m8 = memval; tr = t11; b = 0; x = inputs; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t51 = shifted; temp[(122u + dec) & 0x7F] = t51;
+    /*  52 */ inputs = m8; tr = t11; b = acc; x = inputs; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m0; tr = t25; b = 0; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t53 = shifted; temp[(7u + dec) & 0x7F] = t53;
+    /*  54 */ inputs = m0; tr = t53; b = acc; x = tr; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t55 = shifted; temp[(121u + dec) & 0x7F] = t55;
+    /*  56 */ inputs = m0; tr = t51; b = 0; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  57 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_lastbrnx(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const int32_t c43 = d->coef[43] >> 3;
+    const int32_t c44 = d->coef[44] >> 3;
+    const int32_t c45 = d->coef[45] >> 3;
+    const int32_t c46 = d->coef[46] >> 3;
+    const int32_t c47 = d->coef[47] >> 3;
+    const int32_t c48 = d->coef[48] >> 3;
+    const int32_t c49 = d->coef[49] >> 3;
+    const int32_t c50 = d->coef[50] >> 3;
+    const int32_t c51 = d->coef[51] >> 3;
+    const int32_t c52 = d->coef[52] >> 3;
+    const int32_t c53 = d->coef[53] >> 3;
+    const int32_t c54 = d->coef[54] >> 3;
+    const int32_t c55 = d->coef[55] >> 3;
+    const int32_t c56 = d->coef[56] >> 3;
+    const int32_t c57 = d->coef[57] >> 3;
+    const int32_t c58 = d->coef[58] >> 3;
+    const int32_t c59 = d->coef[59] >> 3;
+    const int32_t c60 = d->coef[60] >> 3;
+    const int32_t c61 = d->coef[61] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    const int32_t mx2 = scsp_sext((int32_t)((uint32_t)d->mixs[2] << 4), 24);
+    const int32_t ex0 = scsp_sext(d->exts[0] * 256, 24);
+    const int32_t ex1 = scsp_sext(d->exts[1] * 256, 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = ex0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e14 += shifted >> 8;
+    /*   4 */ inputs = ex1; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t5 = shifted; temp[(126u + dec) & 0x7F] = t5;
+    /*   6 */ inputs = m0; tr = t5; b = 0; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e15 += shifted >> 8;
+    /*   8 */ inputs = mx2; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(125u + dec) & 0x7F] = t9;
+    /*  10 */ inputs = m0; tr = t9; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t11 = shifted; temp[(0u + dec) & 0x7F] = t11;
+    /*  12 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = acc; x = tr; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m0; tr = t11; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  14 */ inputs = m0; tr = temp[(4u + dec) & 0x7F]; b = acc; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m0; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  16 */ inputs = m0; tr = t11; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t16 = shifted; temp[(3u + dec) & 0x7F] = t16;
+    /*  17 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t17 = shifted; temp[(124u + dec) & 0x7F] = t17;
+    /*  18 */ inputs = m0; tr = t17; b = 0; x = tr; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e4 += shifted >> 8;
+    /*  20 */ inputs = mx0; tr = t11; b = 0; x = inputs; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t21 = shifted; temp[(123u + dec) & 0x7F] = t21;
+    /*  22 */ inputs = m0; tr = t21; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; tr = temp[(8u + dec) & 0x7F]; b = 0; x = tr; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t23 = shifted; temp[(6u + dec) & 0x7F] = t23;
+    /*  24 */ inputs = m0; tr = temp[(7u + dec) & 0x7F]; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  25 */ inputs = m0; tr = t23; b = acc; x = tr; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  26 */ inputs = m0; tr = temp[(10u + dec) & 0x7F]; b = acc; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m0; tr = temp[(11u + dec) & 0x7F]; b = acc; x = tr; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  28 */ inputs = m0; tr = t23; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t28 = shifted; temp[(9u + dec) & 0x7F] = t28;
+    /*  29 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t29 = shifted; temp[(122u + dec) & 0x7F] = t29;
+    /*  30 */ inputs = m0; tr = t29; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; tr = temp[(14u + dec) & 0x7F]; b = 0; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t31 = shifted; temp[(12u + dec) & 0x7F] = t31;
+    /*  32 */ inputs = m0; tr = temp[(13u + dec) & 0x7F]; b = acc; x = tr; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; tr = t31; b = acc; x = tr; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  34 */ inputs = m0; tr = temp[(16u + dec) & 0x7F]; b = acc; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; tr = temp[(17u + dec) & 0x7F]; b = acc; x = tr; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  36 */ inputs = m0; tr = t31; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t36 = shifted; temp[(15u + dec) & 0x7F] = t36;
+    /*  37 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(121u + dec) & 0x7F] = t37;
+    /*  38 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  40 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  42 */ inputs = m0; tr = temp[(19u + dec) & 0x7F]; b = 0; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  43 */ inputs = m0; m1 = memval; tr = t11; b = acc; x = inputs; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  44 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; m2 = memval; tr = temp[(20u + dec) & 0x7F]; b = 0; x = tr; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t45 = shifted; temp[(18u + dec) & 0x7F] = t45; addr = (((ma2 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  46 */ inputs = m2; tr = t11; b = acc; x = inputs; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m3; inputs = memval; m3 = memval; tr = t11; b = acc; x = inputs; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  48 */ inputs = m0; tr = t45; b = 0; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t48 = shifted; temp[(19u + dec) & 0x7F] = t48;
+    /*  49 */ inputs = m0; tr = t48; b = acc; x = tr; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  50 */ inputs = m0; tr = t37; b = acc; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m0; tr = t11; b = 0; x = inputs; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  52 */ inputs = m0; tr = t37; b = acc; x = tr; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m2; tr = t11; b = 0; x = inputs; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t53 = shifted; temp[(120u + dec) & 0x7F] = t53;
+    /*  54 */ inputs = m0; tr = t37; b = acc; x = tr; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t55 = shifted; temp[(119u + dec) & 0x7F] = t55;
+    /*  56 */ inputs = m0; tr = t53; b = 0; x = tr; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  57 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /*  58 */ inputs = m0; tr = t55; b = 0; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    /*  60 */ inputs = mx1; tr = t11; b = 0; x = inputs; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t61 = shifted; temp[(118u + dec) & 0x7F] = t61;
+    /*  62 */ inputs = m0; tr = t61; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; tr = temp[(23u + dec) & 0x7F]; b = 0; x = tr; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t63 = shifted; temp[(21u + dec) & 0x7F] = t63;
+    /*  64 */ inputs = m0; tr = temp[(22u + dec) & 0x7F]; b = acc; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; tr = t63; b = acc; x = tr; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  66 */ inputs = m0; tr = temp[(25u + dec) & 0x7F]; b = acc; x = tr; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m0; tr = temp[(26u + dec) & 0x7F]; b = acc; x = tr; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  68 */ inputs = m0; tr = t63; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t68 = shifted; temp[(24u + dec) & 0x7F] = t68;
+    /*  69 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t69 = shifted; temp[(117u + dec) & 0x7F] = t69;
+    /*  70 */ inputs = m0; tr = t69; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m0; tr = temp[(29u + dec) & 0x7F]; b = 0; x = tr; y = c43; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t71 = shifted; temp[(27u + dec) & 0x7F] = t71;
+    /*  72 */ inputs = m0; tr = temp[(28u + dec) & 0x7F]; b = acc; x = tr; y = c42; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  73 */ inputs = m0; tr = t71; b = acc; x = tr; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  74 */ inputs = m0; tr = temp[(31u + dec) & 0x7F]; b = acc; x = tr; y = c44; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m0; tr = temp[(32u + dec) & 0x7F]; b = acc; x = tr; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  76 */ inputs = m0; tr = t71; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t76 = shifted; temp[(30u + dec) & 0x7F] = t76;
+    /*  77 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t77 = shifted; temp[(116u + dec) & 0x7F] = t77;
+    /*  78 */ inputs = m0; tr = t77; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  80 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  82 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  83 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  84 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  85 */ inputs = m0; m1 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  86 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  87 */ inputs = m0; m2 = memval; tr = temp[(34u + dec) & 0x7F]; b = 0; x = tr; y = c53; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  88 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c51; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  89 */ inputs = m2; m3 = memval; tr = t11; b = acc; x = inputs; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  90 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c50; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t90 = shifted; temp[(33u + dec) & 0x7F] = t90;
+    /*  91 */ inputs = m0; m4 = memval; tr = temp[(35u + dec) & 0x7F]; b = 0; x = tr; y = c57; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  92 */ inputs = m3; tr = t11; b = acc; x = inputs; y = c55; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  93 */ inputs = m4; tr = t11; b = acc; x = inputs; y = c56; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  94 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t94 = shifted; temp[(34u + dec) & 0x7F] = t94;
+    /*  95 */ inputs = m0; m5 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  96 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  97 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  98 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  99 */ inputs = m5; m7 = memval; tr = t11; b = 0; x = inputs; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma9) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /* 100 */ inputs = m7; tr = t11; b = acc; x = inputs; y = c48; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 101 */ inputs = m0; m6 = memval; tr = t77; b = 0; x = tr; y = c59; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t101 = shifted; temp[(36u + dec) & 0x7F] = t101; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /* 102 */ inputs = m0; tr = t101; b = acc; x = tr; y = c58; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 103 */ inputs = m6; m8 = memval; tr = t11; b = 0; x = inputs; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t103 = shifted; temp[(115u + dec) & 0x7F] = t103;
+    /* 104 */ inputs = m8; tr = t11; b = acc; x = inputs; y = c49; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 105 */ inputs = m0; tr = t77; b = 0; x = tr; y = c59; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t105 = shifted; temp[(37u + dec) & 0x7F] = t105;
+    /* 106 */ inputs = m0; tr = t105; b = acc; x = tr; y = c58; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 107 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t107 = shifted; temp[(114u + dec) & 0x7F] = t107;
+    /* 108 */ inputs = m0; tr = t103; b = 0; x = tr; y = c60; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 109 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /* 110 */ inputs = m0; tr = t107; b = 0; x = tr; y = c61; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 111 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e3 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_airwlkrs(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const uint32_t ma13 = d->madrs[13] + dec;
+    const uint32_t ma14 = d->madrs[14] + dec;
+    const uint32_t ma15 = d->madrs[15] + dec;
+    const uint32_t ma16 = d->madrs[16] + dec;
+    const uint32_t ma17 = d->madrs[17] + dec;
+    const uint32_t ma18 = d->madrs[18] + dec;
+    const uint32_t ma19 = d->madrs[19] + dec;
+    const uint32_t ma20 = d->madrs[20] + dec;
+    const uint32_t ma21 = d->madrs[21] + dec;
+    const uint32_t ma22 = d->madrs[22] + dec;
+    const uint32_t ma23 = d->madrs[23] + dec;
+    const uint32_t ma24 = d->madrs[24] + dec;
+    const uint32_t ma25 = d->madrs[25] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8], m9 = d->mems[9], m10 = d->mems[10], m11 = d->mems[11], m12 = d->mems[12], m13 = d->mems[13], m14 = d->mems[14];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = mx0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*   4 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   6 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; inputs = memval; m0 = memval; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*   8 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; m1 = memval; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  10 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; m2 = memval; tr = temp[(1u + dec) & 0x7F]; b = 0; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  12 */ inputs = m1; tr = temp[(0u + dec) & 0x7F]; b = acc; x = inputs; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m2; m3 = memval; tr = temp[(0u + dec) & 0x7F]; b = acc; x = inputs; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  14 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = acc; x = inputs; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t14 = shifted; temp[(0u + dec) & 0x7F] = t14;
+    /*  15 */ inputs = m0; m4 = memval; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  16 */ inputs = m3; tr = t14; b = acc; x = inputs; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  17 */ inputs = m4; tr = t14; b = acc; x = inputs; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  18 */ inputs = m0; tr = t14; b = acc; x = inputs; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t18 = shifted; temp[(1u + dec) & 0x7F] = t18;
+    /*  19 */ inputs = m0; m5 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  20 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  22 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m5; m7 = memval; tr = t14; b = 0; x = inputs; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  24 */ inputs = m7; tr = t14; b = acc; x = inputs; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  25 */ inputs = m0; m6 = memval; tr = t1; b = 0; x = tr; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t25 = shifted; temp[(3u + dec) & 0x7F] = t25; addr = (((ma9) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  26 */ inputs = m0; tr = t25; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m6; m8 = memval; tr = t14; b = 0; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t27 = shifted; temp[(126u + dec) & 0x7F] = t27;
+    /*  28 */ inputs = m8; tr = t14; b = acc; x = inputs; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m0; tr = t1; b = 0; x = tr; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t29 = shifted; temp[(4u + dec) & 0x7F] = t29;
+    /*  30 */ inputs = m0; tr = t29; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t31 = shifted; temp[(125u + dec) & 0x7F] = t31;
+    /*  32 */ inputs = m0; tr = t27; b = 0; x = tr; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    /*  34 */ inputs = m0; tr = t31; b = 0; x = tr; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /*  36 */ inputs = mx1; tr = t14; b = 0; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t37 = shifted; temp[(124u + dec) & 0x7F] = t37;
+    /*  38 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  39 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  40 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m0; inputs = memval; m0 = memval; tr = t37; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma12) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  42 */ inputs = m0; tr = t14; b = acc; x = inputs; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  43 */ inputs = m0; m1 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t43 = shifted; temp[(5u + dec) & 0x7F] = t43; addr = (((ma13) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  44 */ inputs = m0; tr = t43; b = 0; x = tr; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; m2 = memval; tr = temp[(6u + dec) & 0x7F]; b = acc; x = tr; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma14) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  46 */ inputs = m0; tr = temp[(7u + dec) & 0x7F]; b = acc; x = tr; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m0; m3 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t47 = shifted; temp[(6u + dec) & 0x7F] = t47; addr = (((ma10) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  48 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma15) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  50 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m0; m4 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma16) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  52 */ inputs = m1; tr = t14; b = 0; x = inputs; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m2; m5 = memval; tr = t14; b = acc; x = inputs; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma17) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  54 */ inputs = m3; tr = t14; b = acc; x = inputs; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m4; m6 = memval; tr = t14; b = acc; x = inputs; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma18) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  56 */ inputs = m5; tr = t14; b = acc; x = inputs; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  57 */ inputs = m6; m7 = memval; tr = t14; b = acc; x = inputs; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma19) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  58 */ inputs = m7; tr = t14; b = acc; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; m8 = memval; tr = t37; b = 0; x = tr; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t59 = shifted; temp[(8u + dec) & 0x7F] = t59; addr = (((ma20) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  60 */ inputs = m0; tr = t59; b = acc; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; m9 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t61 = shifted; temp[(123u + dec) & 0x7F] = t61; addr = (((ma21) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  62 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; m10 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma22) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  64 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; m11 = memval; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma23) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  66 */ inputs = m8; tr = t14; b = 0; x = inputs; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m9; m12 = memval; tr = t14; b = acc; x = inputs; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma24) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  68 */ inputs = m10; tr = t14; b = acc; x = inputs; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  69 */ inputs = m11; m13 = memval; tr = t14; b = acc; x = inputs; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma25) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  70 */ inputs = m12; tr = t14; b = acc; x = inputs; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m13; m14 = memval; tr = t14; b = acc; x = inputs; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  72 */ inputs = m14; tr = t14; b = acc; x = inputs; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  73 */ inputs = m0; tr = t37; b = 0; x = tr; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t73 = shifted; temp[(9u + dec) & 0x7F] = t73;
+    /*  74 */ inputs = m0; tr = t73; b = acc; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t75 = shifted; temp[(122u + dec) & 0x7F] = t75;
+    /*  76 */ inputs = m0; tr = t61; b = 0; x = tr; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  77 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e3 += shifted >> 8;
+    /*  78 */ inputs = m0; tr = t75; b = 0; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t14; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e4 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8; d->mems[9] = m9; d->mems[10] = m10; d->mems[11] = m11; d->mems[12] = m12; d->mems[13] = m13; d->mems[14] = m14;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
+}
+
+static int scsp_dsp_prog_powsled(scsp_t *s) {
+    scsp_dsp_t *d = &s->dsp;
+    const uint32_t dec = d->dec, rbl_mask = d->rbl - 1, rbp = d->rbp << 12;
+    if (((rbp + rbl_mask) << 1) + 1 >= s->ram_size) return 0;
+    int32_t *temp = d->temp;
+    uint8_t *ram = s->ram;
+    int32_t acc = 0, memval = 0, frc = 0, yreg = 0, inputs, tr, b, x, y, shifted;
+    uint32_t adrs = 0, addr;
+    int64_t v;
+    (void)frc; (void)yreg; (void)adrs; (void)addr; (void)memval; (void)v; (void)rbl_mask; (void)ram;
+    const int32_t c0 = d->coef[0] >> 3;
+    const int32_t c2 = d->coef[2] >> 3;
+    const int32_t c5 = d->coef[5] >> 3;
+    const int32_t c6 = d->coef[6] >> 3;
+    const int32_t c7 = d->coef[7] >> 3;
+    const int32_t c8 = d->coef[8] >> 3;
+    const int32_t c9 = d->coef[9] >> 3;
+    const int32_t c10 = d->coef[10] >> 3;
+    const int32_t c11 = d->coef[11] >> 3;
+    const int32_t c12 = d->coef[12] >> 3;
+    const int32_t c13 = d->coef[13] >> 3;
+    const int32_t c14 = d->coef[14] >> 3;
+    const int32_t c15 = d->coef[15] >> 3;
+    const int32_t c16 = d->coef[16] >> 3;
+    const int32_t c17 = d->coef[17] >> 3;
+    const int32_t c18 = d->coef[18] >> 3;
+    const int32_t c19 = d->coef[19] >> 3;
+    const int32_t c20 = d->coef[20] >> 3;
+    const int32_t c21 = d->coef[21] >> 3;
+    const int32_t c22 = d->coef[22] >> 3;
+    const int32_t c23 = d->coef[23] >> 3;
+    const int32_t c24 = d->coef[24] >> 3;
+    const int32_t c25 = d->coef[25] >> 3;
+    const int32_t c26 = d->coef[26] >> 3;
+    const int32_t c27 = d->coef[27] >> 3;
+    const int32_t c28 = d->coef[28] >> 3;
+    const int32_t c29 = d->coef[29] >> 3;
+    const int32_t c30 = d->coef[30] >> 3;
+    const int32_t c31 = d->coef[31] >> 3;
+    const int32_t c32 = d->coef[32] >> 3;
+    const int32_t c33 = d->coef[33] >> 3;
+    const int32_t c34 = d->coef[34] >> 3;
+    const int32_t c35 = d->coef[35] >> 3;
+    const int32_t c36 = d->coef[36] >> 3;
+    const int32_t c37 = d->coef[37] >> 3;
+    const int32_t c38 = d->coef[38] >> 3;
+    const int32_t c39 = d->coef[39] >> 3;
+    const int32_t c40 = d->coef[40] >> 3;
+    const int32_t c41 = d->coef[41] >> 3;
+    const int32_t c42 = d->coef[42] >> 3;
+    const int32_t c43 = d->coef[43] >> 3;
+    const int32_t c44 = d->coef[44] >> 3;
+    const int32_t c45 = d->coef[45] >> 3;
+    const int32_t c46 = d->coef[46] >> 3;
+    const int32_t c47 = d->coef[47] >> 3;
+    const int32_t c48 = d->coef[48] >> 3;
+    const int32_t c49 = d->coef[49] >> 3;
+    const int32_t c50 = d->coef[50] >> 3;
+    const int32_t c51 = d->coef[51] >> 3;
+    const int32_t c52 = d->coef[52] >> 3;
+    const int32_t c53 = d->coef[53] >> 3;
+    const int32_t c54 = d->coef[54] >> 3;
+    const int32_t c55 = d->coef[55] >> 3;
+    const int32_t c56 = d->coef[56] >> 3;
+    const int32_t c57 = d->coef[57] >> 3;
+    const int32_t c58 = d->coef[58] >> 3;
+    const int32_t c59 = d->coef[59] >> 3;
+    const int32_t c60 = d->coef[60] >> 3;
+    const int32_t c61 = d->coef[61] >> 3;
+    const int32_t c62 = d->coef[62] >> 3;
+    const uint32_t ma0 = d->madrs[0] + dec;
+    const uint32_t ma1 = d->madrs[1] + dec;
+    const uint32_t ma2 = d->madrs[2] + dec;
+    const uint32_t ma3 = d->madrs[3] + dec;
+    const uint32_t ma4 = d->madrs[4] + dec;
+    const uint32_t ma5 = d->madrs[5] + dec;
+    const uint32_t ma6 = d->madrs[6] + dec;
+    const uint32_t ma7 = d->madrs[7] + dec;
+    const uint32_t ma8 = d->madrs[8] + dec;
+    const uint32_t ma9 = d->madrs[9] + dec;
+    const uint32_t ma10 = d->madrs[10] + dec;
+    const uint32_t ma11 = d->madrs[11] + dec;
+    const uint32_t ma12 = d->madrs[12] + dec;
+    const uint32_t ma13 = d->madrs[13] + dec;
+    const uint32_t ma14 = d->madrs[14] + dec;
+    const uint32_t ma15 = d->madrs[15] + dec;
+    const uint32_t ma16 = d->madrs[16] + dec;
+    const uint32_t ma17 = d->madrs[17] + dec;
+    const uint32_t ma18 = d->madrs[18] + dec;
+    const uint32_t ma19 = d->madrs[19] + dec;
+    const int32_t mx0 = scsp_sext((int32_t)((uint32_t)d->mixs[0] << 4), 24);
+    const int32_t mx1 = scsp_sext((int32_t)((uint32_t)d->mixs[1] << 4), 24);
+    const int32_t ex0 = scsp_sext(d->exts[0] * 256, 24);
+    const int32_t ex1 = scsp_sext(d->exts[1] * 256, 24);
+    int32_t m0 = d->mems[0], m1 = d->mems[1], m2 = d->mems[2], m3 = d->mems[3], m4 = d->mems[4], m5 = d->mems[5], m6 = d->mems[6], m7 = d->mems[7], m8 = d->mems[8];
+    int32_t e0 = 0, e1 = 0, e2 = 0, e3 = 0, e4 = 0, e5 = 0, e6 = 0, e7 = 0, e8 = 0, e9 = 0, e10 = 0, e11 = 0, e12 = 0, e13 = 0, e14 = 0, e15 = 0;
+    /*   0 */ inputs = ex0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c5; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   1 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t1 = shifted; temp[(127u + dec) & 0x7F] = t1;
+    /*   2 */ inputs = m0; tr = t1; b = 0; x = tr; y = c6; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   3 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e14 += shifted >> 8;
+    /*   4 */ inputs = ex1; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c7; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   5 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t5 = shifted; temp[(126u + dec) & 0x7F] = t5;
+    /*   6 */ inputs = m0; tr = t5; b = 0; x = tr; y = c8; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   7 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e15 += shifted >> 8;
+    /*   8 */ inputs = mx0; tr = temp[(0u + dec) & 0x7F]; b = 0; x = inputs; y = c9; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*   9 */ inputs = m0; tr = temp[(0u + dec) & 0x7F]; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t9 = shifted; temp[(125u + dec) & 0x7F] = t9;
+    /*  10 */ inputs = m0; tr = t9; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  11 */ inputs = m0; tr = temp[(2u + dec) & 0x7F]; b = 0; x = tr; y = c12; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t11 = shifted; temp[(0u + dec) & 0x7F] = t11;
+    /*  12 */ inputs = m0; tr = temp[(1u + dec) & 0x7F]; b = acc; x = tr; y = c11; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  13 */ inputs = m0; tr = t11; b = acc; x = tr; y = c10; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  14 */ inputs = m0; tr = temp[(4u + dec) & 0x7F]; b = acc; x = tr; y = c13; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  15 */ inputs = m0; tr = temp[(5u + dec) & 0x7F]; b = acc; x = tr; y = c14; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  16 */ inputs = m0; tr = t11; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t16 = shifted; temp[(3u + dec) & 0x7F] = t16;
+    /*  17 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t17 = shifted; temp[(124u + dec) & 0x7F] = t17;
+    /*  18 */ inputs = m0; tr = t17; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  19 */ inputs = m0; tr = temp[(8u + dec) & 0x7F]; b = 0; x = tr; y = c17; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t19 = shifted; temp[(6u + dec) & 0x7F] = t19;
+    /*  20 */ inputs = m0; tr = temp[(7u + dec) & 0x7F]; b = acc; x = tr; y = c16; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  21 */ inputs = m0; tr = t19; b = acc; x = tr; y = c15; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  22 */ inputs = m0; tr = temp[(10u + dec) & 0x7F]; b = acc; x = tr; y = c18; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  23 */ inputs = m0; tr = temp[(11u + dec) & 0x7F]; b = acc; x = tr; y = c19; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  24 */ inputs = m0; tr = t19; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t24 = shifted; temp[(9u + dec) & 0x7F] = t24;
+    /*  25 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t25 = shifted; temp[(123u + dec) & 0x7F] = t25;
+    /*  26 */ inputs = m0; tr = t25; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  27 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma0) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  28 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  29 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma3) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  30 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  31 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  32 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  33 */ inputs = m0; m1 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma4 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  34 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  35 */ inputs = m0; m2 = memval; tr = temp[(13u + dec) & 0x7F]; b = 0; x = tr; y = c27; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  36 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c25; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  37 */ inputs = m2; m3 = memval; tr = t11; b = acc; x = inputs; y = c26; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma7 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  38 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c24; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t38 = shifted; temp[(12u + dec) & 0x7F] = t38;
+    /*  39 */ inputs = m0; m4 = memval; tr = temp[(14u + dec) & 0x7F]; b = 0; x = tr; y = c31; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma1) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  40 */ inputs = m3; tr = t11; b = acc; x = inputs; y = c29; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  41 */ inputs = m4; tr = t11; b = acc; x = inputs; y = c30; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma5) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  42 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c28; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t42 = shifted; temp[(13u + dec) & 0x7F] = t42;
+    /*  43 */ inputs = m0; m5 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma2) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  44 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  45 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma8) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  46 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  47 */ inputs = m5; m7 = memval; tr = t11; b = 0; x = inputs; y = c20; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma6) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  48 */ inputs = m7; tr = t11; b = acc; x = inputs; y = c22; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  49 */ inputs = m0; m6 = memval; tr = t25; b = 0; x = tr; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t49 = shifted; temp[(15u + dec) & 0x7F] = t49; addr = (((ma9) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  50 */ inputs = m0; tr = t49; b = acc; x = tr; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  51 */ inputs = m6; m8 = memval; tr = t11; b = 0; x = inputs; y = c21; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t51 = shifted; temp[(122u + dec) & 0x7F] = t51;
+    /*  52 */ inputs = m8; tr = t11; b = acc; x = inputs; y = c23; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  53 */ inputs = m0; tr = t25; b = 0; x = tr; y = c33; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t53 = shifted; temp[(16u + dec) & 0x7F] = t53;
+    /*  54 */ inputs = m0; tr = t53; b = acc; x = tr; y = c32; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  55 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t55 = shifted; temp[(121u + dec) & 0x7F] = t55;
+    /*  56 */ inputs = m0; tr = t51; b = 0; x = tr; y = c34; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  57 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e0 += shifted >> 8;
+    /*  58 */ inputs = m0; tr = t55; b = 0; x = tr; y = c35; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  59 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e1 += shifted >> 8;
+    /*  60 */ inputs = mx1; tr = t11; b = 0; x = inputs; y = c36; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  61 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t61 = shifted; temp[(120u + dec) & 0x7F] = t61;
+    /*  62 */ inputs = m0; tr = t61; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  63 */ inputs = m0; tr = temp[(19u + dec) & 0x7F]; b = 0; x = tr; y = c39; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t63 = shifted; temp[(17u + dec) & 0x7F] = t63;
+    /*  64 */ inputs = m0; tr = temp[(18u + dec) & 0x7F]; b = acc; x = tr; y = c38; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  65 */ inputs = m0; tr = t63; b = acc; x = tr; y = c37; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  66 */ inputs = m0; tr = temp[(21u + dec) & 0x7F]; b = acc; x = tr; y = c40; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  67 */ inputs = m0; tr = temp[(22u + dec) & 0x7F]; b = acc; x = tr; y = c41; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  68 */ inputs = m0; tr = t63; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t68 = shifted; temp[(20u + dec) & 0x7F] = t68;
+    /*  69 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t69 = shifted; temp[(119u + dec) & 0x7F] = t69;
+    /*  70 */ inputs = m0; tr = t69; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  71 */ inputs = m0; tr = temp[(25u + dec) & 0x7F]; b = 0; x = tr; y = c44; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t71 = shifted; temp[(23u + dec) & 0x7F] = t71;
+    /*  72 */ inputs = m0; tr = temp[(24u + dec) & 0x7F]; b = acc; x = tr; y = c43; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  73 */ inputs = m0; tr = t71; b = acc; x = tr; y = c42; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  74 */ inputs = m0; tr = temp[(27u + dec) & 0x7F]; b = acc; x = tr; y = c45; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  75 */ inputs = m0; tr = temp[(28u + dec) & 0x7F]; b = acc; x = tr; y = c46; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  76 */ inputs = m0; tr = t71; b = acc; x = tr; y = c2; v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t76 = shifted; temp[(26u + dec) & 0x7F] = t76;
+    /*  77 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); v = (int64_t)((uint64_t)(int64_t)acc << 1); shifted = (int32_t)(v > 0x7FFFFF ? 0x7FFFFF : v < -0x800000 ? -0x800000 : v); acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t77 = shifted; temp[(118u + dec) & 0x7F] = t77;
+    /*  78 */ inputs = m0; tr = t77; b = 0; x = tr; y = c0; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  79 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma10) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  80 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  81 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma13) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  82 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  83 */ inputs = m0; inputs = memval; m0 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma14) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  84 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  85 */ inputs = m0; m1 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma14 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  86 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  87 */ inputs = m0; m2 = memval; tr = temp[(30u + dec) & 0x7F]; b = 0; x = tr; y = c54; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma17) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  88 */ inputs = m1; tr = t11; b = acc; x = inputs; y = c52; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  89 */ inputs = m2; m3 = memval; tr = t11; b = acc; x = inputs; y = c53; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma17 + 1u) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  90 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c51; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t90 = shifted; temp[(29u + dec) & 0x7F] = t90;
+    /*  91 */ inputs = m0; m4 = memval; tr = temp[(31u + dec) & 0x7F]; b = 0; x = tr; y = c58; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma11) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  92 */ inputs = m3; tr = t11; b = acc; x = inputs; y = c56; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  93 */ inputs = m4; tr = t11; b = acc; x = inputs; y = c57; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma15) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  94 */ inputs = m0; tr = t11; b = acc; x = inputs; y = c55; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t94 = shifted; temp[(30u + dec) & 0x7F] = t94;
+    /*  95 */ inputs = m0; m5 = memval; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma12) & rbl_mask) + rbp) << 1; scsp_dsp_ring_wr(ram, addr, scsp_dsp_pack(shifted));
+    /*  96 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  97 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma18) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /*  98 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /*  99 */ inputs = m5; m7 = memval; tr = t11; b = 0; x = inputs; y = c47; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; addr = (((ma16) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /* 100 */ inputs = m7; tr = t11; b = acc; x = inputs; y = c49; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 101 */ inputs = m0; m6 = memval; tr = t77; b = 0; x = tr; y = c60; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t101 = shifted; temp[(32u + dec) & 0x7F] = t101; addr = (((ma19) & rbl_mask) + rbp) << 1; memval = scsp_dsp_unpack(scsp_dsp_ring_rd(ram, addr));
+    /* 102 */ inputs = m0; tr = t101; b = acc; x = tr; y = c59; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 103 */ inputs = m6; m8 = memval; tr = t11; b = 0; x = inputs; y = c48; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t103 = shifted; temp[(117u + dec) & 0x7F] = t103;
+    /* 104 */ inputs = m8; tr = t11; b = acc; x = inputs; y = c50; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 105 */ inputs = m0; tr = t77; b = 0; x = tr; y = c60; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t105 = shifted; temp[(33u + dec) & 0x7F] = t105;
+    /* 106 */ inputs = m0; tr = t105; b = acc; x = tr; y = c59; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 107 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; const int32_t t107 = shifted; temp[(116u + dec) & 0x7F] = t107;
+    /* 108 */ inputs = m0; tr = t103; b = 0; x = tr; y = c61; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 109 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e2 += shifted >> 8;
+    /* 110 */ inputs = m0; tr = t107; b = 0; x = tr; y = c62; shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b;
+    /* 111 */ inputs = m0; tr = t11; b = tr; x = tr; y = scsp_sext((frc >> 0) & 0x1FFF, 13); shifted = acc > 0x7FFFFF ? 0x7FFFFF : acc < -0x800000 ? -0x800000 : acc; acc = (int32_t)(((int64_t)x * (int64_t)y) >> 12) + b; e3 += shifted >> 8;
+    d->mems[0] = m0; d->mems[1] = m1; d->mems[2] = m2; d->mems[3] = m3; d->mems[4] = m4; d->mems[5] = m5; d->mems[6] = m6; d->mems[7] = m7; d->mems[8] = m8;
+    d->efreg[0] = (int16_t)e0; d->efreg[1] = (int16_t)e1; d->efreg[2] = (int16_t)e2; d->efreg[3] = (int16_t)e3; d->efreg[4] = (int16_t)e4; d->efreg[5] = (int16_t)e5; d->efreg[6] = (int16_t)e6; d->efreg[7] = (int16_t)e7; d->efreg[8] = (int16_t)e8; d->efreg[9] = (int16_t)e9; d->efreg[10] = (int16_t)e10; d->efreg[11] = (int16_t)e11; d->efreg[12] = (int16_t)e12; d->efreg[13] = (int16_t)e13; d->efreg[14] = (int16_t)e14; d->efreg[15] = (int16_t)e15;
+    d->dec--;
+    memset(d->mixs, 0, sizeof d->mixs);
+    return 1;
 }
 
 typedef struct {
     int      last_step;
-    void   (*run)(scsp_t *s);
+    int    (*run)(scsp_t *s);     /* 0: the ring is past the end of RAM, interpret */
     uint16_t mpro[128 * 4];
 } scsp_dsp_known_t;
 
@@ -144,6 +1722,270 @@ static const scsp_dsp_known_t scsp_dsp_known[] = {
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 112, scsp_dsp_prog_hotd_dynamcop, {
+        0x0000, 0xAC00, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0C00, 0x0000, 0x0000, 0x1E00, 0x0000,
+        0x0000, 0xAC40, 0x0002, 0x0E00, 0x00FE, 0x0000, 0x0000, 0x0000, 0x7E00, 0x2000, 0x0002, 0x1000, 0x0000, 0x0000, 0x1F00, 0x0000,
+        0x0000, 0xA840, 0x0002, 0x1200, 0x00FD, 0x0000, 0x0000, 0x0000, 0x7D00, 0x2000, 0x0002, 0x0000, 0x0280, 0x2000, 0x0002, 0x1800,
+        0x0100, 0x2000, 0x0001, 0x1600, 0x0000, 0x2000, 0x0001, 0x1400, 0x0400, 0x2000, 0x0001, 0x1A00, 0x0500, 0x2000, 0x0001, 0x1C00,
+        0x0083, 0x2000, 0x0011, 0x0400, 0x00FC, 0x0000, 0x0010, 0x0000, 0x7C00, 0x2000, 0x0002, 0x0000, 0x0886, 0x2000, 0x0002, 0x2200,
+        0x0700, 0x2000, 0x0001, 0x2000, 0x0600, 0x2000, 0x0001, 0x1E00, 0x0A00, 0x2000, 0x0001, 0x2400, 0x0B00, 0x2000, 0x0001, 0x2600,
+        0x0689, 0x2000, 0x0011, 0x0400, 0x00FB, 0x0000, 0x0010, 0x0000, 0x7B00, 0x2000, 0x0002, 0x2800, 0x0000, 0x0000, 0x1200, 0x0000,
+        0x0000, 0xA800, 0x0002, 0x2A00, 0x00FA, 0x0000, 0x0000, 0x0000, 0x7A00, 0x2000, 0x0002, 0x0000, 0x0D8C, 0x2000, 0x2002, 0x3228,
+        0x0F00, 0x2000, 0x0001, 0x3400, 0x0C00, 0x2020, 0x2001, 0x302C, 0x0F8E, 0x2000, 0x0002, 0x3800, 0x1100, 0x2021, 0x2001, 0x3A30,
+        0x0E00, 0x2000, 0x0001, 0x3600, 0x0090, 0xA022, 0x2002, 0x3C3C, 0x0000, 0xA040, 0x0001, 0x3E00, 0x0092, 0xA0A3, 0x2012, 0x463D,
+        0x1200, 0x2000, 0x0001, 0x4400, 0x1593, 0x2024, 0x2012, 0x5C48, 0x0000, 0xA0C0, 0x0001, 0x6000, 0x0000, 0xA125, 0x2001, 0x6049,
+        0x1394, 0x2000, 0x0001, 0x5E00, 0x1896, 0x2026, 0x2002, 0x5C54, 0x0000, 0xA140, 0x0001, 0x6400, 0x0000, 0xA1A7, 0x2001, 0x6455,
+        0x1397, 0x2000, 0x0001, 0x6200, 0x1B99, 0x2028, 0x2002, 0x5C60, 0x0000, 0xA1C0, 0x0001, 0x6800, 0x0000, 0xA229, 0x2001, 0x6861,
+        0x139A, 0x2000, 0x0001, 0x6600, 0x1E9C, 0x202A, 0x2002, 0x5C40, 0x0000, 0xA240, 0x0001, 0x6C00, 0x0000, 0xA2AB, 0x2001, 0x6C44,
+        0x139D, 0x2000, 0x0001, 0x6A00, 0x009F, 0xA2EC, 0x2002, 0x2C4C, 0x00A0, 0xA300, 0x0002, 0x2E00, 0x00A1, 0x002D, 0x2000, 0x0050,
+        0x2000, 0xA340, 0x0000, 0x2C00, 0x00A0, 0x002E, 0x2000, 0x0058, 0x2100, 0xA380, 0x0000, 0x2E00, 0x00A1, 0x002F, 0x2000, 0x005C,
+        0x2000, 0xA3C0, 0x0000, 0x2C00, 0x00A0, 0x0030, 0x2000, 0x0064, 0x2100, 0xA400, 0x0000, 0x2E00, 0x00A1, 0x0031, 0x2000, 0x0068,
+        0x2000, 0xA440, 0x0000, 0x2C00, 0x00A0, 0x0032, 0x2010, 0x0034, 0x2100, 0xA480, 0x0000, 0x2E00, 0x20A1, 0x2033, 0x2012, 0x4C38,
+        0x0000, 0xA4C0, 0x0001, 0x4E00, 0x21A2, 0x2034, 0x2012, 0x546C, 0x0000, 0xA500, 0x0001, 0x5600, 0x00A3, 0x0035, 0x2010, 0x0070,
+        0x0000, 0xA540, 0x0002, 0x6E00, 0x00A4, 0x0036, 0x0000, 0x0000, 0x2400, 0xA580, 0x0000, 0x7000, 0x10A4, 0x2000, 0x0012, 0x7400,
+        0x2400, 0x2000, 0x0001, 0x7200, 0x0000, 0x0000, 0x4000, 0x0024, 0x1000, 0xA000, 0x0000, 0x0400, 0x0000, 0xA000, 0x4002, 0x4000,
+        0x0000, 0xA040, 0x0001, 0x4200, 0x1200, 0x2000, 0x4002, 0x4804, 0x0000, 0xA080, 0x0001, 0x4A00, 0x0000, 0x0000, 0x4000, 0x0008,
+        0x1600, 0xA000, 0x0000, 0x0400, 0x0000, 0x0000, 0x4000, 0x0014, 0x1900, 0xA000, 0x0000, 0x0400, 0x0000, 0x0000, 0x4000, 0x0018,
+        0x1C00, 0xA000, 0x0000, 0x0400, 0x0000, 0x0000, 0x4000, 0x001C, 0x1F00, 0xA000, 0x0000, 0x0400, 0x2000, 0x2000, 0x4002, 0x5020,
+        0x0000, 0xA4C0, 0x0001, 0x5200, 0x2100, 0x2000, 0x4012, 0x580C, 0x0000, 0xA500, 0x0001, 0x5A00, 0x2200, 0x2000, 0x4012, 0x0010,
+        0x23A5, 0x2000, 0x0012, 0x0000, 0x25A6, 0x2000, 0x0012, 0x7600, 0x2400, 0x2000, 0x0001, 0x7800, 0x7A00, 0x2000, 0x0001, 0x7A00,
+        0x26F9, 0x2000, 0x0002, 0x7600, 0x2400, 0x2000, 0x0001, 0x7800, 0x7A00, 0x2000, 0x0001, 0x7A00, 0x00F8, 0x0000, 0x0000, 0x0000,
+        0x7900, 0x2000, 0x0002, 0x7C00, 0x0000, 0x0000, 0x1000, 0x0000, 0x7800, 0x2000, 0x0002, 0x7E00, 0x0000, 0x0000, 0x1100, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 108, scsp_dsp_prog_motoraid, {
+        0x0000, 0xAC00, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0C00, 0x0000, 0x0000, 0x1E00, 0x0000,
+        0x0000, 0xAC40, 0x0002, 0x0E00, 0x00FE, 0x0000, 0x0000, 0x0000, 0x7E00, 0x2000, 0x0002, 0x1000, 0x0000, 0x0000, 0x1F00, 0x0000,
+        0x0000, 0xA880, 0x0002, 0x1200, 0x00FD, 0x0000, 0x0000, 0x0000, 0x7D00, 0x2000, 0x0002, 0x0000, 0x0280, 0x2000, 0x0002, 0x1800,
+        0x0100, 0x2000, 0x0001, 0x1600, 0x0000, 0x2000, 0x0001, 0x1400, 0x0400, 0x2000, 0x0001, 0x1A00, 0x0500, 0x2000, 0x0001, 0x1C00,
+        0x0083, 0x2000, 0x0011, 0x0400, 0x00FC, 0x0000, 0x0010, 0x0000, 0x7C00, 0x2000, 0x0002, 0x0000, 0x0886, 0x2000, 0x0002, 0x2200,
+        0x0700, 0x2000, 0x0001, 0x2000, 0x0600, 0x2000, 0x0001, 0x1E00, 0x0A00, 0x2000, 0x0001, 0x2400, 0x0B00, 0x2000, 0x0001, 0x2600,
+        0x0689, 0x2000, 0x0011, 0x0400, 0x00FB, 0x0000, 0x0010, 0x0000, 0x7B00, 0x2000, 0x0002, 0x2800, 0x0000, 0x0000, 0x1400, 0x0000,
+        0x0000, 0xA800, 0x0002, 0x2A00, 0x00FA, 0x0000, 0x0000, 0x0000, 0x7A00, 0x2000, 0x0002, 0x0000, 0x0E8C, 0x2000, 0x0002, 0x3000,
+        0x0D00, 0x2000, 0x0001, 0x2E00, 0x0C00, 0x2000, 0x0001, 0x2C00, 0x1000, 0x2000, 0x0001, 0x3200, 0x1100, 0x2000, 0x0001, 0x3400,
+        0x0C8F, 0x2000, 0x0011, 0x0400, 0x00F9, 0x0000, 0x0010, 0x0000, 0x7900, 0x2000, 0x0002, 0x0000, 0x1492, 0x2000, 0x0002, 0x3A00,
+        0x1300, 0x2000, 0x0001, 0x3800, 0x1200, 0x2000, 0x0001, 0x3600, 0x1600, 0x2000, 0x0001, 0x3C00, 0x1700, 0x2000, 0x0001, 0x3E00,
+        0x1295, 0x2000, 0x0011, 0x0400, 0x00F8, 0x0000, 0x0010, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0004,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0005, 0x1900, 0x2000, 0x0002, 0x4400, 0x0000, 0xA021, 0x2001, 0x4008,
+        0x0000, 0xA040, 0x0001, 0x4200, 0x1A98, 0x2022, 0x2002, 0x4409, 0x0000, 0xA080, 0x0001, 0x4000, 0x0000, 0xA0E3, 0x0001, 0x4200,
+        0x1899, 0x2000, 0x0002, 0x4600, 0x1900, 0x2000, 0x0001, 0x4600, 0x7800, 0x2000, 0x0001, 0x0000, 0x0000, 0xA000, 0x4002, 0x4800,
+        0x7800, 0x2000, 0x0001, 0x4A00, 0x00F7, 0xA080, 0x0002, 0x4800, 0x7800, 0x2000, 0x0001, 0x4A00, 0x00F6, 0x0000, 0x0000, 0x0000,
+        0x7700, 0x2000, 0x0002, 0x4C00, 0x0000, 0x0000, 0x1000, 0x0000, 0x7600, 0x2000, 0x0002, 0x4E00, 0x0000, 0x0000, 0x1100, 0x0000,
+        0x0000, 0xA840, 0x0002, 0x5000, 0x00F5, 0x0000, 0x0000, 0x0000, 0x7500, 0x2000, 0x0002, 0x0000, 0x1D9B, 0x2000, 0x0002, 0x5600,
+        0x1C00, 0x2000, 0x0001, 0x5400, 0x1B00, 0x2000, 0x0001, 0x5200, 0x1F00, 0x2000, 0x0001, 0x5800, 0x2000, 0x2000, 0x0001, 0x5A00,
+        0x1B9E, 0x2000, 0x0011, 0x0400, 0x00F4, 0x0000, 0x0010, 0x0000, 0x7400, 0x2000, 0x0002, 0x0000, 0x23A1, 0x2000, 0x0002, 0x6000,
+        0x2200, 0x2000, 0x0001, 0x5E00, 0x2100, 0x2000, 0x0001, 0x5C00, 0x2500, 0x2000, 0x0001, 0x6200, 0x2600, 0x2000, 0x0001, 0x6400,
+        0x21A4, 0x2000, 0x0011, 0x0400, 0x00F3, 0x0000, 0x0010, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0010,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0011, 0x2800, 0x2000, 0x0002, 0x6A00, 0x0000, 0xA021, 0x2001, 0x6614,
+        0x0000, 0xA040, 0x0001, 0x6800, 0x29A7, 0x2022, 0x2002, 0x6A15, 0x0000, 0xA080, 0x0001, 0x6600, 0x0000, 0xA0E3, 0x0001, 0x6800,
+        0x27A8, 0x2000, 0x0002, 0x6C00, 0x2800, 0x2000, 0x0001, 0x6C00, 0x7300, 0x2000, 0x0001, 0x0000, 0x0000, 0xA000, 0x4002, 0x6E0C,
+        0x7300, 0x2000, 0x0001, 0x7000, 0x00F2, 0xA080, 0x0002, 0x6E00, 0x7300, 0x2000, 0x0001, 0x7000, 0x00F1, 0x0000, 0x0000, 0x0000,
+        0x7200, 0x2000, 0x0002, 0x7200, 0x0000, 0x0000, 0x1200, 0x0000, 0x7100, 0x2000, 0x0002, 0x7400, 0x0000, 0x0000, 0x1300, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 82, scsp_dsp_prog_vf2, {
+        0x0000, 0xA800, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0000, 0x0280, 0x2000, 0x0002, 0x1000,
+        0x0100, 0x2000, 0x0001, 0x0E00, 0x0000, 0x2000, 0x0001, 0x0C00, 0x0400, 0x2000, 0x0001, 0x1200, 0x0500, 0x2000, 0x0001, 0x1400,
+        0x0083, 0x2000, 0x0011, 0x0400, 0x00FE, 0x0000, 0x0010, 0x0000, 0x7E00, 0x2000, 0x0002, 0x1600, 0x7F00, 0x2000, 0x0001, 0x1800,
+        0x00FD, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x7D00, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x000C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0010,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x0011, 0x0000, 0x0000, 0x0000, 0x0000, 0x0700, 0x2022, 0x2002, 0x281C,
+        0x0000, 0xA040, 0x0001, 0x2400, 0x0000, 0xA0A3, 0x2001, 0x261D, 0x0086, 0xA000, 0x0001, 0x2200, 0x0800, 0x2024, 0x4002, 0x3004,
+        0x0000, 0xA0C0, 0x0001, 0x2C00, 0x0000, 0xA100, 0x2001, 0x2E14, 0x0087, 0xA000, 0x0001, 0x2A00, 0x0000, 0x0025, 0x4000, 0x0008,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0020, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x1A18,
+        0x0000, 0xA1C0, 0x0001, 0x1E00, 0x7D89, 0x2026, 0x2002, 0x3424, 0x0900, 0x2000, 0x0001, 0x3200, 0x00FC, 0xA1A8, 0x0002, 0x1C00,
+        0x0000, 0xA200, 0x0001, 0x2000, 0x7D8A, 0x2000, 0x0002, 0x3400, 0x0A00, 0x2000, 0x0001, 0x3200, 0x00FB, 0x0000, 0x0000, 0x0000,
+        0x7C00, 0x2000, 0x0002, 0x3600, 0x0000, 0x0000, 0x1000, 0x0000, 0x7B00, 0x2000, 0x0002, 0x3800, 0x0000, 0x0000, 0x1100, 0x0000,
+        0x0000, 0xA840, 0x0002, 0x3A00, 0x00FA, 0x0000, 0x0000, 0x0000, 0x7A00, 0x2000, 0x0002, 0x0000, 0x0D8B, 0x2000, 0x0002, 0x4000,
+        0x0C00, 0x2000, 0x0001, 0x3E00, 0x0B00, 0x2000, 0x0001, 0x3C00, 0x0F00, 0x2000, 0x0001, 0x4200, 0x1000, 0x2000, 0x0001, 0x4400,
+        0x0B8E, 0x2000, 0x0011, 0x0400, 0x00F9, 0x0000, 0x0010, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x002C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x002D, 0x1200, 0x2000, 0x0002, 0x4A00, 0x0000, 0xA021, 0x2001, 0x4630,
+        0x0000, 0xA040, 0x0001, 0x4800, 0x0091, 0x0022, 0x2000, 0x0031, 0x1300, 0x2000, 0x0002, 0x4A00, 0x0000, 0xA0A3, 0x0001, 0x4600,
+        0x0000, 0xA0C0, 0x0001, 0x4800, 0x0092, 0x0000, 0x0000, 0x0000, 0x1100, 0x2000, 0x0002, 0x4C00, 0x1200, 0x2000, 0x0001, 0x4C00,
+        0x7900, 0x2000, 0x0001, 0x0000, 0x0000, 0xA000, 0x4002, 0x4E28, 0x7900, 0x2000, 0x0001, 0x5000, 0x00F8, 0xA080, 0x0002, 0x4E00,
+        0x7900, 0x2000, 0x0001, 0x5000, 0x00F7, 0x0000, 0x0000, 0x0000, 0x7800, 0x2000, 0x0002, 0x5200, 0x0000, 0x0000, 0x1200, 0x0000,
+        0x7700, 0x2000, 0x0002, 0x5400, 0x0000, 0x0000, 0x1300, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 110, scsp_dsp_prog_vonj_von, {
+        0x0000, 0xA880, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0000, 0x0280, 0x2000, 0x0002, 0x1000,
+        0x0100, 0x2000, 0x0001, 0x0E00, 0x0000, 0x2000, 0x0001, 0x0C00, 0x0400, 0x2000, 0x0001, 0x1200, 0x0500, 0x2000, 0x0001, 0x1400,
+        0x0083, 0x2000, 0x0011, 0x0400, 0x00FE, 0x0000, 0x0010, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0004,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0005, 0x0700, 0x2000, 0x0002, 0x1A00, 0x0000, 0xA021, 0x2001, 0x1608,
+        0x0000, 0xA040, 0x0001, 0x1800, 0x0086, 0x0022, 0x2000, 0x0009, 0x0800, 0x2000, 0x0002, 0x1A00, 0x0000, 0xA0A3, 0x0001, 0x1600,
+        0x0000, 0xA0C0, 0x0001, 0x1800, 0x0087, 0x0000, 0x0000, 0x0000, 0x0600, 0x2000, 0x0002, 0x1C00, 0x0700, 0x2000, 0x0001, 0x1C00,
+        0x7E00, 0x2000, 0x0001, 0x0000, 0x0000, 0xA000, 0x4002, 0x1E00, 0x7E00, 0x2000, 0x0001, 0x2000, 0x00FD, 0xA080, 0x0002, 0x1E00,
+        0x7E00, 0x2000, 0x0001, 0x2000, 0x00FC, 0x0000, 0x0000, 0x0000, 0x7D00, 0x2000, 0x0002, 0x2200, 0x0000, 0x0000, 0x1200, 0x0000,
+        0x7C00, 0x2000, 0x0002, 0x2400, 0x0000, 0x0000, 0x1300, 0x0000, 0x0000, 0xA900, 0x0002, 0x2600, 0x00FB, 0x0000, 0x0000, 0x0000,
+        0x7B00, 0x2000, 0x0002, 0x0000, 0x0B89, 0x2000, 0x0002, 0x2C00, 0x0A00, 0x2000, 0x0001, 0x2A00, 0x0900, 0x2000, 0x0001, 0x2800,
+        0x0D00, 0x2000, 0x0001, 0x2E00, 0x0E00, 0x2000, 0x0001, 0x3000, 0x098C, 0x2000, 0x0011, 0x0400, 0x00FA, 0x0000, 0x0010, 0x0000,
+        0x7A00, 0x2000, 0x0002, 0x3200, 0x0000, 0x0000, 0x1400, 0x0000, 0x0000, 0xA940, 0x0002, 0x3400, 0x00F9, 0x0000, 0x0000, 0x0000,
+        0x7900, 0x2000, 0x0002, 0x0000, 0x118F, 0x2000, 0x0002, 0x3A00, 0x1000, 0x2000, 0x0001, 0x3800, 0x0F00, 0x2000, 0x0001, 0x3600,
+        0x1300, 0x2000, 0x0001, 0x3C00, 0x1400, 0x2000, 0x0001, 0x3E00, 0x0F92, 0x2000, 0x0011, 0x0400, 0x00F8, 0x0000, 0x0010, 0x0000,
+        0x7800, 0x2000, 0x0002, 0x4000, 0x0000, 0x0000, 0x1500, 0x0000, 0x0000, 0xA800, 0x0002, 0x4200, 0x00F7, 0x0000, 0x0000, 0x0000,
+        0x7700, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x000C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0018,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x001C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x001D,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x1600, 0x2022, 0x2002, 0x5228, 0x0000, 0xA040, 0x0001, 0x4E00, 0x0000, 0xA0A3, 0x2001, 0x5029,
+        0x0095, 0xA000, 0x0001, 0x4C00, 0x1700, 0x2024, 0x4002, 0x5A10, 0x0000, 0xA0C0, 0x0001, 0x5600, 0x0000, 0xA100, 0x2001, 0x5820,
+        0x0096, 0xA000, 0x0001, 0x5400, 0x0000, 0x0025, 0x4000, 0x0014, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x002C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x4424, 0x0000, 0xA1C0, 0x0001, 0x4800, 0x7798, 0x2026, 0x2002, 0x5E30,
+        0x1800, 0x2000, 0x0001, 0x5C00, 0x00F6, 0xA1A8, 0x0002, 0x4600, 0x0000, 0xA200, 0x0001, 0x4A00, 0x7799, 0x2000, 0x0002, 0x5E00,
+        0x1900, 0x2000, 0x0001, 0x5C00, 0x00F5, 0x0000, 0x0000, 0x0000, 0x7600, 0x2000, 0x0002, 0x0000, 0x1C9A, 0x2000, 0x0002, 0x6400,
+        0x1B00, 0x2000, 0x0001, 0x6200, 0x1A00, 0x2000, 0x0001, 0x6000, 0x1E00, 0x2000, 0x0001, 0x6600, 0x1F00, 0x2000, 0x0001, 0x6800,
+        0x1A9D, 0x2000, 0x0011, 0x0400, 0x00F4, 0x0000, 0x0010, 0x0000, 0x7500, 0x2000, 0x0002, 0x0000, 0x22A0, 0x2000, 0x0002, 0x6E00,
+        0x2100, 0x2000, 0x0001, 0x6C00, 0x2000, 0x2000, 0x0001, 0x6A00, 0x2400, 0x2000, 0x0001, 0x7000, 0x2500, 0x2000, 0x0001, 0x7200,
+        0x20A3, 0x2000, 0x0011, 0x0400, 0x00F3, 0x0000, 0x0010, 0x0000, 0x7400, 0x2000, 0x0002, 0x7400, 0x0000, 0x0000, 0x1000, 0x0000,
+        0x7300, 0x2000, 0x0002, 0x7600, 0x0000, 0x0000, 0x1100, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 58, scsp_dsp_prog_doa, {
+        0x0000, 0xA800, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x0000, 0xA840, 0x0002, 0x0C00, 0x00FE, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0004, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0005,
+        0x0100, 0x2000, 0x0002, 0x1200, 0x0000, 0xA021, 0x2001, 0x0E08, 0x0000, 0xA040, 0x0001, 0x1000, 0x0280, 0x2022, 0x2002, 0x1209,
+        0x0000, 0xA080, 0x0001, 0x0E00, 0x0000, 0xA0E3, 0x0001, 0x1000, 0x0081, 0x2000, 0x0002, 0x1400, 0x0100, 0x2000, 0x0001, 0x1400,
+        0x7E00, 0x2000, 0x0001, 0x0000, 0x0000, 0xA000, 0x4002, 0x1600, 0x7E00, 0x2000, 0x0001, 0x1800, 0x00FD, 0xA080, 0x0002, 0x1600,
+        0x7E00, 0x2000, 0x0001, 0x1800, 0x00FC, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x1A00, 0x7D00, 0x2000, 0x0001, 0x1C00,
+        0x7C00, 0x2000, 0x0001, 0x1E00, 0x00FB, 0x0000, 0x0000, 0x0000, 0x7B00, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x000C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0018, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x001C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x001D, 0x0000, 0x0000, 0x0000, 0x0000, 0x0400, 0x2022, 0x2002, 0x2E28,
+        0x0000, 0xA040, 0x0001, 0x2A00, 0x0000, 0xA0A3, 0x2001, 0x2C29, 0x0083, 0xA000, 0x0001, 0x2800, 0x0500, 0x2024, 0x4002, 0x3610,
+        0x0000, 0xA0C0, 0x0001, 0x3200, 0x0000, 0xA100, 0x2001, 0x3420, 0x0084, 0xA000, 0x0001, 0x3000, 0x0000, 0x0025, 0x4000, 0x0014,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x002C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x2024,
+        0x0000, 0xA1C0, 0x0001, 0x2400, 0x7B86, 0x2026, 0x2002, 0x3A30, 0x0600, 0x2000, 0x0001, 0x3800, 0x00FA, 0xA1A8, 0x0002, 0x2200,
+        0x0000, 0xA200, 0x0001, 0x2600, 0x7B87, 0x2000, 0x0002, 0x3A00, 0x0700, 0x2000, 0x0001, 0x3800, 0x00F9, 0x0000, 0x0000, 0x0000,
+        0x7A00, 0x2000, 0x0002, 0x3C00, 0x0000, 0x0000, 0x1000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 112, scsp_dsp_prog_lastbrnx, {
+        0x0000, 0xAC00, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0C00, 0x0000, 0x0000, 0x1E00, 0x0000,
+        0x0000, 0xAC40, 0x0002, 0x0E00, 0x00FE, 0x0000, 0x0000, 0x0000, 0x7E00, 0x2000, 0x0002, 0x1000, 0x0000, 0x0000, 0x1F00, 0x0000,
+        0x0000, 0xA880, 0x0002, 0x1200, 0x00FD, 0x0000, 0x0000, 0x0000, 0x7D00, 0x2000, 0x0002, 0x0000, 0x0280, 0x2000, 0x0002, 0x1800,
+        0x0100, 0x2000, 0x0001, 0x1600, 0x0000, 0x2000, 0x0001, 0x1400, 0x0400, 0x2000, 0x0001, 0x1A00, 0x0500, 0x2000, 0x0001, 0x1C00,
+        0x0083, 0x2000, 0x0011, 0x0400, 0x00FC, 0x0000, 0x0010, 0x0000, 0x7C00, 0x2000, 0x0002, 0x1E00, 0x0000, 0x0000, 0x1400, 0x0000,
+        0x0000, 0xA800, 0x0002, 0x2000, 0x00FB, 0x0000, 0x0000, 0x0000, 0x7B00, 0x2000, 0x0002, 0x0000, 0x0886, 0x2000, 0x0002, 0x2600,
+        0x0700, 0x2000, 0x0001, 0x2400, 0x0600, 0x2000, 0x0001, 0x2200, 0x0A00, 0x2000, 0x0001, 0x2800, 0x0B00, 0x2000, 0x0001, 0x2A00,
+        0x0689, 0x2000, 0x0011, 0x0400, 0x00FA, 0x0000, 0x0010, 0x0000, 0x7A00, 0x2000, 0x0002, 0x0000, 0x0E8C, 0x2000, 0x0002, 0x3000,
+        0x0D00, 0x2000, 0x0001, 0x2E00, 0x0C00, 0x2000, 0x0001, 0x2C00, 0x1000, 0x2000, 0x0001, 0x3200, 0x1100, 0x2000, 0x0001, 0x3400,
+        0x0C8F, 0x2000, 0x0011, 0x0400, 0x00F9, 0x0000, 0x0010, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0004,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0005, 0x1300, 0x2000, 0x0002, 0x3A00, 0x0000, 0xA021, 0x2001, 0x3608,
+        0x0000, 0xA040, 0x0001, 0x3800, 0x1492, 0x2022, 0x2002, 0x3A09, 0x0000, 0xA080, 0x0001, 0x3600, 0x0000, 0xA0E3, 0x0001, 0x3800,
+        0x1293, 0x2000, 0x0002, 0x3C00, 0x1300, 0x2000, 0x0001, 0x3C00, 0x7900, 0x2000, 0x0001, 0x0000, 0x0000, 0xA000, 0x4002, 0x3E00,
+        0x7900, 0x2000, 0x0001, 0x4000, 0x00F8, 0xA080, 0x0002, 0x3E00, 0x7900, 0x2000, 0x0001, 0x4000, 0x00F7, 0x0000, 0x0000, 0x0000,
+        0x7800, 0x2000, 0x0002, 0x4200, 0x0000, 0x0000, 0x1000, 0x0000, 0x7700, 0x2000, 0x0002, 0x4400, 0x0000, 0x0000, 0x1100, 0x0000,
+        0x0000, 0xA840, 0x0002, 0x4600, 0x00F6, 0x0000, 0x0000, 0x0000, 0x7600, 0x2000, 0x0002, 0x0000, 0x1795, 0x2000, 0x0002, 0x4C00,
+        0x1600, 0x2000, 0x0001, 0x4A00, 0x1500, 0x2000, 0x0001, 0x4800, 0x1900, 0x2000, 0x0001, 0x4E00, 0x1A00, 0x2000, 0x0001, 0x5000,
+        0x1598, 0x2000, 0x0011, 0x0400, 0x00F5, 0x0000, 0x0010, 0x0000, 0x7500, 0x2000, 0x0002, 0x0000, 0x1D9B, 0x2000, 0x0002, 0x5600,
+        0x1C00, 0x2000, 0x0001, 0x5400, 0x1B00, 0x2000, 0x0001, 0x5200, 0x1F00, 0x2000, 0x0001, 0x5800, 0x2000, 0x2000, 0x0001, 0x5A00,
+        0x1B9E, 0x2000, 0x0011, 0x0400, 0x00F4, 0x0000, 0x0010, 0x0000, 0x7400, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x000C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0018, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x001C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x001D, 0x0000, 0x0000, 0x0000, 0x0000, 0x2200, 0x2022, 0x2002, 0x6A28,
+        0x0000, 0xA040, 0x0001, 0x6600, 0x0000, 0xA0A3, 0x2001, 0x6829, 0x00A1, 0xA000, 0x0001, 0x6400, 0x2300, 0x2024, 0x4002, 0x7210,
+        0x0000, 0xA0C0, 0x0001, 0x6E00, 0x0000, 0xA100, 0x2001, 0x7020, 0x00A2, 0xA000, 0x0001, 0x6C00, 0x0000, 0x0025, 0x4000, 0x0014,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x002C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x5C24,
+        0x0000, 0xA1C0, 0x0001, 0x6000, 0x74A4, 0x2026, 0x2002, 0x7630, 0x2400, 0x2000, 0x0001, 0x7400, 0x00F3, 0xA1A8, 0x0002, 0x5E00,
+        0x0000, 0xA200, 0x0001, 0x6200, 0x74A5, 0x2000, 0x0002, 0x7600, 0x2500, 0x2000, 0x0001, 0x7400, 0x00F2, 0x0000, 0x0000, 0x0000,
+        0x7300, 0x2000, 0x0002, 0x7800, 0x0000, 0x0000, 0x1200, 0x0000, 0x7200, 0x2000, 0x0002, 0x7A00, 0x0000, 0x0000, 0x1300, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 80, scsp_dsp_prog_airwlkrs, {
+        0x0000, 0xA800, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x000C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0010,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x0011, 0x0000, 0x0000, 0x0000, 0x0000, 0x0100, 0x2022, 0x2002, 0x1A1C,
+        0x0000, 0xA040, 0x0001, 0x1600, 0x0000, 0xA0A3, 0x2001, 0x181D, 0x0080, 0xA000, 0x0001, 0x1400, 0x0200, 0x2024, 0x4002, 0x2204,
+        0x0000, 0xA0C0, 0x0001, 0x1E00, 0x0000, 0xA100, 0x2001, 0x2014, 0x0081, 0xA000, 0x0001, 0x1C00, 0x0000, 0x0025, 0x4000, 0x0008,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0020, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x0C18,
+        0x0000, 0xA1C0, 0x0001, 0x1000, 0x7F83, 0x2026, 0x2002, 0x2624, 0x0300, 0x2000, 0x0001, 0x2400, 0x00FE, 0xA1A8, 0x0002, 0x0E00,
+        0x0000, 0xA200, 0x0001, 0x1200, 0x7F84, 0x2000, 0x0002, 0x2600, 0x0400, 0x2000, 0x0001, 0x2400, 0x00FD, 0x0000, 0x0000, 0x0000,
+        0x7E00, 0x2000, 0x0002, 0x2800, 0x0000, 0x0000, 0x1100, 0x0000, 0x7D00, 0x2000, 0x0002, 0x2A00, 0x0000, 0x0000, 0x1200, 0x0000,
+        0x0000, 0xA840, 0x0002, 0x2C00, 0x00FC, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x002C,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x7C00, 0x2020, 0x2002, 0x0030, 0x0000, 0xA000, 0x0001, 0x4200, 0x0085, 0x0021, 0x2000, 0x0034,
+        0x0500, 0x2000, 0x0002, 0x2E00, 0x0600, 0x2022, 0x2001, 0x3038, 0x0700, 0x2000, 0x0001, 0x3200, 0x0086, 0x0023, 0x4000, 0x0028,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x003C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0024, 0x2000, 0x0040,
+        0x0000, 0xA040, 0x0002, 0x3400, 0x0000, 0xA0A5, 0x2001, 0x3644, 0x0000, 0xA0C0, 0x0001, 0x3800, 0x0000, 0xA126, 0x2001, 0x3A48,
+        0x0000, 0xA140, 0x0001, 0x3C00, 0x0000, 0xA1A7, 0x2001, 0x3E4C, 0x0000, 0xA1C0, 0x0001, 0x4000, 0x7C88, 0x2028, 0x2002, 0x4650,
+        0x0800, 0x2000, 0x0001, 0x4400, 0x00FB, 0x0029, 0x2000, 0x0054, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x002A, 0x2000, 0x0058,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x002B, 0x2000, 0x005C, 0x0000, 0xA200, 0x0002, 0x3400, 0x0000, 0xA26C, 0x2001, 0x3660,
+        0x0000, 0xA280, 0x0001, 0x3800, 0x0000, 0xA2ED, 0x2001, 0x3A64, 0x0000, 0xA300, 0x0001, 0x3C00, 0x0000, 0xA36E, 0x0001, 0x3E00,
+        0x0000, 0xA380, 0x0001, 0x4000, 0x7C89, 0x2000, 0x0002, 0x4600, 0x0900, 0x2000, 0x0001, 0x4400, 0x00FA, 0x0000, 0x0000, 0x0000,
+        0x7B00, 0x2000, 0x0002, 0x4800, 0x0000, 0x0000, 0x1300, 0x0000, 0x7A00, 0x2000, 0x0002, 0x4A00, 0x0000, 0x0000, 0x1400, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 } },
+    { 112, scsp_dsp_prog_powsled, {
+        0x0000, 0xAC00, 0x0002, 0x0A00, 0x00FF, 0x0000, 0x0000, 0x0000, 0x7F00, 0x2000, 0x0002, 0x0C00, 0x0000, 0x0000, 0x1E00, 0x0000,
+        0x0000, 0xAC40, 0x0002, 0x0E00, 0x00FE, 0x0000, 0x0000, 0x0000, 0x7E00, 0x2000, 0x0002, 0x1000, 0x0000, 0x0000, 0x1F00, 0x0000,
+        0x0000, 0xA800, 0x0002, 0x1200, 0x00FD, 0x0000, 0x0000, 0x0000, 0x7D00, 0x2000, 0x0002, 0x0000, 0x0280, 0x2000, 0x0002, 0x1800,
+        0x0100, 0x2000, 0x0001, 0x1600, 0x0000, 0x2000, 0x0001, 0x1400, 0x0400, 0x2000, 0x0001, 0x1A00, 0x0500, 0x2000, 0x0001, 0x1C00,
+        0x0083, 0x2000, 0x0011, 0x0400, 0x00FC, 0x0000, 0x0010, 0x0000, 0x7C00, 0x2000, 0x0002, 0x0000, 0x0886, 0x2000, 0x0002, 0x2200,
+        0x0700, 0x2000, 0x0001, 0x2000, 0x0600, 0x2000, 0x0001, 0x1E00, 0x0A00, 0x2000, 0x0001, 0x2400, 0x0B00, 0x2000, 0x0001, 0x2600,
+        0x0689, 0x2000, 0x0011, 0x0400, 0x00FB, 0x0000, 0x0010, 0x0000, 0x7B00, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x000C, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0010,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x0011, 0x0000, 0x0000, 0x0000, 0x0000, 0x0D00, 0x2022, 0x2002, 0x361C,
+        0x0000, 0xA040, 0x0001, 0x3200, 0x0000, 0xA0A3, 0x2001, 0x341D, 0x008C, 0xA000, 0x0001, 0x3000, 0x0E00, 0x2024, 0x4002, 0x3E04,
+        0x0000, 0xA0C0, 0x0001, 0x3A00, 0x0000, 0xA100, 0x2001, 0x3C14, 0x008D, 0xA000, 0x0001, 0x3800, 0x0000, 0x0025, 0x4000, 0x0008,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0020, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x2818,
+        0x0000, 0xA1C0, 0x0001, 0x2C00, 0x7B8F, 0x2026, 0x2002, 0x4224, 0x0F00, 0x2000, 0x0001, 0x4000, 0x00FA, 0xA1A8, 0x0002, 0x2A00,
+        0x0000, 0xA200, 0x0001, 0x2E00, 0x7B90, 0x2000, 0x0002, 0x4200, 0x1000, 0x2000, 0x0001, 0x4000, 0x00F9, 0x0000, 0x0000, 0x0000,
+        0x7A00, 0x2000, 0x0002, 0x4400, 0x0000, 0x0000, 0x1000, 0x0000, 0x7900, 0x2000, 0x0002, 0x4600, 0x0000, 0x0000, 0x1100, 0x0000,
+        0x0000, 0xA840, 0x0002, 0x4800, 0x00F8, 0x0000, 0x0000, 0x0000, 0x7800, 0x2000, 0x0002, 0x0000, 0x1391, 0x2000, 0x0002, 0x4E00,
+        0x1200, 0x2000, 0x0001, 0x4C00, 0x1100, 0x2000, 0x0001, 0x4A00, 0x1500, 0x2000, 0x0001, 0x5000, 0x1600, 0x2000, 0x0001, 0x5200,
+        0x1194, 0x2000, 0x0011, 0x0400, 0x00F7, 0x0000, 0x0010, 0x0000, 0x7700, 0x2000, 0x0002, 0x0000, 0x1997, 0x2000, 0x0002, 0x5800,
+        0x1800, 0x2000, 0x0001, 0x5600, 0x1700, 0x2000, 0x0001, 0x5400, 0x1B00, 0x2000, 0x0001, 0x5A00, 0x1C00, 0x2000, 0x0001, 0x5C00,
+        0x179A, 0x2000, 0x0011, 0x0400, 0x00F6, 0x0000, 0x0010, 0x0000, 0x7600, 0x2000, 0x0002, 0x0000, 0x0000, 0x0000, 0x4000, 0x0028,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0034, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0020, 0x2000, 0x0038,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0021, 0x2000, 0x0039, 0x0000, 0x0000, 0x0000, 0x0000, 0x1E00, 0x2022, 0x2002, 0x6C44,
+        0x0000, 0xA040, 0x0001, 0x6800, 0x0000, 0xA0A3, 0x2001, 0x6A45, 0x009D, 0xA000, 0x0001, 0x6600, 0x1F00, 0x2024, 0x4002, 0x742C,
+        0x0000, 0xA0C0, 0x0001, 0x7000, 0x0000, 0xA100, 0x2001, 0x723C, 0x009E, 0xA000, 0x0001, 0x6E00, 0x0000, 0x0025, 0x4000, 0x0030,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2000, 0x0048, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xA167, 0x2002, 0x5E40,
+        0x0000, 0xA1C0, 0x0001, 0x6200, 0x76A0, 0x2026, 0x2002, 0x784C, 0x2000, 0x2000, 0x0001, 0x7600, 0x00F5, 0xA1A8, 0x0002, 0x6000,
+        0x0000, 0xA200, 0x0001, 0x6400, 0x76A1, 0x2000, 0x0002, 0x7800, 0x2100, 0x2000, 0x0001, 0x7600, 0x00F4, 0x0000, 0x0000, 0x0000,
+        0x7500, 0x2000, 0x0002, 0x7A00, 0x0000, 0x0000, 0x1200, 0x0000, 0x7400, 0x2000, 0x0002, 0x7C00, 0x0000, 0x0000, 0x1300, 0x0000,
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
         0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,

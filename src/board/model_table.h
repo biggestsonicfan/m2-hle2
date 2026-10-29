@@ -14,6 +14,11 @@
  *
  * A layout of all zeros is the 1995 one, so a profile names one only when it
  * differs.
+ *
+ * Virtua Cop's numbers run on past its table: the draw routines read
+ * 0x24C8000[n*16] up to model 0x4D1 and 0x28693F0[n*16] past it, the same n
+ * from the second table's own base (noclip 15fc0db, modelTable.past). So a
+ * table may name the index its second part starts at and that part's base.
  */
 #ifndef M2HLE_MODEL_TABLE_H
 #define M2HLE_MODEL_TABLE_H
@@ -42,10 +47,13 @@ typedef struct {
 #define MODEL_LAYOUT_VCOP    { .stride = 16, .uv = 4, .mat = 8, .mesh = 0, .mat_at_zero = true }
 #define MODEL_LAYOUT_DAYTONA { .stride = 20, .uv = 4, .mat = 8, .mesh = 0 }
 
-/* Where the table is in main_data, how many entries, and their layout. */
+/* Where the table is in main_data, how many entries, and their layout.
+ * past_from: entries from this index on are read from past_off instead (0:
+ * one table). */
 typedef struct {
     uint32_t       off, count;
     model_layout_t layout;
+    uint32_t       past_from, past_off;
 } model_table_t;
 
 /* One entry's three words, as the ROM has them: uv_ptr a word index into the
@@ -57,7 +65,14 @@ typedef struct {
 
 static inline model_table_t model_table_make(uint32_t off, uint32_t count, model_layout_t layout) {
     if (!layout.stride) layout = (model_layout_t)MODEL_LAYOUT_1995;
-    return (model_table_t){ off, count, layout };
+    return (model_table_t){ off, count, layout, 0, 0 };
+}
+
+/* t, its entries from index from on read at base past_off. */
+static inline model_table_t model_table_past(model_table_t t, uint32_t from, uint32_t past_off) {
+    t.past_from = from;
+    t.past_off  = from ? past_off : 0;
+    return t;
 }
 
 /* Same table, field by field (the layout's flag leaves padding memcmp would read). */
@@ -65,7 +80,8 @@ static inline bool model_table_same(const model_table_t *a, const model_table_t 
     return a->off == b->off && a->count == b->count &&
            a->layout.stride == b->layout.stride && a->layout.uv == b->layout.uv &&
            a->layout.mat == b->layout.mat && a->layout.mesh == b->layout.mesh &&
-           a->layout.mat_at_zero == b->layout.mat_at_zero;
+           a->layout.mat_at_zero == b->layout.mat_at_zero &&
+           a->past_from == b->past_from && a->past_off == b->past_off;
 }
 
 static inline uint32_t model_table__rd32(const uint8_t *p) {
@@ -74,12 +90,16 @@ static inline uint32_t model_table__rd32(const uint8_t *p) {
 
 /* Byte offset in main_data of entry idx. */
 static inline uint32_t model_entry_offset(const model_table_t *t, uint32_t idx) {
-    return t->off + idx * t->layout.stride;
+    const uint32_t base = t->past_from && idx >= t->past_from ? t->past_off : t->off;
+    return base + idx * t->layout.stride;
 }
 
-/* Whether entries [0, count) lie inside main_data. */
+/* Whether entries [0, count) lie inside main_data: both parts, if two. */
 static inline bool model_table_fits(const model_table_t *t, size_t main_data_size) {
-    return (uint64_t)t->off + (uint64_t)t->count * t->layout.stride <= main_data_size;
+    if (!t->past_from || t->past_from >= t->count)
+        return (uint64_t)t->off + (uint64_t)t->count * t->layout.stride <= main_data_size;
+    return (uint64_t)t->off + (uint64_t)t->past_from * t->layout.stride <= main_data_size &&
+           (uint64_t)t->past_off + (uint64_t)t->count * t->layout.stride <= main_data_size;
 }
 
 /* Entry idx; false past the table or past main_data (the entry is zeroed). */

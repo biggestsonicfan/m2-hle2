@@ -479,6 +479,7 @@ static inline int m2_texload_row(const m2_texload_t *t, i960_cpu_t *cpu, memory_
     if (!end) return 1;
     /* The timers would come due inside the row, and on the board an interrupt
      * could be taken there. */
+    irqt_sync();   /* pending lags the run loop's boundary (irq_timer.h) */
     if (g_irqt.pending + (int64_t)x->cyc >= g_irqt.horizon) return 1;
 
     for (uint32_t k = 0; k < x->nlog; k++) {

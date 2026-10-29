@@ -47,6 +47,7 @@
 #include "m68k.h"
 #include "m68k_exec.h"
 #include "scsp.h"
+#include "model1_sound.h"   /* Daytona's board in place of this one (quirks.model1_sound) */
 #include "emu_times.h"   /* host time spent here, for get_status */
 #include "thread_mutex.h" /* the sound thread */
 
@@ -136,6 +137,11 @@ typedef struct {
 typedef struct {
     m68k_state_t   m68k;
     scsp_t         scsp;
+    /* The Model 1 sound board instead (model1_sound.h): the same 68000 and
+     * UART, its RAM the first 64 KB of ram, with two MultiPCMs and a YM3438
+     * for the SCSP. sound_select_board picks it. */
+    bool           model1;
+    m1snd_t        m1;
     uint8_t        ram[SOUND_RAM_SIZE];
     uint8_t        rom[M68K_ROM_SIZE];
     bool           rom_loaded;
@@ -189,6 +195,8 @@ typedef struct {
 
 static sound_state_t g_sound;
 
+#include "sound_synth.h"   /* the voices in C, in place of the chip's slots (Pinboard #1737) */
+
 /* Wait for the sound thread to finish what it was handed ("The sound thread",
  * below). Anything that reads or changes the sound board from the i960's side
  * calls it first. */
@@ -222,6 +230,7 @@ typedef struct {
     uint16_t lastr[0x1000];
     uint8_t  seen[0x1000];
     uint32_t reps[0x1000];
+    uint32_t ram_base;       /* the RAM dump's first byte; 0 = 0x1000 (STF's driver), CRX_drv's 0x300 */
 } sndcap_t;
 static sndcap_t g_sndcap;
 
@@ -285,11 +294,11 @@ static inline void sndcap_frame(uint32_t frame, uint32_t frame_counter) {
     sound_settle();
     uint32_t *mk = c->marks[c->nmarks++];
     mk[0] = frame; mk[1] = frame_counter; mk[2] = (uint32_t)g_sound.m68k.cpu.cycles; mk[3] = c->n;
-    fwrite(g_sound.ram + 0x1000, 1, 0x4000, c->ramf);
+    fwrite(g_sound.ram + (c->ram_base ? c->ram_base : 0x1000u), 1, 0x4000, c->ramf);
     uint8_t regs[1072] = {0};
     for (uint32_t o = 0; o < 0x430u; o += 2) {
         if (o >= 0x404u && o < 0x40Au) continue;
-        uint16_t w = scsp_peek16(&g_sound.scsp, o);
+        uint16_t w = ssyn_scsp_peek16(o);
         regs[o] = (uint8_t)w; regs[o + 1] = (uint8_t)(w >> 8);
     }
     fwrite(regs, 1, sizeof regs, c->regsf);
@@ -459,20 +468,24 @@ static inline uint8_t sound_rom_byte(const sound_state_t *ss, uint32_t a) {
     return o < ss->samples_size ? ss->samples[o] : 0;
 }
 
+/* A read of the SCSP's registers, `off` bytes into them; a peek leaves the
+ * chip as it was. */
+static inline uint32_t sound__scsp_bus_read(sound_state_t *ss, uint32_t off, int sz, int peek) {
+    if (peek) {
+        uint16_t w = scsp_peek16(&ss->scsp, off & ~1u);
+        if (sz == 1) return (off & 1) ? (w & 0xFFu) : (uint32_t)(w >> 8);
+        if (sz == 2) return w;
+        return ((uint32_t)w << 16) | scsp_peek16(&ss->scsp, (off & ~1u) + 2);
+    }
+    uint32_t v = scsp_read(&ss->scsp, off, sz);
+    if (sndcap_on()) sndcap_scsp(0, off, v, sz);
+    return v;
+}
+
 static uint32_t sound_bus_read(sound_state_t *ss, uint32_t addr, int sz, int peek) {
     addr &= 0xFFFFFFu;
-    if (addr >= M68K_SCSP_BASE && addr < M68K_SCSP_BASE + M68K_SCSP_SIZE) {
-        uint32_t off = addr - M68K_SCSP_BASE;
-        if (peek) {
-            uint16_t w = scsp_peek16(&ss->scsp, off & ~1u);
-            if (sz == 1) return (off & 1) ? (w & 0xFFu) : (uint32_t)(w >> 8);
-            if (sz == 2) return w;
-            return ((uint32_t)w << 16) | scsp_peek16(&ss->scsp, (off & ~1u) + 2);
-        }
-        uint32_t v = scsp_read(&ss->scsp, off, sz);
-        if (sndcap_on()) sndcap_scsp(0, off, v, sz);
-        return v;
-    }
+    if (addr >= M68K_SCSP_BASE && addr < M68K_SCSP_BASE + M68K_SCSP_SIZE)
+        return sound__scsp_bus_read(ss, addr - M68K_SCSP_BASE, sz, peek);
     /* The hot paths: sound RAM, and the program ROM the driver runs from (every
      * opcode fetch), each read in place when the whole access lies inside it.
      * sound_rom_byte, a byte at a time through every region test, was an
@@ -498,8 +511,11 @@ static uint32_t sound_m68k_read(void *ctx, uint32_t addr, int sz) {
     return sound_bus_read((sound_state_t *)ctx, addr, sz, 0);
 }
 
+static uint32_t sound_m1_bus_read(sound_state_t *ss, uint32_t a, int sz, int peek);   /* below */
+
 /* a debugger's read: no side effects on the SCSP */
 static inline uint32_t sound_m68k_peek(sound_state_t *ss, uint32_t addr, int sz) {
+    if (ss->model1) return sound_m1_bus_read(ss, addr, sz, 1);
     return sound_bus_read(ss, addr, sz, 1);
 }
 
@@ -509,9 +525,34 @@ static inline uint32_t sound_m68k_peek(sound_state_t *ss, uint32_t addr, int sz)
  * way sound_bus_read would, so a sample window past the end of the set stays
  * on the callback and reads its zeros there. Rebuilt whenever what backs a
  * page changes (reset, ROM load, a bank switch). */
+/* model1_sound.h's map; no wait states. */
+static inline void sound_map_pages_m1(sound_state_t *ss) {
+    const uint8_t **m = ss->m68k.rmap;
+    memset(ss->m68k.wmap, 0, sizeof ss->m68k.wmap);
+    if (ss->rom_loaded) {
+        for (uint32_t pg = 0; pg < 4; pg++) m[pg] = ss->rom + (pg << 16);
+        for (uint32_t pg = 0; pg < 2; pg++) m[8 + pg] = ss->rom + 0x20000u + (pg << 16);
+    }
+    m[0xF0] = ss->ram;
+}
+
+/* The sample ROM's windows: 0x800000 the set's first 2 MB, 0xA00000 and
+ * 0xE00000 its banks; a page past the end of the set stays unmapped. */
+static inline void sound_map_samples(sound_state_t *ss) {
+    const uint8_t **m = ss->m68k.rmap;
+    for (uint32_t pg = 0x80; pg < 0x100; pg++) {
+        uint32_t a = pg << 16, o;
+        if      (a < 0xA00000u) o = a - 0x800000u;
+        else if (a < 0xE00000u) o = ss->bank4 + (a - 0xA00000u);
+        else                    o = ss->bank5 + (a - 0xE00000u);
+        if (o + 0x10000u <= ss->samples_size) m[pg] = ss->samples + o;
+    }
+}
+
 static inline void sound_map_pages(sound_state_t *ss) {
     const uint8_t **m = ss->m68k.rmap;
     memset((void *)m, 0, sizeof ss->m68k.rmap);
+    if (ss->model1) { sound_map_pages_m1(ss); return; }
     /* MAME model2.cpp model2_snd: one wait state on every sound RAM and SCSP
      * access ("the same waitstate weights as Saturn"). Measured in its timer
      * handlers: the interrupt-to-reload latency is 166 / 200 clocks against
@@ -527,14 +568,7 @@ static inline void sound_map_pages(sound_state_t *ss) {
     ss->scsp.dsp_moved = 0;
     if (ss->rom_loaded)
         for (uint32_t pg = 0; pg < M68K_ROM_SIZE >> 16; pg++) m[(M68K_ROM_BASE >> 16) + pg] = ss->rom + (pg << 16);
-    if (!ss->samples) return;
-    for (uint32_t pg = 0x80; pg < 0x100; pg++) {
-        uint32_t a = pg << 16, o;
-        if      (a < 0xA00000u) o = a - 0x800000u;
-        else if (a < 0xE00000u) o = ss->bank4 + (a - 0xA00000u);
-        else                    o = ss->bank5 + (a - 0xE00000u);
-        if (o + 0x10000u <= ss->samples_size) m[pg] = ss->samples + o;
-    }
+    if (ss->samples) sound_map_samples(ss);
 }
 
 static inline void sound_ctrl_w(sound_state_t *ss, uint32_t val) {
@@ -571,7 +605,87 @@ static void sound_m68k_write(void *ctx, uint32_t addr, uint32_t val, int sz) {
     /* ROM and unmapped space ignore writes */
 }
 
+/* ---- the Model 1 board's map (model1_sound.h) ------------------------------- */
+
+/* The chips sit on the low byte of each word (umask 0x00ff): the byte at the
+ * odd address, or the low half of a word. reg is the chip's register. */
+static inline bool sound_m1_dev(uint32_t a, int sz, uint32_t *reg) {
+    if (sz == 1 && !(a & 1u)) return false;
+    *reg = (a & 0xFu) >> 1;
+    return true;
+}
+
+/* The YM3438's clock, 8 MHz to the 68000's 10. */
+static inline uint64_t sound_m1_ym_clock(const sound_state_t *ss) { return ss->m68k.cpu.cycles * 4u / 5u; }
+
+static uint32_t sound_m1_bus_read(sound_state_t *ss, uint32_t a, int sz, int peek) {
+    a &= 0xFFFFFFu;
+    if (sz == 4) return (sound_m1_bus_read(ss, a, 2, peek) << 16) | sound_m1_bus_read(ss, a + 2u, 2, peek);
+    const uint8_t *p = NULL;
+    if (a < 0x40000u)                        p = ss->rom + a;
+    else if (a >= 0x80000u && a < 0xA0000u)  p = ss->rom + (a - 0x60000u);
+    else if (a >= 0xF00000u && a < 0xF10000u) p = ss->ram + (a & 0xFFFFu);
+    if (p) return sz == 1 ? p[0] : ((uint32_t)p[0] << 8) | p[1];
+    uint32_t reg;
+    if (peek || !sound_m1_dev(a, sz, &reg)) return 0;
+    if (a >= 0xC20000u && a < 0xC20004u) return m1snd_uart_read(&ss->m1, reg);
+    if (a >= 0xD00000u && a < 0xD00008u) {
+        m1ym_advance(&ss->m1.ym, sound_m1_ym_clock(ss));
+        return m1ym_read(&ss->m1.ym, reg);
+    }
+    return 0;                                /* MultiPCM reads 0; the rest is open */
+}
+
+static uint32_t sound_m1_read(void *ctx, uint32_t a, int sz) {
+    return sound_m1_bus_read((sound_state_t *)ctx, a, sz, 0);
+}
+
+/* A chip's register write: the UART, the two MultiPCMs (the second plays the
+ * samples past the first's), the YM3438. */
+static inline void sound_m1_dev_write(sound_state_t *ss, uint32_t a, uint32_t reg, uint32_t v) {
+    uint32_t n1 = ss->samples_size < M1SND_PCM_SIZE ? ss->samples_size : M1SND_PCM_SIZE;
+    uint32_t n2 = ss->samples_size > M1SND_PCM_SIZE ? ss->samples_size - M1SND_PCM_SIZE : 0;
+    if (a >= 0xC20000u && a < 0xC20004u)      m1snd_uart_write(&ss->m1, reg, (uint8_t)v);
+    else if (a >= 0xC40000u && a < 0xC40008u) mpcm_write(&ss->m1.pcm[0], ss->samples, n1, reg, (uint8_t)v);
+    else if (a >= 0xC60000u && a < 0xC60008u) mpcm_write(&ss->m1.pcm[1], n2 ? ss->samples + M1SND_PCM_SIZE : NULL, n2, reg, (uint8_t)v);
+    else if (a >= 0xD00000u && a < 0xD00008u) {
+        m1ym_advance(&ss->m1.ym, sound_m1_ym_clock(ss));
+        m1ym_write(&ss->m1.ym, reg, (uint8_t)v);
+    }
+}
+
+static void sound_m1_write(void *ctx, uint32_t a, uint32_t v, int sz) {
+    sound_state_t *ss = (sound_state_t *)ctx;
+    a &= 0xFFFFFFu;
+    if (sz == 4) { sound_m1_write(ctx, a, v >> 16, 2); sound_m1_write(ctx, a + 2u, v & 0xFFFFu, 2); return; }
+    if (a >= 0xF00000u && a < 0xF10000u) {
+        uint8_t *p = ss->ram + (a & 0xFFFFu);
+        if (sz == 1) p[0] = (uint8_t)v;
+        else { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+        return;
+    }
+    /* The bank registers take the word; a byte at the even address lands in
+     * its high half and leaves bits 0-1 clear. */
+    if ((a & ~1u) == 0xC50000u || (a & ~1u) == 0xC70000u) {
+        uint32_t w = sz == 2 ? v : (a & 1u) ? v : v << 8;
+        ss->m1.pcm[a >= 0xC70000u].bank = w & 3u;
+        return;
+    }
+    uint32_t reg;
+    if (sound_m1_dev(a, sz, &reg)) sound_m1_dev_write(ss, a, reg, v);
+}
+
 /* ---- the serial line (see sound_uart_t) --------------------------------------- */
+
+/* A 68000 clock in the line's units, and the first clock at or after a time
+ * in them: 625 units a clock period at 11.2896 MHz; at the Model 1 board's
+ * 10 MHz, 705.6 (a microsecond is 7056 units on both). */
+static inline uint64_t sound_ser_units(const sound_state_t *ss, uint64_t clock) {
+    return ss->model1 ? clock * 3528u / 5u : clock * SOUND_SER_UNIT;
+}
+static inline uint64_t sound_ser_clock(const sound_state_t *ss, uint64_t units) {
+    return ss->model1 ? (units * 5u + 3527u) / 3528u : (units + SOUND_SER_UNIT - 1u) / SOUND_SER_UNIT;
+}
 
 /* the first bit tick strictly after u (units) */
 static inline uint64_t sound_ser_tick_after(uint64_t u) {
@@ -582,10 +696,11 @@ static inline uint64_t sound_ser_tick_after(uint64_t u) {
 /* The byte at the head of the queue goes onto the line: at free_at (units,
  * the tick the previous byte's stop bit ended on) if it was waiting for the
  * line, else at the first tick after its write. */
-static inline void sound_uart_begin(sound_uart_t *u, uint64_t free_at) {
+static inline void sound_uart_begin(sound_state_t *ss, uint64_t free_at) {
+    sound_uart_t *u = &ss->uart;
     uint64_t w = u->wrote[u->r];
     u->start   = w < free_at ? free_at : sound_ser_tick_after(w);
-    u->deliver = (u->start + SOUND_SER_RX + SOUND_SER_UNIT - 1u) / SOUND_SER_UNIT;
+    u->deliver = sound_ser_clock(ss, u->start + SOUND_SER_RX);
 }
 
 /* Bring the line up to the 68000's clock: hand the SCSP the byte whose stop
@@ -595,15 +710,16 @@ static inline void sound_uart_service(sound_state_t *ss, uint64_t now) {
     while (u->count) {
         if (u->deliver) {
             if (now < u->deliver) return;
-            scsp_midi_in(&ss->scsp, u->byte[u->r]);
+            if (ss->model1) m1snd_rx(&ss->m1, u->byte[u->r]);
+            else            scsp_midi_in(&ss->scsp, u->byte[u->r]);
             u->deliver = 0;
             u->sent++;
         }
         uint64_t end = u->start + SOUND_SER_FRAME;
-        if (now * SOUND_SER_UNIT < end) return;          /* the stop bit is still going out */
+        if (sound_ser_units(ss, now) < end) return;          /* the stop bit is still going out */
         u->r = (uint8_t)((u->r + 1u) & (SOUND_UART_FIFO - 1u));
         u->count--;
-        if (u->count) sound_uart_begin(u, end);
+        if (u->count) sound_uart_begin(ss, end);
     }
 }
 
@@ -613,9 +729,9 @@ static inline void sound_uart_write(sound_state_t *ss, uint8_t b, uint64_t clock
     sound_uart_service(ss, clock);
     if (u->count == SOUND_UART_FIFO) { u->drops++; return; }
     u->byte[u->w]  = b;
-    u->wrote[u->w] = clock * SOUND_SER_UNIT;
+    u->wrote[u->w] = sound_ser_units(ss, clock);
     u->w = (uint8_t)((u->w + 1u) & (SOUND_UART_FIFO - 1u));
-    if (u->count++ == 0) sound_uart_begin(u, 0);
+    if (u->count++ == 0) sound_uart_begin(ss, 0);
 }
 
 /* TxRDY: the holding register is empty (the chip holds one byte behind the one
@@ -652,7 +768,9 @@ static inline void sound_code_byte(uint8_t b) {
  * 0x5A there, and without the line the game ran with no sound ("NO SOUND").
  * The byte is there as soon as the 68000 has written it: the line's 320 us is
  * not modelled, and bytes do not overrun, the ring holds them. */
-static inline bool sound_uart_rxrdy(const sound_state_t *ss) { return ss->scsp.mo_r != ss->scsp.mo_w; }
+static inline bool sound_uart_rxrdy(const sound_state_t *ss) {
+    return ss->model1 ? m1snd_tx_ready(&ss->m1) : ss->scsp.mo_r != ss->scsp.mo_w;
+}
 
 static void sound_run(uint32_t n);                      /* below */
 static inline bool sound_uart_make_room(bool for_game);  /* below; both callbacks need it */
@@ -672,6 +790,7 @@ static uint32_t sound_midi_read_cb(mem_region_t *r, uint32_t addr, int size) {
     sound_settle();
     g_sound.read_count++;
     if ((addr - r->base) == 0) {             /* i8251 data: the received byte */
+        if (g_sound.model1) return m1snd_tx_ready(&g_sound.m1) ? m1snd_tx_pop(&g_sound.m1) : 0u;
         scsp_t *s = &g_sound.scsp;
         if (s->mo_r == s->mo_w) return 0u;
         uint8_t b = s->mo[s->mo_r];
@@ -715,13 +834,17 @@ static void sound_midi_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, in
 
 /* MAME model2.cpp reset_model2_scsp: the 68000's reset vectors come from the
  * first 16 bytes of the program ROM, copied into sound RAM. */
+static inline void sound_set_bus(void) {
+    g_sound.m68k.read_cb  = g_sound.model1 ? sound_m1_read : sound_m68k_read;
+    g_sound.m68k.write_cb = g_sound.model1 ? sound_m1_write : sound_m68k_write;
+    g_sound.m68k.mem_ctx  = &g_sound;
+}
+
 static inline void sound_boot_68k(void) {
     sound_settle();
-    memcpy(g_sound.ram, g_sound.rom, 16);
+    if (!g_sound.model1) memcpy(g_sound.ram, g_sound.rom, 16);   /* the Model 1 board's vectors are in its ROM */
     m68k_reset(&g_sound.m68k);
-    g_sound.m68k.read_cb  = sound_m68k_read;
-    g_sound.m68k.write_cb = sound_m68k_write;
-    g_sound.m68k.mem_ctx  = &g_sound;
+    sound_set_bus();
     sound_map_pages(&g_sound);
     m68k_startup(&g_sound.m68k);
     shle_reset();
@@ -753,11 +876,17 @@ static inline void sound_reset(void) {
     g_sound.samples_size = samples_size;
     g_sound.bank4 = 0x200000u;
     g_sound.bank5 = 0x600000u;
-    g_sound.m68k.read_cb  = sound_m68k_read;
-    g_sound.m68k.write_cb = sound_m68k_write;
-    g_sound.m68k.mem_ctx  = &g_sound;
+    m1snd_reset(&g_sound.m1);
+    sound_set_bus();
     sound_map_pages(&g_sound);
     if (rom_loaded) sound_boot_68k();
+}
+
+/* Which board the set has: the Model 2 one (SCSP) or the Model 1 one
+ * (quirks.model1_sound). Before sound_reset; the next ROM load boots it. */
+static inline void sound_select_board(bool model1) {
+    sound_settle();
+    g_sound.model1 = model1;
 }
 
 /* The sound program ROM, big-endian as it comes out of the zip. */
@@ -925,9 +1054,49 @@ static inline int sound_step(m68k_state_t *m) {
     return 1;
 }
 
+/* sound_step on the Model 1 board: the i8251's RxRDY is its one interrupt,
+ * level 2 (segam1audio.cpp). The YM3438's timers catch up when the driver
+ * reads or writes the chip. */
+static inline int sound_step_m1(m68k_state_t *m) {
+    if (m->cpu.halted) { g_sound.budget = 0; return 0; }
+    uint64_t c0 = m->cpu.cycles;
+    uint64_t sampled = c0 >= SOUND_IPL_LEAD ? c0 - SOUND_IPL_LEAD : 0;
+    if (g_sound.uart.count) sound_uart_service(&g_sound, sampled);
+    if (g_sound.m1.rxrdy && m68k_ipl(&m->cpu) < 2 && m68k_interrupt(m, 2)) {
+        g_sound.irqs[2]++;
+    } else if (m->cpu.stopped) {
+        m->cpu.cycles += (uint64_t)g_sound.budget;
+        g_sound.budget = 0;
+        return 0;
+    } else {
+        if (g_sound_step_trace) g_sound_step_trace(m->cpu.pc, c0, g_sound_step_trace_ud);
+        m68k_step_core(m);
+    }
+    g_sound.budget -= (int32_t)(m->cpu.cycles - c0);
+    return 1;
+}
+
+static void sound_run_m1(uint32_t n) {
+    m68k_state_t *m = &g_sound.m68k;
+    int64_t t0 = emu_now_us();
+    int zone = hprof_enter(HPROF_M68K);
+    m68k_tables_init();
+    for (uint32_t i = 0; i < n; i++) {
+        g_sound.budget += m1snd_sample_cycles(&g_sound.m1);
+        while (g_sound.budget > 0 && sound_step_m1(m)) {}
+        int16_t l, r;
+        m1snd_sample(&g_sound.m1, g_sound.samples, g_sound.samples ? g_sound.samples_size : 0, &l, &r);
+        sound_out_push(l, r);
+    }
+    g_emu_times.sound_us      += emu_now_us() - t0;
+    g_emu_times.sound_samples += n;
+    hprof_leave(zone);
+}
+
 /* Run the board for n output samples. */
 static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded || g_sound.detached) return;
+    if (g_sound.model1) { sound_run_m1(n); return; }
     if (g_shle.on) { sound_run_hle(n); return; }
     m68k_state_t *m = &g_sound.m68k;
     int64_t run_t0 = emu_now_us();

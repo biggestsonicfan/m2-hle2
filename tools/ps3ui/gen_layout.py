@@ -52,117 +52,128 @@ def comp_name(scene, ci):
     return '__root__' if ci == len(scene['compositions']) - 1 else None
 
 
-def main():
-    src = sys.argv[1]
-    d = json.load(open(src))
-    size = {s['name']: (int(s['rect'][2]), int(s['rect'][3])) for s in json.load(open(sys.argv[2]))}
-    fontmap = {f['id']: {c['code']: c for c in f['chars']} for f in json.load(open(sys.argv[3], encoding='utf-8'))}
-    scenes = {s['name']: s for s in d['scenes']}
-    sprites = {}
-    out = []
+def spr_id(sprites, name):
+    if name not in sprites:
+        sprites[name] = len(sprites)
+    return sprites[name]
 
-    def spr_id(name):
-        if name not in sprites:
-            sprites[name] = len(sprites)
-        return sprites[name]
 
-    body = []
-    for sname, roots in WANT.items():
-        sc = scenes[sname]
-        names = {i: comp_name(sc, i) for i in range(len(sc['compositions']))}
-        if roots is None:
-            keep = set(range(len(sc['compositions'])))
+def kept_comps(sname, sc, names, roots):
+    """The compositions to keep: the roots asked for and every child they pull in."""
+    if roots is None:
+        return set(range(len(sc['compositions'])))
+    keep = set()
+    want = [i for i, n in names.items() if n in roots]
+    missing = set(roots) - {names[i] for i in want}
+    if missing:
+        raise SystemExit(f'{sname}: no composition {sorted(missing)}')
+    while want:
+        i = want.pop()
+        if i in keep:
+            continue
+        keep.add(i)
+        for l in sc['compositions'][i]['layers']:
+            if l['type'] == 'composition':
+                want.append(l['composition'])
+    return keep
+
+
+def layer_curves(vd, keys):
+    """Per curve (key count, first key, still value); the keys go on the end of keys."""
+    cur = []
+    for cn in CURVES:
+        cv = vd.get(cn)
+        if cv is None:
+            cur.append((0, 0, DEFAULT.get(cn, 0.0)))
+        elif 'keys' in cv and len(cv['keys']) > 0:
+            cur.append((len(cv['keys']), len(keys), 0.0))
+            keys.extend((k['frame'], k['value'], k.get('tangent', 0.0)) for k in cv['keys'])
         else:
-            keep = set()
-            want = [i for i, n in names.items() if n in roots]
-            missing = set(roots) - {names[i] for i in want}
-            if missing:
-                raise SystemExit(f'{sname}: no composition {sorted(missing)}')
-            while want:
-                i = want.pop()
-                if i in keep:
-                    continue
-                keep.add(i)
-                for l in sc['compositions'][i]['layers']:
-                    if l['type'] == 'composition':
-                        want.append(l['composition'])
-        order = sorted(keep)
-        remap = {ci: n for n, ci in enumerate(order)}
-        comps, layers, keys, srcs = [], [], [], []
-        for ci in order:
-            c = sc['compositions'][ci]
-            comps.append((names[ci], len(layers), len(c['layers'])))
-            for l in c['layers']:
-                vd = l.get('video_data') or {}
-                cur = []
-                for cn in CURVES:
-                    cv = vd.get(cn)
-                    if cv is None:
-                        cur.append((0, 0, DEFAULT.get(cn, 0.0)))
-                    elif 'keys' in cv and len(cv['keys']) > 0:
-                        cur.append((len(cv['keys']), len(keys), 0.0))
-                        keys.extend((k['frame'], k['value'], k.get('tangent', 0.0)) for k in cv['keys'])
-                    else:
-                        cur.append((0, 0, cv.get('value', DEFAULT.get(cn, 0.0))))
-                typ = {'video': 1, 'composition': 3}.get(l['type'], 0)
-                item, nsrc, w, h, fps = 0, 0, 0, 0, 0.0
-                if typ == 1:
-                    v = sc['videos'][l['video']]
-                    item, nsrc = len(srcs), len(v['sources'])
-                    w, h, fps = v['width'], v['height'], v.get('frames_per_source', 0.0)
-                    for s in v['sources']:
-                        srcs.append(spr_id(s['sprite']))
-                elif typ == 3:
-                    item = remap[l['composition']]
-                layers.append(dict(name=l['name'], typ=typ, blend=vd.get('blend_mode_raw', 3),
-                                   active=1 if (l.get('flags_raw', 0) & 1) else 0, nsrc=nsrc,
-                                   start=l['start_frame'], end=l['end_frame'], off=l['offset_frame'],
-                                   ts=l['time_scale'], item=item, w=w, h=h, fps=fps, cur=cur))
-        p = 'ps3ui_' + cname(sname)
-        # windows: root layers carrying the open / idle / close markers
-        wins = []
-        kept = {names[ci] for ci in order}
-        for l in sc['compositions'][-1]['layers']:
-            m = {k['name']: k['frame'] for k in l['markers']}
-            if l['name'] not in kept:
-                continue
-            if 'sta_s' in m:
-                wins.append((l['name'], m['sta_s'], m['sta_e'], m['neu_s'], m['neu_e'], m['end_s'], m['end_e']))
-            elif 'loop_s' in m:
-                wins.append((l['name'], -1.0, -1.0, m['loop_s'], m['loop_e'], -1.0, -1.0))
-        body.append(f'static const ps3ui_window_def_t {p}_wins[{max(1, len(wins))}] = {{')
-        for w in wins:
-            body.append('    {"%s",%s},' % (w[0], ','.join(f(v) for v in w[1:])))
-        if not wins:
-            body.append('    {0}')
-        body.append('};')
-        body.append(f'/* {sname}: {len(comps)} compositions, {len(layers)} layers, {len(keys)} keys */')
-        body.append(f'static const ps3ui_key_t {p}_keys[{max(1, len(keys))}] = {{')
-        for i in range(0, len(keys), 3):
-            body.append('    ' + ' '.join('{%s,%s,%s},' % (f(a), f(b), f(c)) for a, b, c in keys[i:i + 3]))
-        if not keys:
-            body.append('    {0}')
-        body.append('};')
-        body.append(f'static const uint16_t {p}_srcs[{max(1, len(srcs))}] = {{')
-        for i in range(0, len(srcs), 16):
-            body.append('    ' + ','.join(str(s) for s in srcs[i:i + 16]) + ',')
-        if not srcs:
-            body.append('    0')
-        body.append('};')
-        body.append(f'static const ps3ui_layer_t {p}_layers[{len(layers)}] = {{')
-        for L in layers:
-            cs = ','.join('{%d,%d,%s}' % (n, first, f(v)) for n, first, v in L['cur'])
-            body.append('    {"%s",%d,%d,%d,%d,%s,%s,%s,%s,%d,%d,%d,%s,{%s}},' % (
-                L['name'], L['typ'], L['blend'], L['active'], L['nsrc'], f(L['start']), f(L['end']),
-                f(L['off']), f(L['ts']), L['item'], L['w'], L['h'], f(L['fps']), cs))
-        body.append('};')
-        body.append(f'static const ps3ui_comp_t {p}_comps[{len(comps)}] = {{')
-        for n, first, cnt in comps:
-            body.append('    {%s,%d,%d},' % ('"%s"' % n if n else 'NULL', first, cnt))
-        body.append('};')
-        body.append(f'static const ps3ui_scene_t {p} = {{ {p}_comps, {p}_layers, {p}_keys, {p}_srcs, {len(comps)}, {p}_wins, {len(wins)} }};')
-        body.append('')
+            cur.append((0, 0, cv.get('value', DEFAULT.get(cn, 0.0))))
+    return cur
 
+
+def layer_row(sc, l, remap, keys, srcs, sprites):
+    vd = l.get('video_data') or {}
+    cur = layer_curves(vd, keys)
+    typ = {'video': 1, 'composition': 3}.get(l['type'], 0)
+    item, nsrc, w, h, fps = 0, 0, 0, 0, 0.0
+    if typ == 1:
+        v = sc['videos'][l['video']]
+        item, nsrc = len(srcs), len(v['sources'])
+        w, h, fps = v['width'], v['height'], v.get('frames_per_source', 0.0)
+        for s in v['sources']:
+            srcs.append(spr_id(sprites, s['sprite']))
+    elif typ == 3:
+        item = remap[l['composition']]
+    return dict(name=l['name'], typ=typ, blend=vd.get('blend_mode_raw', 3),
+                active=1 if (l.get('flags_raw', 0) & 1) else 0, nsrc=nsrc,
+                start=l['start_frame'], end=l['end_frame'], off=l['offset_frame'],
+                ts=l['time_scale'], item=item, w=w, h=h, fps=fps, cur=cur)
+
+
+def scene_windows(sc, kept):
+    """Root layers carrying the open / idle / close markers."""
+    wins = []
+    for l in sc['compositions'][-1]['layers']:
+        m = {k['name']: k['frame'] for k in l['markers']}
+        if l['name'] not in kept:
+            continue
+        if 'sta_s' in m:
+            wins.append((l['name'], m['sta_s'], m['sta_e'], m['neu_s'], m['neu_e'], m['end_s'], m['end_e']))
+        elif 'loop_s' in m:
+            wins.append((l['name'], -1.0, -1.0, m['loop_s'], m['loop_e'], -1.0, -1.0))
+    return wins
+
+
+def emit_array(body, decl, n, rows, empty):
+    body.append(f'{decl}[{max(1, n)}] = {{')
+    body.extend(rows)
+    if not n:
+        body.append(empty)
+    body.append('};')
+
+
+def emit_scene(body, sname, comps, layers, keys, srcs, wins):
+    p = 'ps3ui_' + cname(sname)
+    emit_array(body, f'static const ps3ui_window_def_t {p}_wins', len(wins),
+               ['    {"%s",%s},' % (w[0], ','.join(f(v) for v in w[1:])) for w in wins], '    {0}')
+    body.append(f'/* {sname}: {len(comps)} compositions, {len(layers)} layers, {len(keys)} keys */')
+    emit_array(body, f'static const ps3ui_key_t {p}_keys', len(keys),
+               ['    ' + ' '.join('{%s,%s,%s},' % (f(a), f(b), f(c)) for a, b, c in keys[i:i + 3])
+                for i in range(0, len(keys), 3)], '    {0}')
+    emit_array(body, f'static const uint16_t {p}_srcs', len(srcs),
+               ['    ' + ','.join(str(s) for s in srcs[i:i + 16]) + ',' for i in range(0, len(srcs), 16)], '    0')
+    body.append(f'static const ps3ui_layer_t {p}_layers[{len(layers)}] = {{')
+    for L in layers:
+        cs = ','.join('{%d,%d,%s}' % (n, first, f(v)) for n, first, v in L['cur'])
+        body.append('    {"%s",%d,%d,%d,%d,%s,%s,%s,%s,%d,%d,%d,%s,{%s}},' % (
+            L['name'], L['typ'], L['blend'], L['active'], L['nsrc'], f(L['start']), f(L['end']),
+            f(L['off']), f(L['ts']), L['item'], L['w'], L['h'], f(L['fps']), cs))
+    body.append('};')
+    body.append(f'static const ps3ui_comp_t {p}_comps[{len(comps)}] = {{')
+    for n, first, cnt in comps:
+        body.append('    {%s,%d,%d},' % ('"%s"' % n if n else 'NULL', first, cnt))
+    body.append('};')
+    body.append(f'static const ps3ui_scene_t {p} = {{ {p}_comps, {p}_layers, {p}_keys, {p}_srcs, {len(comps)}, {p}_wins, {len(wins)} }};')
+    body.append('')
+
+
+def scene_body(body, sname, sc, roots, sprites):
+    names = {i: comp_name(sc, i) for i in range(len(sc['compositions']))}
+    order = sorted(kept_comps(sname, sc, names, roots))
+    remap = {ci: n for n, ci in enumerate(order)}
+    comps, layers, keys, srcs = [], [], [], []
+    for ci in order:
+        c = sc['compositions'][ci]
+        comps.append((names[ci], len(layers), len(c['layers'])))
+        layers += [layer_row(sc, l, remap, keys, srcs, sprites) for l in c['layers']]
+    wins = scene_windows(sc, {names[ci] for ci in order})
+    emit_scene(body, sname, comps, layers, keys, srcs, wins)
+
+
+def header(sprites, size, fontmap):
+    out = []
     out.append('/* Generated by tools/ps3ui/gen_layout.py -- do not edit.')
     out.append(' *')
     out.append(' * The PS3 lobby\'s layouts: layer timing, keyframes, blend modes and which')
@@ -196,6 +207,22 @@ def main():
         out.append('    {' + ','.join(row) + '},')
     out.append('};')
     out.append('')
+    return out
+
+
+def main():
+    src = sys.argv[1]
+    d = json.load(open(src))
+    size = {s['name']: (int(s['rect'][2]), int(s['rect'][3])) for s in json.load(open(sys.argv[2]))}
+    fontmap = {f['id']: {c['code']: c for c in f['chars']} for f in json.load(open(sys.argv[3], encoding='utf-8'))}
+    scenes = {s['name']: s for s in d['scenes']}
+    sprites = {}
+
+    body = []
+    for sname, roots in WANT.items():
+        scene_body(body, sname, scenes[sname], roots, sprites)
+
+    out = header(sprites, size, fontmap)
     out.extend(body)
     out.append('#endif')
     path = os.path.join(ROOT, 'src', 'ui', 'ps3ui_layout.h')

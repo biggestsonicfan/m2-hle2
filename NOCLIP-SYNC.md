@@ -2,6 +2,8 @@
 
 Both projects read the same ROMs and the same reverse engineering, and both have been finding bugs on their own. This file compares them: m2-hle2 at `330fe77` and noclip (the STF explorer, `vendor/noclip`) at `2509729`, both from 2026-10-01. For each difference it says which side is right and why. "Right" means it agrees with the board: MAME's `model2_v.cpp` / `model2rd.ipp` for the 3D, and the SHARC firmware (`stf-sharc`) and the i960 listing for the coprocessor. Where neither side has the board's rule, the entry says so.
 
+Section 7 is the second pass (Pinboard #1277): m2-hle2 at `cd73efd` against noclip at `0401280`, both from 2026-10-19, and the status of every item below as of then. Section 8 is the third (Pinboard #1458): `016b0a0` against `629adcd`, both from 2026-10-22.
+
 This branch makes the m2-hle2 changes in section 1. The noclip side (section 2) is a list for whoever works on noclip next; nothing in noclip was changed.
 
 ---
@@ -103,6 +105,8 @@ The two drift because each finds a board rule and the other never hears about it
 The two did not know the same games. noclip opens Virtua Cop, Daytona USA (eight builds) and The House of the Dead (three revisions), and m2-hle2 could not even name those sets; m2-hle2 runs Sega Rally Championship, and noclip called that set unrecognised. Neither side was ready to *run* the other's games, so #660 prepares profiles on each side instead: the set is recognised, its chips load with MAME's names, CRCs and offsets, and the player is told what is missing.
 
 ### 6.1 In m2-hle2: `vcop`, `daytona`, `hotd`
+
+(`hotd` runs since Pinboard #1034 and is in `g_profiles`; the section is as #660 left it.)
 
 `src/profiles/vcop.h`, `daytona.h` and `hotd.h`, listed in `g_prepared_profiles` (`registry.h`), not in `g_profiles`. Each has a load function and no install function, so no front end can boot one; every front end (desktop, SDL, libretro, web) says instead "*X* ('*set*') is known but cannot run yet; the board lacks: ..." (`profile_prepared_message`, `profile_missing_message`).
 
@@ -252,3 +256,132 @@ Five things §6.7 records but does not check: lighting, culling, texels, the Day
 - **hotdo**: the best-matching set changes as the game runs (2, 3, 1…), and at best 10–11 entries differ. Entry 211 (noclip 0xA18E, MAME 0xEBDF; 392 textured headers) differs every time. 1023 (noclip's fixed 0x801F, MAME 0xB340; 18911 textured headers) differs too. 959 and 984–991 are faded values later on. At other times 31 differ (984–993), or 107–117 (532–542 and 684–694, a table none of noclip's sets matches).
 
 None of the differing colours is on an untextured face, so on these sets they reach a textured face only as its colour field. The three Daytona words and hotd's 211 and 1023 are noclip's to look at; the rest are the game changing its palette at run time, which a fixed table cannot hold. m2-hle2 reads palette RAM, as the board does, so nothing changes here.
+
+---
+
+## 7. Second pass, 2026-10-19 (Pinboard #1277)
+
+m2-hle2 `cd73efd` (551 commits since `330fe77`) against noclip `0401280` (381 since `2509729`). Since the first pass noclip added Virtua Fighter 2, Fighting Vipers' fighters, Dead or Alive, Virtua Cop's enemies and House of the Dead's props. Most of that is game logic ported to JS, which m2-hle2 runs as the game's own code. m2-hle2 now runs eight more games, including Daytona, The House of the Dead, Virtua Fighter 2 and Dead or Alive. It also gained a SHARC COP, a TGPx4 and the Model 1 boards. noclip now runs game code in places: `js/i960.js` runs DOA's stage routines and Virtua Cop's spawn and enemy task.
+
+### 7.1 Done in this pass
+
+- **SKY EYE links carry only the board's record** (`sky_eye_link`, `core/sky_eye.h`). noclip's `app.js` applies a link's `pos` before its `eye`/`ang`, and the explorer's `pos` is right only on stages that do not fly. So every link m2-hle2 wrote landed wrong on stages 1, 4 and 7 (§2 row 9). noclip already handles a link that carries only the record ("the one m2-hle2 writes"). The link is now `stage`, `lens=1`, `cam=fly`, `eye` and `ang`.
+- **`geo3d.h`'s window comment**: it said earlier windows paint over later ones. MAME fills them last to first (`model2_v.cpp:792`), so a later window covers an earlier one, as `game_render.h` already says and draws.
+- **noclip, branch `idea-1277-cpysre`** (3 commits):
+  - `lang.js` no longer reads `location`/`document` at import. Since `db3abc8` (the Japanese page) `romset.js` imports it, so every Node import of `romset.js` failed with "location is not defined". That includes `tools/lib/rom.mjs` and so `grade-models`, `grade-stages` and the other graders, the moment `vendor/noclip` is bumped.
+  - `i960.js` `cpysre` (0x6E2) takes src2's sign. noclip had the reverse (that is `cpyrsre`, 0x6E3). MAME `i960.cpp:1927` and `i960_exec.h:1275` agree. Virtua Cop's 16 uses are all `cpysre fp0, 0f0.0, fp0`, the compiler's fabs. All three stages' 12,038 enemy placements are unchanged by it, so the spawn and task paths `b7052b4` runs do not reach them.
+  - The `games.js` comment that m2-hle2 cannot run Daytona or HOTD.
+
+### 7.2 Where noclip is ahead (for m2-hle2)
+
+| # | What | Board rule | m2-hle2 today | Size |
+|---|---|---|---|---|
+| 1 | **Microtextures** (noclip `16ffd72`) | th0 bit 12 on, minimum LOD th0 bits 10–11, square at th2 bit 13 × 128 and bits 14–15 × 128 on the *other* sheet (`model2_v.cpp:645-675`); read at `u,v << (1 << minlod)` and blended by `min(-mml >> minlod, 127)/256` only where `mml < 0` (`model2rd.ipp:123-130, 324-329`). | **Done** (Pinboard #1279). `geo3d_texhdr_decode` packs the bits into `GEO3D_FACE_MICRO` (2048) and the square above it, in `geo3d_texhdr_t.micro` so noclip's `fflags` hashes are unchanged; the ref and optimised GLSL (and GLES) and the HLSL fill mix the square in where `mml < 0`, sampled at full size. House of the Dead against MAME `hotdo`: 54,903 of 64,964 changed pixels nearer MAME at frame 1500 (MAE 3.15 → 0.65), 39,141 of 43,040 at 2100 (2.64 → 0.61). STF frames unchanged; `--verify-fill` 0 of 816 frames differ. | `set_camera {microtex:0}` for an A/B. HLSL compiled only on Windows. |
+| 2 | **Virtua Cop's second model table** (`15fc0db`) | The draw routines read `0x28693F0[g0*16]` past model 0x4D1: 17 more models (0x4D2–0x4E2), their materials in texture RAM (bit 23). | **Done** (Pinboard #1279). `model_table_t.past_from` / `past_off` (`vcop.h`: 0x4E3 entries, 0x4D2 on at 0x8693F0). `prepared_test` fills texture RAM as the game does (0x800 words to 0x4000 from data 0x81D3DE) and holds all 1251 to noclip master `9ca98e3`: entries `0x54d65fb9`, first records `0x73d0f0a7`, decode 1251 meshes / 61,429 records / 57,530 faces `0x777591fb`, headers 60,178 `0x08667b45`, triangles 100,885 `0xa4e8a47a`, bit 128 13,606 `0xad422024`. The §6 tables' vcop numbers are the first 0x4D2's at `aefb324`; the same probes give them exactly. | The object viewer has no texture RAM for vcop yet, so the 17 draw untextured there. |
+| 3 | **Object-viewer layers by the board key** (`b078c91`, merged as `4add039`) | An explorer rule for a free camera, not a board rule: each face keyed at its z-mode corner, rounded to `float_to_zval`'s bucket, a tie to the later face. It graded nearer MAME on Casino Night. | `geo3d_mesh_layers` is still the view-direction vote (§3). noclip's later fitted rules (its BUBBLEGUM #714–#758) cut Daytona's tire marks; take only `b078c91`. | Medium (~300 lines of JS). Optional. |
+| 4 | **DOA's texture RAM has no mips** (`bbdf98f`) | MAME leaves rows 768–1023 empty and still draws far walls. | Game frames follow texlod and are fine; the object viewer's screen-space LOD may sample empty rows on DOA meshes. | Check one DOA model at a distance first. |
+| 5 | **Per-pixel depth loses Daytona's start line** (noclip #755) | The line lies behind the road and is on top only by the sort. | Worth a line beside the depth-per-pixel option (`geo3d.h` ~392, #668): it is not the board, and here is a case it gets wrong. | Note. |
+
+Checked and not needed here: the mip chain "through the address the board samples it by" (`6bf2a71`; `game_render.h` already samples that way), skipping a runaway texture page (`fc849c2`; a guard for noclip's own decoder), coplanar ranking for game frames (m2-hle2 has the flat key and the eight windows), TGP op 0x36 (`eec3161`; m2-hle2 runs the microcode), Daytona's RAM models and Virtua Cop's lack of them (§6.8), geometrizer mode 3 planes (`geo3d_board_normal`), colour ramps, material tables and lights (the game computes them; m2-hle2 reads palette, luma and colorxlat RAM), DOA stage 11's line scroll (`tile_renderer.h`), and Daytona's rounding (`cvtri` follows AC). Model-table counts agree: VF2 5125, DOA 19330, FV 5413. noclip's `model1.c`/`model1_chips.cpp` are unchanged since `8ba11ec`, which `model1_sound.h` was derived from. The `.glb` export and the Cells tab are explorer features. A `.glb` of a live display-list frame would give exact game poses, which noclip cannot, but it is a feature, not a fix.
+
+### 7.3 Where m2-hle2 is ahead (for noclip)
+
+| # | What | m2-hle2 | noclip `0401280` | Action |
+|---|---|---|---|---|
+| 1 | i960 `cpysre` | MAME's sign | Reversed | Fixed on `idea-1277-cpysre` (7.1). |
+| 2 | `romset.js` in Node | — | Fails since `db3abc8` | Fixed on `idea-1277-cpysre` (7.1). |
+| 3 | Sound wasm | `3d283a3f`: BTST/BCHG/BCLR/BSET register form with D4–D7 (bit 11 set) is not the immediate form (`m68k_exec.h` ~959). | `board.wasm` from m2-hle2 `f797c4b` (`bdc27c8`) lacks only that. `model1.wasm` from `ab75571` (`8ba11ec`) lacks it and #1006 (AND Dn,<ea> is not EXG; ABCD/SBCD/NBCD/TAS/CHK). `board.c` still calls `sound_run(1)` per sample. | `tools/sound/build.sh` at current m2-hle2, then A/B one song per game. Whether any of noclip's drivers execute those opcodes is not verified. |
+| 4 | Copro port narrow stores (#1035) | A `stob`/`stos` to the TGP port pushes a whole word, its lane set and 0 elsewhere (`model2a.h:42-44`). | `doa.js` `makeBus` `write8`/`write16` read-modify-write through `read32`, which at the port pops a pending reply into the word. | Push `v << shift` without the read, on the COPRO and GEO ranges. Whether Virtua Cop stores narrow values there is not verified. |
+| 5 | TGP 0x36 graded before #661 | `tgp_alu_d` (`tgp.h` ~495): a word moved into d beside a float op survives it. | `courseGround` (`eec3161`) was graded against TGP microcode before that fix. | Replay its 4000 points through `tgp.h` (`g_tgp_tap`, `tools/grade-tgp.py`). |
+| 6 | DOA's copro in JS doubles | m2-hle2 runs DOA's real TGP program. | `doa.js` `Copro` uses host `Math.sin`/`cos`/`atan2`/`hypot`. | Grade its replies against m2-hle2's TGP (medium). |
+| 7 | i960 corners | `i960_round_ac` (ties to even); out-of-range `cvtri` gives 0x80000000; `addc`/`subc` use the carry. | `Math.round` (half up) in `roundr`/`cvtri`; out of range wraps (`v\|0`); `addc`/`subc` ignore the carry. | Small; none is known to be reached. `shrdi` and a NaN `cmpr` are already right. Don't copy m2-hle2's `fdivr` 0.0 (BUBBLEGUM §1.4). |
+| 8 | Games noclip cannot open | Sega Rally (prepared in noclip), Virtual-On, Dynamite Cop/Deka 2, Power Sled, Air Walkers, and the VF2 clones vf2a/vf2b/vf2o (`vf2.h:89-104`). | `games.js` knows only VF2's `epr-18385/18386`. | The VF2 clones share the data ROMs (model table 0xE0004, 5125 entries); their program addresses need finding. |
+
+Not applicable to noclip: the SHARC interpreter's rounding (#949) and RSQRTS ±0 (#946), since only Virtual-On runs it; `Fn_asin` (no port in noclip); `ret` status 7 and `flushreg` (noclip keeps frames in a JS array and takes no interrupts). `Fn_ld_glb_mat` (0x68) is sent only for the Tornado's shadow in STF's attract intro; not verified that noclip never draws it.
+
+### 7.4 The first pass's lists, now
+
+§2 (for noclip):
+
+| Row | Status at `0401280` |
+|---|---|
+| 1 Depth at the game's camera | Partly: `rankLayers` merged (`4add039`, `js/layers.js`), and STF sorts by the eight windows and a key pass (`99f26ca`). The half rule (`recede`/`nearMin`) is still there, and there is no plain flat-key mode for a board-camera view. |
+| 2 Checker phase | Open: `viewer.js` ~685 still uses `gl_FragCoord`, counted from the bottom. |
+| 3 Untextured transparent faces | Open: `model.js` ~491 sets transparency only on textured faces, so they draw solid. |
+| 4 Specular, solid ramp | Open: no specular. `uSolidRamp` is on for hotdp, hotdo, Daytona, vcop and vf2, not for STF or FV. |
+| 5 Motion blend angles | Open: `moves.js` `easeLength`/`chainSample` still ease per channel. |
+| 6 IK bases | Partly: since `125d779` `solveIK` adds `turnYXZ(m, blend)`. Not graded against `grade-pose`. |
+| 7 COP arithmetic | Open: `toBrad`/`toAngle` round where the firmware floors; host `sqrt`/`atan2`/`hypot`. |
+| 8 Afterimages | Open in the viewer: `zanzou.js` still has per-trail sims and no mirrored mask (`zanzou.js:41` ports `sharc_zanzou.h`'s slot record, not the shared ring). |
+| 9 SKY EYE links | Fixed from this side (7.1). noclip could still prefer `eye`/`ang` over `pos`. m2-hle2's links still carry no stage clock `t`. |
+| 10 Sound | Partly: `board.wasm` rebuilt (`bdc27c8`). See 7.3 row 3 for what remains. |
+
+Wording: the 2P music facts are in TECHNICAL.md's Music section already, the lintel's `surfaces` is gone (`99f26ca`), and the head aim is the board's (`bc703f3`, 527 frames against MAME). Still open: TECHNICAL.md ~4753 calls the bounded recede "a Sonic The Fighters rule", and `games.js` ~453 does not name FV's 0x1800000 bank.
+
+§3 (neither side):
+
+- **Texel snap**: the first pass was wrong about m2-hle2. Its fill does not snap at all; `sample_level` takes the raw uv (`game_render.h` ~639, 762, 924), at `330fe77` and now. noclip still rounds to 1/256 (`viewer.js` ~524). MAME truncates. Both are still open.
+- **Model-table length**: FV agrees (5413). STF is 5103 on both sides; the board's is 5104.
+- **`master_z_clip`**: open on both.
+- **Microtexture**: done in noclip (`16ffd72`); open here (7.2 row 1).
+- **Free-camera sort**: unblocked; see 7.2 row 3.
+
+§5: `vendor/noclip` is still at `2509729`. Every export the graders import still exists on noclip master, and grade-stages' one remaining omission (the cage shake) is still missing in noclip. The graders could not have been run against master until the `lang.js` fix (7.1) lands. Bump the submodule to a noclip commit with that fix, then run `grade-models`, `grade-stages` and `grade-pose`.
+
+---
+
+## 8. Third pass, 2026-10-22 (Pinboard #1458)
+
+m2-hle2 `016b0a0` (276 commits since `cd73efd`) against noclip `629adcd` (118 since `0401280`, 39 merges). noclip's span is the Animation and Cells tabs for the games it opened in #1340 (Sega Rally, Virtual-On, Dynamite Cop, Power Sled, Air Walkers), their music, and the fixes §7.3 asked for. m2-hle2's is wheels (Logitech, Fanatec, Daytona's force), the SDL3 and PS3 menus, replays with light guns, per-pixel depth, and Fighting Vipers' COP. Little of either touches what the other reads, which is why this pass is mostly the model tables.
+
+### 8.1 Done in this pass
+
+- **`vendor/noclip` bumped `2509729` → `629adcd`.** The graders import `romset.js` again (`27230aa`, §7.1). `grade-models`, `grade-pose` and `grade-stages` against it: see 8.4.
+- **Three model tables adopted, held to the explorer.** Sega Rally (`srallyc.h`: 1508 entries at data 0x864B40; the program reads `0x2864B40[n*16]` at 34 places), Dynamite Cop (`dynamcop.h`: 19432 at 0xD40000, `0x2D40000[n*16]`, one table for the five builds, 50 entries empty in 51 banks) and Air Walkers (`airwlkrs.h`: 2026 at 0x58DD50, the draw routine at 0x1E8D8). `prepared_test` holds all three, and the four Dynamite Cop clones' tables, to noclip's `readModelEntry`, `meshOffsetOf` and `decodeModel`: every entry, first record, textures-ROM read, header field, triangle and lighting normal. The numbers come from `tools/noclip-reads.mjs` (8.2); the model-table offsets, like noclip's, were confirmed in the program ROMs, not copied (§5 habit 2).
+- **`GEO3D_IA_MAX_VPS` 4096 → 8192.** Air Walkers' intro city (model 555) is one mesh of 5441 records; the board has no cap, it walks to the end record. noclip raised its own for the same model (`games.js` `maxVertexPairs: 8192`). The decoder's buffers are static, so the cost is memory, not time.
+- **A board rule the test walk had missed: the untextured transparent face is no face.** `model2rd.ipp`: "if it's translucent, there's nothing to render". `geo3d_decode_model` (the renderer) skips it, and noclip has since `e422917` (§2 row 3). `geo3d_mesh_reads`, the walk `prepared_test` hashes, counted it and emitted its triangles. No table held before this pass had one; Dynamite Cop's model 18017 has 40 (one header, 0x2000 set and 0x4000 clear, reused across them by a `tho` of 0), and the test came out 40 faces and 80 triangles over noclip. The walk now skips them after the z-sort step, as the renderer and noclip do. Frames are unchanged: the renderer already did this.
+- **The House of the Dead's header hash moved with noclip's microtexture bits.** Since `16ffd72` noclip's `faceFlags` carry the microtexture: 1024, the minimum LOD at bits 11–12, the square at 13–15. m2-hle2 keeps the same bits apart, in `geo3d_texhdr_t.micro` (§7.2 row 1), so the test now mixes `micro` into noclip's shape before hashing; hotd's header hash `0xcd3e0d51` → `0x8ce537bd`, every other number unchanged. The `geo3d.h` comment that said the explorer had no such bit is corrected.
+
+### 8.2 The explorer's reads as the test's oracle
+
+`tools/noclip-reads.mjs <set> [parent]` prints the `noclip_reads_t` initializer for a set, from a probed temporary copy of the pinned submodule's `model.js`, in the order `prepared_test`'s `decode_mix*` functions hash. The first line names the longest mesh (`GEO3D_IA_MAX_VPS` must cover it) and whether the game lights by the plane of A, B and C (`lighting.planeNormals`; Dynamite Cop does, like The House of the Dead). The last four numbers are the board's rule against noclip's (culled from one side, lit by a zero normal, …), which the test computes: leave them 0 and copy what it reports. `--per-model` prints one line per mesh, and `PREPARED_DUMP=1` makes the test print the same, so a total that disagrees is one `diff` from the mesh that caused it, which is how 18017 was found.
+
+Against `629adcd` the script reproduces every number the test had for `vcop`, `daytona` and `hotd` (the first two bit for bit; hotd's header hash as 8.1 says), which is also the check that the probes still sit where the explorer's decoder does. All five Dynamite Cop zips give one initializer (the clones take their data ROMs from `dynamcop.zip`, passed second).
+
+### 8.3 §7's lists, now
+
+§7.2 (for m2-hle2): rows 1 and 2 done (§7.2 says so); row 3 (object-viewer layers by the board key) still optional and not taken; row 4 (DOA's texture RAM without mips) and row 5 (the per-pixel depth note) unchanged. Nothing new in noclip's 118 commits is a board rule m2-hle2 lacks: `c980c5a` (the coprocessor's trig tables only where they are) and `3a09a85` (Power Sled's course checked against m2-hle2's own race) are noclip taking rules from here.
+
+§7.3 (for noclip):
+
+| # | What | At `629adcd` |
+|---|---|---|
+| 1 | i960 `cpysre` | Fixed (`81cafda`). |
+| 2 | `romset.js` in Node | Fixed (`27230aa`). |
+| 3 | Sound wasm | Rebuilt from m2-hle2 `cd73efd` (`10125e2`): the BTST register form is in. |
+| 4 | Copro port narrow stores | Fixed (`0c8527d`): `writeLane` pushes the word, no read. |
+| 5 | TGP 0x36 graded before #661 | Open. |
+| 6 | DOA's copro in JS doubles | Open. |
+| 7 | i960 corners | Fixed (`c216963`): ties to even (`roundEven`), out-of-range `cvtri` 0x80000000, `addc`/`subc` carry. |
+| 8 | Games noclip cannot open | Mostly closed: Sega Rally (`13b42f5`), Air Walkers (`b984610`), Virtual-On `vonj`/`vonu` (`bd9a57c`), Dynamite Cop's five builds (`e237586`), Power Sled (`49f403f`). Still closed: the VF2 clones vf2a/vf2b/vf2o. |
+
+§2 (for noclip): row 2 (checker phase) fixed, `d44d2ba` counts from the top; row 3 (untextured transparent faces) fixed, `e422917`; row 10 (sound) rebuilt. Still open: 1 (no plain flat-key mode for a board-camera view), 4 (no specular; `uSolidRamp` per game), 5 (motion blend per channel), 6 (IK bases not graded against `grade-pose`), 7 (`toAngle` in `motion.js` rounds half away from zero where the firmware floors; host `sqrt`/`atan2`/`hypot`), 8 (afterimages), 9 (a link's `pos` is applied before its `eye`/`ang`; m2-hle2's links carry no `pos`, so this is moot for them).
+
+§3 (neither side): texel snap open on both; `master_z_clip` open on both; microtexture done on both.
+
+New for noclip from m2-hle2's 276 commits, all Fighting Vipers' COP and none known to reach a noclip view: the atan2 coefficients read from the COP data ROM, FV's own table (`808c631e`, cop.md); COP 0x3A's bins at 1/16 unit in FV against STF's 1/8 (`0db6650a`); ops 0x79 and 0x7C–0x7E, the cage pieces (`625a5717`). noclip's `fvstages.js` places FV's stages without a COP, so none applies until it runs FV's cage code.
+
+### 8.4 The graders against `629adcd`
+
+Run from this branch's build (`016b0a0` plus the changes above), `$ROMS_DIR` in place, noclip `629adcd`:
+
+- **`grade-models`: 7 passed.** J = 1.000000 over 598728 triangles; 4404 of 4404 models exact, 1795005 of 1795005 corners (100%), 6.8 s.
+- **`grade-pose`: 8 passed** on the 328 board frames of `stf-tools/motion-pose.csv` (motions 278, 513; characters 6, 0). Op 0x62 rotation within 1.81e-6, position within 4.98e-9; op 0x6B limb rotations within 2.26e-6, positions within 7.86e-7; 2624 slots written. It needs `M2_STF_TOOLS` (or `--csv`) pointing at `ai/stf-tools`; without it the grader skips.
+- **`grade-stages --stages 0,1,4 --frames 300`: 12 passed, 1 failed.** South Island and Canyon Cruise exact: every draw an explorer part on one clock (10248 and 7680 draws), every object matrix in bufferram the firmware's (9956, 6654), the water's lumabase on frame_counter +0, Canyon Cruise's flight within 8.5e-5 at ages 32..332. The Flying Carpet: the flight within 3.92e-5, all 10866 matrices, but 9366 of 10866 draws exact: **the four posts (`cagePole`, model 582) are drawn 45° about Y off the explorer's place on one mark, mark 227 of the capture** (frame_counter 921; the same mark on a second capture), when the explorer yaws them to the camera's heading and the grader's billboard freedom does not cover them either. The default 180 frames never reach that mark, so `--stages 1` alone passes 4 of 4, and the earlier passes (§1.2, §7) would not have seen it. Nothing on noclip's side since `2509729` touched the carpet posts (`git log 2509729..629adcd -S cagePole -- js/display.js` is empty) and the emulator side is the base commit, so it is older than this pass on both. Open: which side the board agrees with at that mark (`grade-carpet` has MAME's camera for the rug; the posts would need the same).
+
+Two things the graders needed on the way:
+
+- **`tools/lib/noclip.mjs` now imports `romset.js` before any other explorer module.** noclip `629adcd` has an import cycle, `romset.js` → `powsled.js` → `display.js` → `romset.js`, and `powsled.js` evaluates `AT_EYE` from `display.js` at module load (its `BACKDROP` table). The explorer's `app.js` enters the cycle at `romset.js`, so the browser never sees it; `grade-pose` entered it at `display.js` (through `characters.js`) and failed with "Cannot access 'AT_EYE' before initialization". The one-line fix on noclip's side is to enter `BACKDROP`'s ops lazily (or import `AT_EYE` from a module outside the cycle); until then the loader picks the explorer's own order.
+- `grade-pose` finds the board CSV through `$M2_STF_TOOLS` or `--csv`; the worktree layout (`ai/.trees/m2-hle2/<branch>`) does not put `stf-tools` beside the repo.
+
+§5 holds. The habit this pass adds: **when a profile gains a model table, run `tools/noclip-reads.mjs` on it and add the case to `prepared_test`**; the table is then held to a second reader, and the first difference (8.1's untextured transparent face) is found at the mesh, not in a frame.

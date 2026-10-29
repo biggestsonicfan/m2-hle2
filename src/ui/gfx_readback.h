@@ -191,18 +191,32 @@ static inline bool gfx_readback_rgba8(sg_image img, int w, int h, uint8_t *out) 
  *
  * Kept separate from writing it because the browser build has nowhere to write:
  * there the encoded bytes are handed to JavaScript and turned into a Blob.
+ *
+ * gfx_encode_png writes the rows last first (miniz's flip), as the object
+ * viewer's shots always have been; gfx_encode_png_rows keeps them in order, so
+ * a top-row-first readback (the game's screenshot) stays the right way up.
  */
-static inline void *gfx_encode_png(const uint8_t *rgba, int w, int h, size_t *out_len) {
+static inline void *gfx_encode_png__rows(const uint8_t *rgba, int w, int h, size_t *out_len,
+                                         bool flip) {
     g_gfx_readback_err[0] = 0;
     *out_len = 0;
     size_t len = 0;
-    void  *png = tdefl_write_image_to_png_file_in_memory_ex((void *)rgba, w, h, 4, &len, 6, MZ_TRUE);
+    void  *png = tdefl_write_image_to_png_file_in_memory_ex((void *)rgba, w, h, 4, &len, 6,
+                                                           flip ? MZ_TRUE : MZ_FALSE);
     if (!png) {
         snprintf(g_gfx_readback_err, sizeof g_gfx_readback_err, "PNG encode failed");
         return NULL;
     }
     *out_len = len;
     return png;
+}
+
+static inline void *gfx_encode_png(const uint8_t *rgba, int w, int h, size_t *out_len) {
+    return gfx_encode_png__rows(rgba, w, h, out_len, true);
+}
+
+static inline void *gfx_encode_png_rows(const uint8_t *rgba, int w, int h, size_t *out_len) {
+    return gfx_encode_png__rows(rgba, w, h, out_len, false);
 }
 
 static inline void gfx_free_png(void *png) { if (png) mz_free(png); }

@@ -254,6 +254,33 @@ static inline void objview_cmd_shot_reply(const romset_t *rs, memory_bus_t *bus,
 
 /* ---- The model table ------------------------------------------------------ */
 
+/* objview_list's arguments against the ROM and the table: the quirks it lists
+ * from, with `count` cut to the table, or NULL once the refusal is in resp. */
+static inline const game_quirks_t *objview_list_quirks(const romset_t *rs, uint32_t first, uint32_t *count,
+                                                       char *resp, int cap) {
+    if (!rs || !rs->loaded || !rs->main_data || !rs->polygons) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no ROM loaded yet\"}");
+        return NULL;
+    }
+    if (!g_active_profile) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}");
+        return NULL;
+    }
+    const game_quirks_t *q = &g_active_profile->quirks;
+    if (first >= q->model_table_count) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
+                 first, q->model_table_count);
+        return NULL;
+    }
+    if (*count > q->model_table_count - first) *count = q->model_table_count - first;
+    if (*count > 4096) *count = 4096;
+    if (g_geo3d_dump_busy) {
+        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"another model decode is in flight\"}");
+        return NULL;
+    }
+    return q;
+}
+
 /*
  * How much geometry each model-table entry holds, over a range.
  *
@@ -268,26 +295,8 @@ static inline void objview_cmd_list(const char *req, const romset_t *rs, char *r
     json_get_u32(req, "count", &count);
     json_get_int(req, "nonempty_only", &nonempty_only);
 
-    if (!rs || !rs->loaded || !rs->main_data || !rs->polygons) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no ROM loaded yet\"}");
-        return;
-    }
-    if (!g_active_profile) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"no game profile\"}");
-        return;
-    }
-    const game_quirks_t *q = &g_active_profile->quirks;
-    if (first >= q->model_table_count) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"model %u is past the table's %u\"}",
-                 first, q->model_table_count);
-        return;
-    }
-    if (count > q->model_table_count - first) count = q->model_table_count - first;
-    if (count > 4096) count = 4096;
-    if (g_geo3d_dump_busy) {
-        snprintf(resp, (size_t)cap, "{\"ok\":false,\"error\":\"another model decode is in flight\"}");
-        return;
-    }
+    const game_quirks_t *q = objview_list_quirks(rs, first, &count, resp, cap);
+    if (!q) return;
 
     /* A private sink and the dump flag, for the reason the bridge's model dump
      * has them: nothing else must find the buffer it is drawing from emptied. */

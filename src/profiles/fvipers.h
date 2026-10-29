@@ -159,6 +159,8 @@ static inline void fvipers_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
     /* The COP reads its sine/cosine tables straight out of this ROM. */
     g_sharc_copro_rom      = rs->copro_data;
     g_sharc_copro_rom_size = rs->copro_data_size;
+    /* Its COP program's Fn_area_table_gen is not STF's (Pinboard #1353). */
+    g_sharc_area_fv        = true;
 
     if (rs->main_data && bus->main_data) {
         size_t n = rs->main_data_size < MAIN_DATA_SIZE ? rs->main_data_size : MAIN_DATA_SIZE;

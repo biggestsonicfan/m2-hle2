@@ -67,6 +67,9 @@ typedef enum {
     GAME_INPUT_P2_B1, GAME_INPUT_P2_B2, GAME_INPUT_P2_B3, GAME_INPUT_P2_B4,
     GAME_INPUT_P2_START, GAME_INPUT_P2_COIN,
     GAME_INPUT_SERVICE, GAME_INPUT_TEST,
+    /* A racing cabinet's four-speed lever, one button a gate (MAME's GEARS
+     * port): a press puts the lever there and it stays (io_5649.h). */
+    GAME_INPUT_GEAR_N, GAME_INPUT_GEAR_1, GAME_INPUT_GEAR_2, GAME_INPUT_GEAR_3, GAME_INPUT_GEAR_4,
     GAME_INPUT_COUNT
 } game_input_t;
 
@@ -131,6 +134,8 @@ typedef struct {
     uint32_t mesh_ptr_add;          /* 0 = board default 0x10 */
     uint32_t model_table_offset;    /* byte offset of model table within main_data */
     uint32_t model_table_count;     /* number of entries in the model table */
+    uint32_t model_table_past_from; /* entries from here on read at model_table_past_offset (0: none) */
+    uint32_t model_table_past_offset;
     model_layout_t model_layout;    /* the entry's shape (model_table.h); zero = 1995's */
     uint32_t camera_struct_addr;    /* RAM address of camera eye (x,y,z f32; 0 = no game camera) */
     /* Absolute RAM address of the camera angle word (low16 = pitch, high16 = yaw).
@@ -138,6 +143,7 @@ typedef struct {
      * FV keeps it separate at 0x515584. 0 = default to camera_struct_addr + 0xC. */
     uint32_t camera_angle_addr;
     bool     enable_68k_sound;      /* false = skip M68K/SCSP init (use when sound driver not yet ported) */
+    bool     model1_sound;          /* the sound board is a Model 1 one: MultiPCMs, not the SCSP (model1_sound.h) */
 
     /* Real interrupt delivery (board IRQ controller in irq_timer.h).
      * irq_handler[pin] = i960 address of the dispatch handler for IRQ pin 0..3
@@ -201,9 +207,57 @@ typedef struct {
 
     /* The I/O board is a 315-5649 with a wheel, pedals and a gear lever
      * (io_5649.h): input_attach serves its analog mux and gearbox, driven by
-     * the held bits named in `wheel`. */
+     * the held bits named in `wheel`; `view` are the cabinet's view buttons
+     * (VR1-VR4), named so in the Controls window. `bike`: a motorbike's
+     * (MAME manxtt: Motor Raid), channel 0 the throttle, 1 the brake and 2
+     * the bank (LEFT / RIGHT lean it, reversed), IN1 a button port and no
+     * lever. */
     bool     io_5649;
-    struct { uint32_t left, right, accel, brake, shift_up, shift_down; } wheel;
+    struct { uint32_t left, right, accel, brake, shift_up, shift_down, view[4]; bool bike; } wheel;
+    /* A 315-5649 whose analog channels are not Sega Rally's (io_5649.h,
+     * IO5649_AN_*: a wheel, a ski, a bat, a gun stick, MAME's an_port
+     * callbacks): what each channel reads, 0 none (0xFF, as MAME's unwired
+     * pot). Any set puts IN1 and IN2 as plain button ports (held bits 8-15,
+     * 16-23, active low but for `in_high`), `up` / `down` walk the second
+     * axis, and `press` swing a pot full scale (Dynamite Baseball's bats).
+     * The steer, pedals and guns are `wheel`'s and `gun`'s. */
+    struct { uint8_t ch[8]; uint32_t in_high, up, down, press[2]; } analog;
+
+    /* The I/O board is a Model 1 one behind a dual-port RAM (model1io.h: its
+     * Z80 runs the program in the set's iocpu region). The wheel, pedals and
+     * lever are io_5649.h's model of them, named in `wheel`; `vr4` is the held
+     * bit of the button IN1 bit 0 reads. */
+    bool     model1_io;
+    uint32_t model1_io_vr4;
+    /* The Advanced Model 1 I/O board (model1io.h, model1io_install_advanced;
+     * Virtua Cop): its own Z80 map and an FPGA that reads `lightgun`'s guns.
+     * Not model1_io, which is Daytona's wheel board. */
+    bool     model1_io2;
+
+    /* A four-player cabinet on the 315-5649 (MAME model2a_airwlkrs_state):
+     * port F bit 7 picks the side IN1 / IN2 and IN0's start bits answer for,
+     * players 1 and 2 or 3 and 4 (input.h, input_attach_sides). */
+    bool     four_player_sides;
+
+    /* Two light guns on the 315-5649's second serial channel (lightgun.h):
+     * input_attach serves their positions, off-screen bits and triggers. Each
+     * gun's held bits (its pad walks it; reload is the shot off the screen)
+     * and its A/D range, MAME's PORT_MINMAX and default. */
+    bool     lightgun;
+
+    /* Power Sled's 315-5649 (input.h input_attach_sled): each rider's two
+     * pedals on A/D channels 1 and 3 (P1 right, left) and 5 and 7 (P2), and
+     * port E's Cancel Network Check switch (bit 1). The held bits that press
+     * them, and what a right and a left pedal read up and down. */
+    bool     sled;
+    struct {
+        uint32_t p1_left, p1_right, p2_left, p2_right, cancel_net;
+        uint8_t  right_up, right_down, left_up, left_down;
+    } pedal;
+    struct {
+        uint32_t up, down, left, right, trigger, reload;
+        int      x_min, x_max, x_rest, y_min, y_max, y_rest;
+    } gun[2];
 
     /* Charge the i960 what the board's caches and wait states cost on top of
      * MAME's per-opcode table (i960_timing.h). The timers and the vblank count
@@ -226,6 +280,19 @@ typedef int (*game_load_fn)(struct romset *rs,
 typedef void (*game_install_fn)(const struct romset *rs,
                                 struct i960_cpu *cpu,
                                 struct memory_bus *bus);
+
+/* Settings a blank battery lacks and the board needs, into bus->back. */
+typedef void (*game_backup_fn)(const struct romset *rs, struct memory_bus *bus);
+
+/* A cabinet the game's colour tables can be built for (core/cabinet_picture.h):
+ * Daytona's CABINET setting, read at boot, picks Twin's or Deluxe's. */
+typedef struct {
+    const char *id;       /* "twin": what the front ends store */
+    const char *label;    /* "Twin" */
+} game_cabinet_t;
+/* Cabinet `which` (an index into the profile's cabinets)'s colour tables, as
+ * the game builds them at boot: COLORXLAT_SIZE bytes, colorxlat's layout. */
+typedef void (*game_cabinet_xlat_fn)(int which, uint8_t *colorxlat);
 
 /* Who fights whom, and where, as a replay labels it (core/replay.h). Read off
  * the board by the profile; -1 / NULL where it does not know. A one-player
@@ -280,6 +347,21 @@ typedef const char *(*game_native_play_fn)(const game_native_round_t *rounds, in
  * session is recorded while it is. */
 typedef bool (*game_in_play_fn)(struct memory_bus *bus);
 
+/* A racing game's dashboard (Pinboard #1361): what its cabinet's meters show,
+ * for a host's wheel to show too (ui/fanatec.h: a Fanatec wheel's rev LEDs and
+ * display). Read from the game's RAM on the host thread with mem_peek*, never
+ * the board's own reads: it changes no frame. */
+typedef struct {
+    bool on;          /* a car the player drives is on the track */
+    int  speed;       /* km/h, as the cabinet's meter shows it; -1 not known */
+    int  gear;        /* 0 neutral, 1.. a gear; -1 the game has none */
+    int  rpm;         /* the engine; 0 not known */
+    int  rpm_lo;      /* where the rev lights start, */
+    int  rpm_max;     /* ...and where the engine's limiter cuts in (all lit) */
+} game_dash_t;
+
+typedef void (*game_dash_fn)(struct memory_bus *bus, game_dash_t *out);
+
 /* A linked cabinet's role (Pinboard #969): what the room makes this machine's
  * board on a comm-board link (VIRTUAL-ON-PS3.md, "RPCN"). */
 typedef enum { GAME_LINK_ALONE, GAME_LINK_MASTER, GAME_LINK_SLAVE } game_link_role_t;
@@ -304,6 +386,15 @@ typedef struct game_profile {
 
     game_load_fn      load_fn;
     game_install_fn   install_fn;
+    /* install_fn calls it after mem_init has put the battery back; a frontend
+     * that hands the battery to the board after install_fn (libretro's .srm,
+     * backup_ram_reload) calls it again. NULL: none. */
+    game_backup_fn    backup_fn;
+    /* The cabinets the Picture menu can show live (core/cabinet_picture.h).
+     * NULL: the game has one picture. */
+    const game_cabinet_t *cabinets;
+    int                   cabinet_count;
+    game_cabinet_xlat_fn  cabinet_xlat_fn;
 
     hle_hook_entry_t  hooks[HLE_HOOK_TABLE_MAX];
     size_t            hook_count;
@@ -326,13 +417,40 @@ typedef struct game_profile {
     game_native_play_fn native_play;
     game_in_play_fn     in_play;
 
+    /* The car's meters (game_dash_t). NULL: the game has none. */
+    game_dash_fn        dash;
+
     /* The cabinet role for a comm-board link (net/comm_role.h). NULL: the game
      * has no link. */
     game_link_role_fn   link_role;
 
+    /* A GGPO match plays the link: both cabinets on each machine, one player
+     * on each (core/emu_twin.h). A role outside backup RAM (Power Sled's unit,
+     * the program's bytes) must be a savestate extra, as it swaps with the
+     * board. */
+    bool                link_twin;
+
+    /* Where the test menu sets the cabinet to play alone, in the menu's own
+     * words, for the question a MASTER alone on the link asks
+     * (core/link_check.h). NULL: the question says it in general. */
+    const char         *link_setting;
+
+    /* The game plays on a ring of one cabinet, so that question offers the
+     * virtual TOSlink cable. Daytona does; Virtual-On wants two nodes and
+     * calls one illegal. */
+    bool                link_cable;
+
+    /* A linked game one board cannot play (Power Sled's ride needs a Main):
+     * with nothing else on the board it runs both cabinets, the player's live
+     * and this working the other's controls (emu_ggpo.h, SOLO). Returns the
+     * other cabinet's held mask from its RAM and the player's held keys.
+     * Needs link_twin. NULL: the board runs alone. */
+    uint32_t          (*link_solo)(struct memory_bus *bus, uint32_t held);
+
     /* A prepared profile (registry.h, g_prepared_profiles): the set's ROMs and
      * what is known of its data, with no board to run it yet. Says what the
-     * board lacks; NULL for a runnable profile. */
+     * board lacks; NULL for a runnable profile, or what a runnable one still
+     * lacks (Daytona's sound board). */
     const char         *preliminary;
 } game_profile_t;
 
@@ -362,7 +480,8 @@ static inline bool profile_runs_set(const game_profile_t *p, const char *set) {
 /* The quirks' model table as the board reads it (model_table.h). No quirks:
  * an empty table. */
 static inline model_table_t profile_model_table(const game_quirks_t *q) {
-    return q ? model_table_make(q->model_table_offset, q->model_table_count, q->model_layout)
+    return q ? model_table_past(model_table_make(q->model_table_offset, q->model_table_count, q->model_layout),
+                                q->model_table_past_from, q->model_table_past_offset)
              : model_table_make(0, 0, (model_layout_t)MODEL_LAYOUT_1995);
 }
 

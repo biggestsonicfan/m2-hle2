@@ -12,7 +12,8 @@
  * through the browser's layout map where it has one, so that key reads "W" on
  * AZERTY.
  *
- * Kept in this origin's localStorage under 'm2hle.keys'.
+ * Kept in this origin's localStorage under 'm2hle.keys', or 'm2hle.keys.<game>'
+ * for a game with a layout of its own (m2hleGame.keys: the racing games).
  *
  * This script loads BEFORE m2hle-tools.js, so its window capture listener runs
  * first. It has to: the tools listener stops every key aimed at a panel (so
@@ -32,6 +33,10 @@ m2hleLang.add({
     'keys.act.start': 'Start', 'keys.act.coin': 'Coin', 'keys.act.pause': 'Pause',
     'keys.sub.macros': 'Macros: one press holds several buttons',
     'keys.sub.page': 'The page: offline only, as the button beside the menu',
+    'keys.act.service': 'Service', 'keys.act.test': 'Test',
+    'keys.act.gearn': 'Neutral', 'keys.act.gear1': '1st gear', 'keys.act.gear2': '2nd gear',
+    'keys.act.gear3': '3rd gear', 'keys.act.gear4': '4th gear',
+    'keys.sub.cab': 'The cabinet: player 1 only',
     'keys.none': 'Not set',
     'keys.remove': 'Remove',
     'keys.remove.from': 'Remove {key} from {action}',
@@ -48,6 +53,10 @@ m2hleLang.add({
     'keys.act.start': 'スタート', 'keys.act.coin': 'コイン', 'keys.act.pause': 'ポーズ',
     'keys.sub.macros': 'マクロ：1回押すと複数のボタンを同時に押します',
     'keys.sub.page': 'ページ：オフライン時のみ。メニュー横のボタンと同じです',
+    'keys.act.service': 'サービス', 'keys.act.test': 'テスト',
+    'keys.act.gearn': 'ニュートラル', 'keys.act.gear1': '1速', 'keys.act.gear2': '2速',
+    'keys.act.gear3': '3速', 'keys.act.gear4': '4速',
+    'keys.sub.cab': '筐体：プレイヤー1のみ',
     'keys.none': '未設定',
     'keys.remove': '削除',
     'keys.remove.from': '{action}から{key}を削除',
@@ -62,7 +71,7 @@ m2hleLang.add({
 
 const m2hleKeys = (() => {
   const $ = (id) => document.getElementById(id);
-  const STORE = 'm2hle.keys';
+  const STORE = m2hleGame.keys ? 'm2hle.keys.' + m2hleGame.id : 'm2hle.keys';
   const MAX_BINDS = 3;
 
   /* The rows of the panel; `act` is the player-1 GAME_INPUT_* index (`acts` for a
@@ -84,22 +93,36 @@ const m2hleKeys = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* The cabinet's own switches, player 1's tab only: the board's Service and
+     * Test, and a racing game's gear buttons (m2hleGame.gears), one per gate of
+     * the lever (src/board/io_5649.h). Unbound until the player binds them. */
+    { id: 'service', act: 20, cab: true },
+    { id: 'test',    act: 21, cab: true },
+    { id: 'gearn',   act: 22, cab: true, gears: true },
+    { id: 'gear1',   act: 23, cab: true, gears: true },
+    { id: 'gear2',   act: 24, cab: true, gears: true },
+    { id: 'gear3',   act: 25, cab: true, gears: true },
+    { id: 'gear4',   act: 26, cab: true, gears: true },
     /* The page's Pause (m2hle-page.js), not a game button: it holds nothing. */
     { id: 'pause', acts: [],        page: true },
-  ];
+  ].filter((a) => !a.gears || m2hleGame.gears);
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   for (const a of ACTIONS) a.label = m2hleGame.labels[a.id] || a.label || m2hleLang.t('keys.act.' + a.id);
   const P2_OFFSET = 10;
 
-  /* The desktop build's keys (src/board/input.h), which are MAME's. */
+  /* The desktop build's keys (src/board/input.h), which are MAME's and
+   * m2emulator's, and a game's own over them (m2hleGame.keys). */
   const DEFAULTS = {
     p1: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
           b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'],
-          pk: [], pb: [], kb: [], pkb: [], pause: ['KeyP', 'Pause'] },
+          pk: [], pb: [], kb: [], pkb: [], service: ['F1', 'Digit9'], test: ['F2'],
+          gearn: [], gear1: [], gear2: [], gear3: [], gear4: [], pause: ['KeyP', 'Pause'] },
     p2: { up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'],
           b1: ['Delete'], b2: ['End'], b3: ['PageDown'], b4: ['Home'], start: ['Digit2'], coin: ['Digit6'],
-          pk: [], pb: [], kb: [], pkb: [], pause: [] },
+          pk: [], pb: [], kb: [], pkb: [], service: [], test: [],
+          gearn: [], gear1: [], gear2: [], gear3: [], gear4: [], pause: [] },
   };
+  for (const p of ['p1', 'p2']) Object.assign(DEFAULTS[p], (m2hleGame.keys || {})[p]);
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
   let binds = clone(DEFAULTS);
@@ -151,7 +174,7 @@ const m2hleKeys = (() => {
     let m = 0;
     for (const p of ['p1', 'p2']) {
       const shift = p === 'p2' ? P2_OFFSET : 0;
-      for (const a of ACTIONS) if (binds[p][a.id].includes(code)) m |= a.mask << shift;
+      for (const a of ACTIONS) if (!(a.cab && shift) && binds[p][a.id].includes(code)) m |= a.mask << shift;
     }
     return m >>> 0;
   }
@@ -185,25 +208,27 @@ const m2hleKeys = (() => {
 
   /* Keys aimed at the page's own panels are theirs (and m2hle-tools.js keeps them
    * from the emulator); so are shortcuts with Ctrl, Alt or the system key. */
-  const PANELS = '#drawer, #online, #controls, #touch-edit, #menu, input, textarea, select';
+  const PANELS = '#drawer, #online, #controls, #touch-edit, #link-check, #menu, input, textarea, select';
   const inPanel = (e) => e.target instanceof Element && e.target.closest(PANELS);
 
-  function onKey(e) {
-    if (listening && e.type === 'keydown') {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      if (e.code === 'Escape' || !e.code) { stopListening(); return; }
-      if (listening.id === 'pause') unbindGame(e.code);
-      else unbindPause(e.code);
-      const list = binds[listening.player][listening.id];
-      if (!list.includes(e.code)) {
-        if (list.length >= MAX_BINDS) list.shift();
-        list.push(e.code);
-        save();
-      }
-      stopListening();
-      return;
+  /* The key pressed while listening: bound to the action listened for. */
+  function captureKey(e) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.code === 'Escape' || !e.code) { stopListening(); return; }
+    if (listening.id === 'pause') unbindGame(e.code);
+    else unbindPause(e.code);
+    const list = binds[listening.player][listening.id];
+    if (!list.includes(e.code)) {
+      if (list.length >= MAX_BINDS) list.shift();
+      list.push(e.code);
+      save();
     }
+    stopListening();
+  }
+
+  function onKey(e) {
+    if (listening && e.type === 'keydown') { captureKey(e); return; }
     if (listening) { e.preventDefault(); e.stopImmediatePropagation(); return; }   /* the key-up of the captured key */
 
     if (e.type === 'keyup') {
@@ -211,6 +236,11 @@ const m2hleKeys = (() => {
       if (down.delete(e.code)) recompute();
       return;
     }
+    keyDown(e);
+  }
+
+  /* A key pressed outside the panels: the pause, or a game key. */
+  function keyDown(e) {
     if (inPanel(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     if (isPause(e.code)) {
       e.preventDefault();
@@ -239,6 +269,64 @@ const m2hleKeys = (() => {
     render();
   }
 
+  /* The heading that starts a's part of the list, if one does: the macros, the
+   * cabinet's buttons, the page's keys. */
+  function subOf(a) {
+    if (a.macro && a === ACTIONS.find((x) => x.macro)) return 'keys.sub.macros';
+    if (a.cab && a === ACTIONS.find((x) => x.cab)) return 'keys.sub.cab';
+    if (a.page) return 'keys.sub.page';
+    return null;
+  }
+
+  function subRow(key) {
+    const sub = document.createElement('li');
+    sub.className = 'pad-sub';
+    sub.textContent = m2hleLang.t(key);
+    return sub;
+  }
+
+  /* An action's row: its name, its keys (a click removes one) and Add. */
+  function keyRow(a) {
+    const tr = document.createElement('li');
+    tr.className = 'pad-row';
+    tr.id = 'key-row-' + a.id;
+    const name = document.createElement('span');
+    name.className = 'pad-name';
+    name.textContent = a.label;
+    tr.appendChild(name);
+
+    const chips = document.createElement('span');
+    chips.className = 'pad-chips';
+    const list = binds[player][a.id];
+    if (list.length === 0) {
+      const none = document.createElement('span');
+      none.className = 'status';
+      none.textContent = m2hleLang.t('keys.none');
+      chips.appendChild(none);
+    }
+    list.forEach((code, i) => {
+      const chip = document.createElement('button');
+      chip.className = 'pad-chip';
+      chip.type = 'button';
+      chip.title = m2hleLang.t('keys.remove');
+      chip.setAttribute('aria-label', m2hleLang.t('keys.remove.from', { key: keyName(code), action: a.label }));
+      m2hlePrompts.chip(chip, m2hlePrompts.key(code, keyName(code)), keyName(code));
+      chip.addEventListener('click', () => { list.splice(i, 1); save(); release(); render(); });
+      chips.appendChild(chip);
+    });
+    tr.appendChild(chips);
+
+    const add = document.createElement('button');
+    add.className = 'tool pad-add';
+    add.type = 'button';
+    const on = listening && listening.player === player && listening.id === a.id;
+    add.textContent = m2hleLang.t(on ? 'keys.press' : 'keys.add');
+    add.setAttribute('aria-pressed', String(!!on));
+    add.addEventListener('click', () => listen(a.id));
+    tr.appendChild(add);
+    return tr;
+  }
+
   function render() {
     const rows = $('key-rows');
     if (!rows || $('controls').hidden) return;
@@ -248,56 +336,10 @@ const m2hleKeys = (() => {
     }
     rows.textContent = '';
     for (const a of ACTIONS) {
-      if (a.macro && a === ACTIONS.find((x) => x.macro)) {
-        const sub = document.createElement('li');
-        sub.className = 'pad-sub';
-        sub.textContent = m2hleLang.t('keys.sub.macros');
-        rows.appendChild(sub);
-      }
-      if (a.page) {
-        const sub = document.createElement('li');
-        sub.className = 'pad-sub';
-        sub.textContent = m2hleLang.t('keys.sub.page');
-        rows.appendChild(sub);
-      }
-      const tr = document.createElement('li');
-      tr.className = 'pad-row';
-      tr.id = 'key-row-' + a.id;
-      const name = document.createElement('span');
-      name.className = 'pad-name';
-      name.textContent = a.label;
-      tr.appendChild(name);
-
-      const chips = document.createElement('span');
-      chips.className = 'pad-chips';
-      const list = binds[player][a.id];
-      if (list.length === 0) {
-        const none = document.createElement('span');
-        none.className = 'status';
-        none.textContent = m2hleLang.t('keys.none');
-        chips.appendChild(none);
-      }
-      list.forEach((code, i) => {
-        const chip = document.createElement('button');
-        chip.className = 'pad-chip';
-        chip.type = 'button';
-        chip.title = m2hleLang.t('keys.remove');
-        chip.setAttribute('aria-label', m2hleLang.t('keys.remove.from', { key: keyName(code), action: a.label }));
-        chip.textContent = keyName(code) + ' ×';
-        chip.addEventListener('click', () => { list.splice(i, 1); save(); release(); render(); });
-        chips.appendChild(chip);
-      });
-      tr.appendChild(chips);
-
-      const add = document.createElement('button');
-      add.className = 'tool pad-add';
-      add.type = 'button';
-      const on = listening && listening.player === player && listening.id === a.id;
-      add.textContent = m2hleLang.t(on ? 'keys.press' : 'keys.add');
-      add.setAttribute('aria-pressed', String(!!on));
-      add.addEventListener('click', () => listen(a.id));
-      tr.appendChild(add);
-      rows.appendChild(tr);
+      if (a.cab && player !== 'p1') continue;
+      const sub = subOf(a);
+      if (sub) rows.appendChild(subRow(sub));
+      rows.appendChild(keyRow(a));
     }
     const clash = clashes();
     $('key-clash').hidden = !clash;
@@ -328,9 +370,12 @@ const m2hleKeys = (() => {
     }
     $('key-reset').addEventListener('click', () => { binds = clone(DEFAULTS); save(); release(); stopListening(); });
     /* The panel's Close button, the Controls button and Escape all go through
-     * m2hlePad.toggle; this hears about it by watching the panel. */
-    new MutationObserver(() => { if ($('controls').hidden) listening = null; render(); })
-      .observe($('controls'), { attributes: true, attributeFilter: ['hidden'] });
+     * m2hlePad.toggle, and its tabs hide this section; this hears about both by watching. */
+    const hiddenWatch = new MutationObserver(() => {
+      if ($('controls').hidden || $('key-section').hidden) listening = null;
+      render();
+    });
+    for (const id of ['controls', 'key-section']) hiddenWatch.observe($(id), { attributes: true, attributeFilter: ['hidden'] });
     if (navigator.keyboard && navigator.keyboard.getLayoutMap) {
       navigator.keyboard.getLayoutMap().then((m) => { layout = m; render(); }).catch(() => {});
     }

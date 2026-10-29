@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include "ps3ui.h"
 #include "ps3ui_layout.h"
+#include "input_prompts.h"
 
 static float ps3ui__fall(float d, float s, float p)
 {
@@ -1087,14 +1088,16 @@ static float ps3ui__line_art_dist(int which, float x, float y)
         float d = ps3ui__seg_dist(x, y, -20.0f, 134.15f, 207.04f, 3.43f);
         return fminf(d, ps3ui__seg_dist(x, y, 207.04f, 3.43f, 207.04f, -10.0f));
     }
-    /* ring_line: three circles, joined to a rail down the left edge */
-    float d = fabsf(hypotf(x - 96.88f, y - 46.72f) - 42.41f);
-    d = fminf(d, fabsf(hypotf(x - 170.87f, y - 45.76f) - 19.93f));
-    d = fminf(d, fabsf(hypotf(x - 153.84f, y - 104.73f) - 33.52f));
-    d = fminf(d, ps3ui__seg_dist(x, y, 3.65f, 98.8f, 3.65f, 200.9f));
-    d = fminf(d, ps3ui__seg_dist(x, y, 3.65f, 98.8f, 58.09f, 67.95f));
-    d = fminf(d, ps3ui__seg_dist(x, y, 3.65f, 190.9f, 121.86f, 123.0f));
-    return fminf(d, ps3ui__seg_dist(x, y, 192.62f, 32.87f, 223.03f, 24.12f));
+    /* ring_line: three circles round the pad_ps3 diagram's d-pad, SELECT and left
+     * stick (ps3ui__paint_pad), the outer two joined at 30 degrees to a rail down
+     * the left edge, SELECT on to slant_line's start */
+    float d = fabsf(hypotf(x - 107.6f, y - 42.2f) - 35.0f);
+    d = fminf(d, fabsf(hypotf(x - 163.7f, y - 29.0f) - 13.0f));
+    d = fminf(d, fabsf(hypotf(x - 153.8f, y - 81.8f) - 24.0f));
+    d = fminf(d, ps3ui__seg_dist(x, y, 3.65f, 102.2f, 3.65f, 200.9f));
+    d = fminf(d, ps3ui__seg_dist(x, y, 3.65f, 102.2f, 77.3f, 59.7f));
+    d = fminf(d, ps3ui__seg_dist(x, y, 3.65f, 168.5f, 133.0f, 93.8f));
+    return fminf(d, ps3ui__seg_dist(x, y, 176.65f, 30.1f, 200.0f, 32.0f));
 }
 
 static void ps3ui__paint_line_art(ps3ui_image_t *im, int which)
@@ -1207,285 +1210,67 @@ static void ps3ui__paint_pad_pla(ps3ui_image_t *im)
         }
 }
 
+/* ---- input prompts (Kenney's, input_prompts.h) ----------------------------- */
+
+/* Append prompt `id` to a path, its 64x64 canvas scaled by s and moved by (tx, ty). */
+static void ps3ui__prompt_path(ps3ui_path_t *p, int id, float s, float tx, float ty)
+{
+    const input_prompt_t *ip = &input_prompts[id];
+    for (int i = 0; i < ip->n;) {
+        int op = (int)ip->d[i++];
+        const float *v = &ip->d[i];
+        if (op == INPUT_PROMPT_QUAD) {
+            ps3ui_path_quad(p, tx + v[0] * s, ty + v[1] * s, tx + v[2] * s, ty + v[3] * s);
+            i += 4;
+        } else {
+            if (op == INPUT_PROMPT_MOVE)
+                ps3ui_path_move(p, tx + v[0] * s, ty + v[1] * s);
+            else
+                ps3ui_path_line(p, tx + v[0] * s, ty + v[1] * s);
+            i += 2;
+        }
+    }
+}
+
+/* A prompt as a glyph: its 48-unit icon square (8..56) filling the 48px sprite
+ * less a 2px margin, the size the PS3 font's button discs had. */
+static void ps3ui__paint_prompt(ps3ui_image_t *im, int id)
+{
+    const float s = 44.0f / 48.0f;
+    ps3ui_path_t p;
+    ps3ui_path_reset(&p);
+    ps3ui__prompt_path(&p, id, s, 24.0f - 32.0f * s, 24.0f - 32.0f * s);
+    ps3ui_path_fill(im, &p, input_prompts[id].rgb, 1.0f);
+}
+
 /* ---- the controller diagram (pad_ps3) -------------------------------------- */
 
-/* A line drawing of the pad: a black body, grey buttons and sticks, and 1px
- * grey detail lines. Everything but the face buttons, select, start and the
- * PS button is drawn for the left half and mirrored about x = 173.5.
- * Positions are measured off the sprite's own lines. */
-#define PS3UI__PAD_M 347.0f
-
-/* A stroke: a segment (a,b)-(c,d), or an arc (arc=1: centre a,b, radius c,
- * degrees d..e, y down). */
-typedef struct { int arc; float a, b, c, d, e; } ps3ui__pad_line_t;
-
-static float ps3ui__pad_line_dist(const ps3ui__pad_line_t *l, float x, float y)
-{
-    if (!l->arc)
-        return ps3ui__seg_dist(x, y, l->a, l->b, l->c, l->d);
-    float dx = x - l->a, dy = y - l->b, th = atan2f(dy, dx) * 57.29578f;
-    while (th < l->d) th += 360.0f;
-    while (th >= l->d + 360.0f) th -= 360.0f;
-    if (th <= l->e)
-        return fabsf(hypotf(dx, dy) - l->c);
-    float x0 = l->a + l->c * cosf(l->d / 57.29578f), y0 = l->b + l->c * sinf(l->d / 57.29578f);
-    float x1 = l->a + l->c * cosf(l->e / 57.29578f), y1 = l->b + l->c * sinf(l->e / 57.29578f);
-    return fminf(hypotf(x - x0, y - y0), hypotf(x - x1, y - y1));
-}
-
-/* Max-combine a stroke's coverage (half width hw) into m, and its mirror image. */
-static void ps3ui__pad_stroke(float *m, int w, int h, ps3ui__pad_line_t l, float hw, int mirror)
-{
-    for (int k = 0; k <= mirror; k++) {
-        if (k) {
-            if (l.arc) {
-                float d = l.d;
-                l.a = PS3UI__PAD_M - l.a;
-                l.d = 180.0f - l.e;
-                l.e = 180.0f - d;
-            } else {
-                l.a = PS3UI__PAD_M - l.a;
-                l.c = PS3UI__PAD_M - l.c;
-            }
-        }
-        float bx0, by0, bx1, by1;
-        if (l.arc) { bx0 = l.a - l.c; bx1 = l.a + l.c; by0 = l.b - l.c; by1 = l.b + l.c; }
-        else { bx0 = fminf(l.a, l.c); bx1 = fmaxf(l.a, l.c); by0 = fminf(l.b, l.d); by1 = fmaxf(l.b, l.d); }
-        int x0 = (int)floorf(bx0 - hw - 1.0f), x1 = (int)ceilf(bx1 + hw + 1.0f);
-        int y0 = (int)floorf(by0 - hw - 1.0f), y1 = (int)ceilf(by1 + hw + 1.0f);
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > w) x1 = w;
-        if (y1 > h) y1 = h;
-        for (int y = y0; y < y1; y++)
-            for (int x = x0; x < x1; x++) {
-                int hit = 0;
-                for (int j = 0; j < 4; j++)
-                    for (int i = 0; i < 4; i++)
-                        hit += ps3ui__pad_line_dist(&l, (float)x + 0.125f + 0.25f * (float)i,
-                                                    (float)y + 0.125f + 0.25f * (float)j) < hw;
-                float c = (float)hit / 16.0f;
-                if (c > m[y * w + x])
-                    m[y * w + x] = c;
-            }
-    }
-}
-
-static void ps3ui__pad_strokes(float *m, int w, int h, const ps3ui__pad_line_t *l, int n, float hw, int mirror)
-{
-    for (int i = 0; i < n; i++)
-        ps3ui__pad_stroke(m, w, h, l[i], hw, mirror);
-}
-
-/* A closed polygon from a half list of points, and its mirror image. */
-static void ps3ui__pad_poly(ps3ui_path_t *p, const float (*pt)[2], int n)
-{
-    ps3ui_path_move(p, pt[0][0], pt[0][1]);
-    for (int i = 1; i < n; i++)
-        ps3ui_path_line(p, pt[i][0], pt[i][1]);
-    ps3ui_path_move(p, PS3UI__PAD_M - pt[n - 1][0], pt[n - 1][1]);
-    for (int i = n - 2; i >= 0; i--)
-        ps3ui_path_line(p, PS3UI__PAD_M - pt[i][0], pt[i][1]);
-}
-
-static void ps3ui__pad_ink(ps3ui_image_t *im, float *m, uint32_t rgb)
-{
-    float c[3];
-    ps3ui_rgb_hex(rgb, c);
-    for (int i = 0; i < im->w * im->h; i++)
-        ps3ui_image_over(im, i % im->w, i / im->w, c, m[i]);
-    memset(m, 0, sizeof(float) * (size_t)im->w * (size_t)im->h);
-}
-
-#define PS3UI__N(a) ((int)(sizeof(a) / sizeof((a)[0])))
-
-/* the face buttons' centres: triangle, square, circle, cross */
-static const float ps3ui__pad_face[4][2] = { { 277.5f, 88.0f }, { 248.0f, 117.8f }, { 307.3f, 117.8f }, { 277.5f, 147.5f } };
-
-static void ps3ui__pad_body(ps3ui_image_t *im)
-{
-    const float M = PS3UI__PAD_M, D2R = 0.01745329f;
-    ps3ui_path_t p;
-
-    /* the body: the left half's outline from the top middle, down round the
-     * grip and up round the stick's housing, then its mirror image */
-    static const float body[][2] = {
-        { 120.4f, 42.2f }, { 110.4f, 35.0f }, { 107.8f, 30.9f }, { 103.8f, 26.4f }, { 103.9f, 16.9f },
-        { 105.8f, 12.4f }, { 105.9f, 9.5f }, { 103.5f, 6.1f }, { 98.4f, 3.2f }, { 92.5f, 1.2f }, { 88.9f, 0.6f },
-        { 88.6f, 0.0f }, { 68.8f, 0.0f }, { 68.4f, 0.6f }, { 64.5f, 1.2f }, { 59.4f, 3.1f }, { 56.1f, 5.6f },
-        { 52.2f, 13.5f }, { 51.2f, 16.9f }, { 51.0f, 20.4f }, { 45.1f, 25.5f }, { 41.8f, 31.6f }, { 30.1f, 46.2f },
-        { 24.2f, 56.2f }, { 20.1f, 67.2f }, { 12.2f, 100.8f }, { 10.1f, 115.0f }, { 6.8f, 148.8f }, { 0.8f, 186.5f },
-        { 0.0f, 187.4f }, { 0.0f, 201.8f }, { 0.6f, 202.2f }, { 2.1f, 210.4f }, { 4.2f, 215.5f }, { 6.1f, 218.4f },
-        { 11.4f, 223.8f }, { 18.0f, 228.6f }, { 22.1f, 230.9f }, { 29.0f, 233.2f }, { 29.2f, 233.9f },
-        { 44.5f, 233.9f }, { 44.8f, 233.2f }, { 50.1f, 231.6f }, { 55.8f, 228.6f }, { 63.8f, 221.8f },
-        { 92.0f, 183.9f },
-    };
-    const float scx = 126.65f, scy = 175.42f, sr = 33.5f;
-    ps3ui_path_reset(&p);
-    ps3ui_path_move(&p, body[0][0], body[0][1]);
-    for (int i = 1; i < PS3UI__N(body); i++)
-        ps3ui_path_line(&p, body[i][0], body[i][1]);
-    ps3ui_path_arc(&p, scx, scy, sr, 167.2f * D2R, -3.5f * D2R, 24);
-    ps3ui_path_line(&p, 160.5f, 172.2f);
-    ps3ui_path_line(&p, M - 160.5f, 172.2f);
-    ps3ui_path_arc(&p, M - scx, scy, sr, 183.5f * D2R, 12.8f * D2R, 24);
-    for (int i = PS3UI__N(body) - 1; i >= 0; i--)
-        ps3ui_path_line(&p, M - body[i][0], body[i][1]);
-    ps3ui_path_fill(im, &p, 0x000000, 1.0f);
-}
-
-static void ps3ui__pad_grey(ps3ui_image_t *im)
-{
-    const float M = PS3UI__PAD_M;
-    ps3ui_path_t p;
-
-    /* grey parts: shoulder buttons, d-pad, sticks, face buttons, select, start */
-    static const float l2[][2] = {
-        { 53.4f, 18.6f }, { 57.1f, 17.6f }, { 64.5f, 16.6f }, { 81.9f, 16.7f }, { 93.5f, 19.8f }, { 101.8f, 23.6f },
-        { 102.2f, 17.2f }, { 104.5f, 10.5f }, { 103.8f, 8.6f }, { 102.2f, 7.1f }, { 93.9f, 3.2f }, { 83.2f, 1.6f },
-        { 73.6f, 1.6f }, { 63.5f, 3.1f }, { 58.9f, 5.2f }, { 56.2f, 8.1f },
-    };
-    static const float l1[][2] = {
-        { 49.0f, 38.2f }, { 50.5f, 39.4f }, { 59.4f, 38.0f }, { 73.1f, 37.6f }, { 79.1f, 38.0f }, { 89.0f, 39.6f },
-        { 93.5f, 39.6f }, { 94.6f, 35.4f }, { 94.9f, 30.2f }, { 93.9f, 28.4f }, { 90.6f, 26.4f }, { 79.9f, 24.1f },
-        { 66.5f, 23.8f }, { 57.2f, 25.0f }, { 52.9f, 27.1f }, { 51.0f, 29.4f },
-    };
-    ps3ui_path_reset(&p);
-    ps3ui__pad_poly(&p, l2, PS3UI__N(l2));
-    ps3ui__pad_poly(&p, l1, PS3UI__N(l1));
-    /* the d-pad: four pentagons pointing in at (69.5, 117.8) */
-    static const float pent[5][2] = { { -8.6f, -26.9f }, { 8.4f, -26.9f }, { 8.4f, -14.4f }, { 0.0f, -7.8f }, { -8.6f, -14.4f } };
-    for (int k = 0; k < 4; k++) {
-        float cs = k == 0 ? 1.0f : k == 2 ? -1.0f : 0.0f, sn = k == 1 ? 1.0f : k == 3 ? -1.0f : 0.0f;
-        for (int i = 0; i < 5; i++) {
-            float x = 69.5f + pent[i][0] * cs - pent[i][1] * sn, y = 117.8f + pent[i][0] * sn + pent[i][1] * cs;
-            if (i == 0) ps3ui_path_move(&p, x, y);
-            else ps3ui_path_line(&p, x, y);
-        }
-    }
-    for (int k = 0; k < 2; k++) {
-        float cx = k ? M - 126.6f : 126.6f;
-        ps3ui_path_move(&p, cx + 23.8f, 176.1f);
-        ps3ui_path_arc(&p, cx, 176.1f, 23.8f, 0.0f, 6.2831853f, 64);
-    }
-    for (int k = 0; k < 4; k++) {
-        ps3ui_path_move(&p, ps3ui__pad_face[k][0] + 11.9f, ps3ui__pad_face[k][1]);
-        ps3ui_path_arc(&p, ps3ui__pad_face[k][0], ps3ui__pad_face[k][1], 11.9f, 0.0f, 6.2831853f, 48);
-    }
-    ps3ui_path_rect(&p, 136.0f, 113.5f, 149.0f, 120.0f);
-    ps3ui_path_move(&p, 197.5f, 113.2f);
-    ps3ui_path_line(&p, 213.0f, 117.2f);
-    ps3ui_path_line(&p, 197.5f, 121.2f);
-    ps3ui_path_fill(im, &p, 0x656666, 1.0f);
-}
-
-/* The grooves and detail lines, through the scratch coverage m. */
-static void ps3ui__pad_details(ps3ui_image_t *im, float *m)
-{
-    int w = im->w, h = im->h;
-    /* dark grooves across the shoulder buttons and round the sticks' tops */
-    static const ps3ui__pad_line_t groove[] = {
-        { 0, 56.5f, 14.8f, 66.0f, 13.3f, 0 }, { 0, 66.0f, 13.3f, 84.0f, 13.3f, 0 }, { 0, 84.0f, 13.3f, 98.5f, 18.0f, 0 },
-        { 0, 53.5f, 36.2f, 62.0f, 35.2f, 0 }, { 0, 62.0f, 35.2f, 78.0f, 35.2f, 0 }, { 0, 78.0f, 35.2f, 90.0f, 37.6f, 0 },
-        { 1, 126.6f, 176.1f, 21.9f, 195.0f, 345.0f },
-    };
-    ps3ui__pad_strokes(m, w, h, groove, PS3UI__N(groove), 0.7f, 1);
-    ps3ui__pad_ink(im, m, 0x000000);
-
-    /* the detail lines */
-    static const ps3ui__pad_line_t lines[] = {
-        /* the grip and shoulder housing */
-        { 0, 17.9f, 79.9f, 25.9f, 66.2f, 0 }, { 0, 25.9f, 66.2f, 38.5f, 52.8f, 0 }, { 0, 38.5f, 52.8f, 45.8f, 46.8f, 0 },
-        { 0, 45.8f, 46.8f, 56.4f, 43.5f, 0 }, { 0, 56.4f, 43.5f, 71.5f, 43.1f, 0 }, { 0, 71.5f, 43.1f, 84.8f, 44.9f, 0 },
-        { 0, 84.8f, 44.9f, 92.9f, 48.5f, 0 }, { 0, 92.9f, 48.5f, 96.6f, 59.9f, 0 }, { 0, 96.6f, 59.9f, 100.6f, 73.1f, 0 },
-        { 0, 42.6f, 35.2f, 36.4f, 64.6f, 0 },
-        { 0, 97.5f, 35.5f, 101.4f, 42.1f, 0 }, { 0, 101.4f, 42.1f, 103.7f, 55.9f, 0 },
-        { 0, 99.6f, 38.0f, 109.6f, 71.6f, 0 }, { 0, 108.4f, 52.8f, 117.5f, 45.0f, 0 }, { 0, 107.7f, 39.3f, 102.3f, 65.5f, 0 },
-        { 0, 103.6f, 53.9f, 109.8f, 71.0f, 0 },
-        { 0, 65.4f, 215.0f, 91.6f, 177.5f, 0 },
-        /* the circle round the d-pad, and the stick's housing */
-        { 1, 69.56f, 117.95f, 54.92f, 6.0f, 28.0f }, { 1, 69.56f, 117.95f, 54.92f, 62.0f, 115.0f },
-        { 1, 69.56f, 117.95f, 54.92f, 128.0f, 352.0f },
-        { 1, 126.65f, 175.42f, 32.34f, 254.0f, 555.0f },
-        { 0, 120.4f, 139.3f, 123.5f, 128.9f, 0 },
-        /* the d-pad's plate: a plus, x 24.5..114.5 by y 101.5..133.5, arms 53.5..85.5 */
-        { 0, 55.5f, 73.5f, 83.5f, 73.5f, 0 }, { 0, 53.5f, 75.5f, 53.5f, 101.5f, 0 }, { 0, 85.5f, 75.5f, 85.5f, 101.5f, 0 },
-        { 0, 26.5f, 101.5f, 53.5f, 101.5f, 0 }, { 0, 85.5f, 101.5f, 112.5f, 101.5f, 0 },
-        { 0, 24.5f, 103.5f, 24.5f, 131.5f, 0 }, { 0, 114.5f, 103.5f, 114.5f, 131.5f, 0 },
-        { 0, 26.5f, 133.5f, 53.5f, 133.5f, 0 }, { 0, 85.5f, 133.5f, 112.5f, 133.5f, 0 },
-        { 0, 53.5f, 133.5f, 53.5f, 160.5f, 0 }, { 0, 85.5f, 133.5f, 85.5f, 160.5f, 0 }, { 0, 55.5f, 162.5f, 83.5f, 162.5f, 0 },
-        { 1, 55.5f, 75.5f, 2.0f, 180.0f, 270.0f }, { 1, 83.5f, 75.5f, 2.0f, 270.0f, 360.0f },
-        { 1, 26.5f, 103.5f, 2.0f, 180.0f, 270.0f }, { 1, 112.5f, 103.5f, 2.0f, 270.0f, 360.0f },
-        { 1, 26.5f, 131.5f, 2.0f, 90.0f, 180.0f }, { 1, 112.5f, 131.5f, 2.0f, 0.0f, 90.0f },
-        { 1, 55.5f, 160.5f, 2.0f, 90.0f, 180.0f }, { 1, 83.5f, 160.5f, 2.0f, 0.0f, 90.0f },
-        /* the rails across the top */
-        { 0, 103.7f, 55.5f, 160.5f, 55.5f, 0 }, { 0, 116.8f, 74.5f, 173.5f, 74.5f, 0 },
-        /* the USB port: two rounded outlines */
-        { 0, 163.5f, 47.5f, 173.5f, 47.5f, 0 }, { 0, 163.5f, 58.5f, 173.5f, 58.5f, 0 }, { 0, 160.5f, 50.5f, 160.5f, 55.5f, 0 },
-        { 1, 163.5f, 50.5f, 3.0f, 180.0f, 270.0f }, { 1, 163.5f, 55.5f, 3.0f, 90.0f, 180.0f },
-        { 0, 165.0f, 49.5f, 173.5f, 49.5f, 0 }, { 0, 165.0f, 56.5f, 173.5f, 56.5f, 0 }, { 0, 163.5f, 51.0f, 163.5f, 55.0f, 0 },
-        { 0, 162.0f, 169.5f, 173.5f, 169.5f, 0 },
-    };
-    ps3ui__pad_strokes(m, w, h, lines, PS3UI__N(lines), 0.65f, 1);
-    /* the d-pad's arrows, outlined */
-    static const float tri[4][3][2] = {
-        { { 64.3f, 82.8f }, { 74.7f, 82.8f }, { 69.5f, 77.3f } }, { { 64.3f, 152.8f }, { 74.7f, 152.8f }, { 69.5f, 158.3f } },
-        { { 34.2f, 112.6f }, { 34.2f, 123.0f }, { 28.7f, 117.8f } }, { { 104.8f, 112.6f }, { 104.8f, 123.0f }, { 110.3f, 117.8f } },
-    };
-    for (int k = 0; k < 4; k++)
-        for (int i = 0; i < 3; i++) {
-            ps3ui__pad_line_t l = { 0, tri[k][i][0], tri[k][i][1], tri[k][(i + 1) % 3][0], tri[k][(i + 1) % 3][1], 0 };
-            ps3ui__pad_stroke(m, w, h, l, 0.6f, 0);
-        }
-    ps3ui__pad_ink(im, m, 0x7E7E7F);
-    /* the PS button, a dimmer ring */
-    ps3ui__pad_line_t ps = { 1, 173.4f, 136.8f, 11.7f, 0.0f, 360.0f };
-    ps3ui__pad_stroke(m, w, h, ps, 1.0f, 0);
-    ps3ui__pad_ink(im, m, 0x505050);
-}
-
-static void ps3ui__pad_symbols(ps3ui_image_t *im, float *m)
-{
-    int w = im->w, h = im->h;
-    /* the face buttons' symbols */
-    static const uint32_t sym[4] = { 0x00A4C1, 0xE288AC, 0xD43261, 0x6488CC };
-    for (int k = 0; k < 4; k++) {
-        float cx = ps3ui__pad_face[k][0], cy = ps3ui__pad_face[k][1];
-        if (k == 0) {
-            float v[3][2] = { { cx, cy - 10.0f }, { cx + 8.6f, cy + 5.0f }, { cx - 8.6f, cy + 5.0f } };
-            for (int i = 0; i < 3; i++) {
-                ps3ui__pad_line_t l = { 0, v[i][0], v[i][1], v[(i + 1) % 3][0], v[(i + 1) % 3][1], 0 };
-                ps3ui__pad_stroke(m, w, h, l, 1.0f, 0);
-            }
-        } else if (k == 1) {
-            const float a = 6.3f;
-            float v[4][2] = { { cx - a, cy - a }, { cx + a, cy - a }, { cx + a, cy + a }, { cx - a, cy + a } };
-            for (int i = 0; i < 4; i++) {
-                ps3ui__pad_line_t l = { 0, v[i][0], v[i][1], v[(i + 1) % 4][0], v[(i + 1) % 4][1], 0 };
-                ps3ui__pad_stroke(m, w, h, l, 0.85f, 0);
-            }
-        } else if (k == 2) {
-            ps3ui__pad_line_t l = { 1, cx + 0.4f, cy, 8.4f, 0.0f, 360.0f };
-            ps3ui__pad_stroke(m, w, h, l, 1.0f, 0);
-        } else {
-            ps3ui__pad_line_t l1 = { 0, cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f, 0 };
-            ps3ui__pad_line_t l2 = { 0, cx + 7.0f, cy - 7.0f, cx - 7.0f, cy + 7.0f, 0 };
-            ps3ui__pad_stroke(m, w, h, l1, 1.0f, 0);
-            ps3ui__pad_stroke(m, w, h, l2, 1.0f, 0);
-        }
-        ps3ui__pad_ink(im, m, sym[k]);
-    }
-}
+/* Kenney's DualShock 3 silhouette, 6.6px a unit, its grips on the sprite's
+ * bottom edge. The icon has no SELECT or START, and the Controls screen's
+ * "Pause Menu" callout points at SELECT, so both are cut out where the real
+ * pad has them: a pill left of the PS button, a triangle right of it. The
+ * callout rings (ring_line) are drawn round these places. */
+#define PS3UI__PAD_S 6.6f
+#define PS3UI__PAD_TX (173.0f - 32.0f * PS3UI__PAD_S)
+#define PS3UI__PAD_TY (233.0f - 46.0f * PS3UI__PAD_S)
 
 static void ps3ui__paint_pad(ps3ui_image_t *im)
 {
-    ps3ui__pad_body(im);
-    ps3ui__pad_grey(im);
-    float *m = (float *)calloc((size_t)im->w * (size_t)im->h, sizeof(float));
-    ps3ui__pad_details(im, m);
-    ps3ui__pad_symbols(im, m);
-    free(m);
+    const float s = PS3UI__PAD_S, tx = PS3UI__PAD_TX, ty = PS3UI__PAD_TY;
+    ps3ui_path_t p;
+    ps3ui_path_reset(&p);
+    ps3ui__prompt_path(&p, INPUT_PROMPT_PAD_PS3, s, tx, ty);
+    /* holes wind against the body: down the left, along the bottom, up the right */
+    const float yc = ty + 26.0f * s, r = 0.6f * s, xl = tx + 25.6f * s, xr = tx + 27.4f * s;
+    ps3ui_path_move(&p, xl, yc - r);
+    ps3ui_path_arc(&p, xl, yc, r, 4.712389f, 1.570796f, 12);
+    ps3ui_path_arc(&p, xr, yc, r, 1.570796f, -1.570796f, 12);
+    ps3ui_path_move(&p, tx + 36.3f * s, ty + 25.2f * s);
+    ps3ui_path_line(&p, tx + 36.3f * s, ty + 26.8f * s);
+    ps3ui_path_line(&p, tx + 38.7f * s, ty + 26.0f * s);
+    ps3ui_path_fill(im, &p, input_prompts[INPUT_PROMPT_PAD_PS3].rgb, 1.0f);
 }
+
 
 /* ---- sprites no layout references: the program draws them itself ---------- */
 
@@ -1495,10 +1280,14 @@ enum {
     PS3UI_SPR_X_NET_02,
     PS3UI_SPR_X_NET_03,
     PS3UI_SPR_X_NET_XX,
-    PS3UI_SPR_X_BTN_CIRCLE,                 /* the pad's face buttons, as font 1 draws them */
+    PS3UI_SPR_X_BTN_CIRCLE,                 /* the pad's buttons as text glyphs, Kenney's prompts */
     PS3UI_SPR_X_BTN_CROSS,
     PS3UI_SPR_X_BTN_TRIANGLE,
     PS3UI_SPR_X_BTN_SQUARE,
+    PS3UI_SPR_X_BTN_L1,
+    PS3UI_SPR_X_BTN_L2,
+    PS3UI_SPR_X_BTN_R1,
+    PS3UI_SPR_X_BTN_R2,
     PS3UI_SPR_ALL
 };
 
@@ -1507,6 +1296,16 @@ enum {
 #define PS3UI_BTN_CROSS    '\x02'
 #define PS3UI_BTN_TRIANGLE '\x03'
 #define PS3UI_BTN_SQUARE   '\x04'
+#define PS3UI_BTN_L1       '\x05'
+#define PS3UI_BTN_L2       '\x06'
+#define PS3UI_BTN_R1       '\x07'
+#define PS3UI_BTN_R2       '\x08'
+
+/* The prompt each glyph sprite paints, in PS3UI_SPR_X_BTN_* order. */
+static const int ps3ui__btn_prompt[8] = {
+    INPUT_PROMPT_CIRCLE, INPUT_PROMPT_CROSS, INPUT_PROMPT_TRIANGLE, INPUT_PROMPT_SQUARE,
+    INPUT_PROMPT_L1, INPUT_PROMPT_L2, INPUT_PROMPT_R1, INPUT_PROMPT_R2,
+};
 
 static void ps3ui__round_rect(ps3ui_path_t *p, float x0, float y0, float x1, float y1, float r)
 {
@@ -1558,86 +1357,7 @@ static void ps3ui__paint_net(ps3ui_image_t *im, int level)
     }
 }
 
-/* A face button: a bevelled dark disc with the symbol in its colour. */
-static void ps3ui__paint_button(ps3ui_image_t *im, int which)
-{
-    const float cx = 24.0f, cy = 24.0f;
-    ps3ui_path_t p;
-    ps3ui_path_reset(&p);
-    ps3ui_path_move(&p, cx + 22.0f, cy);
-    ps3ui_path_arc(&p, cx, cy, 22.0f, 0.0f, 6.2831853f, 64);
-    ps3ui_path_fill(im, &p, 0x211C21, 1.0f);
-    /* inside the 2px ring: a bevel, lighter towards the lower right, round a flat face */
-    for (int y = 0; y < im->h; y++)
-        for (int x = 0; x < im->w; x++) {
-            float dx = (float)x + 0.5f - cx, dy = (float)y + 0.5f - cy, r = sqrtf(dx * dx + dy * dy);
-            if (r > 20.0f)
-                continue;
-            float lit = (dx + dy) / (r > 0.0f ? r : 1.0f) * 0.3536f + 0.5f;
-            ps3ui__c4 bevel = ps3ui__mix(ps3ui__hex4(0x4D4A4D, 255), ps3ui__hex4(0x636163, 255), lit);
-            ps3ui__c4 c = r > 16.5f ? bevel : ps3ui__hex4(0x333433, 255);
-            float edge = 20.0f - r;
-            if (edge < 1.0f)
-                c = ps3ui__mix(ps3ui__hex4(0x211C21, 255), c, edge);
-            ps3ui__put(im, x, y, c);
-        }
-    static const uint32_t col[4] = { 0xFF4118, 0x7B75B5, 0x39C78C, 0xDE5DDE };
-    float *m = (float *)calloc((size_t)im->w * (size_t)im->h, sizeof(float));
-    ps3ui_path_reset(&p);
-    const float s = 1.5f;                      /* half the 3px stroke */
-    switch (which) {
-    case 0:                                    /* circle */
-        ps3ui_path_move(&p, cx + 10.5f + s, cy);
-        ps3ui_path_arc(&p, cx, cy, 10.5f + s, 0.0f, 6.2831853f, 48);
-        ps3ui_path_move(&p, cx + 10.5f - s, cy);
-        ps3ui_path_arc(&p, cx, cy, 10.5f - s, 6.2831853f, 0.0f, 48);
-        break;
-    case 1: {                                  /* cross, about 24 across */
-        const float a = 10.5f, d = s * 0.7071f;
-        ps3ui_path_move(&p, cx - a - d, cy - a + d);
-        ps3ui_path_line(&p, cx - a + d, cy - a - d);
-        ps3ui_path_line(&p, cx + a + d, cy + a - d);
-        ps3ui_path_line(&p, cx + a - d, cy + a + d);
-        ps3ui_path_move(&p, cx + a - d, cy - a - d);
-        ps3ui_path_line(&p, cx + a + d, cy - a + d);
-        ps3ui_path_line(&p, cx - a + d, cy + a + d);
-        ps3ui_path_line(&p, cx - a - d, cy + a - d);
-        break;
-    }
-    case 2:                                    /* triangle outline: outer contour, inner reversed */
-        for (int k = 0; k < 2; k++) {
-            float r = k ? 13.0f - 2.0f * s : 13.0f + 2.0f * s, yo = 2.0f;
-            float ay = cy + yo - r, by = cy + yo + r * 0.5f, bx = cx + r * 0.866f, qx = cx - r * 0.866f;
-            ps3ui_path_move(&p, cx, ay);
-            if (!k) {
-                ps3ui_path_line(&p, bx, by);
-                ps3ui_path_line(&p, qx, by);
-            } else {
-                ps3ui_path_line(&p, qx, by);
-                ps3ui_path_line(&p, bx, by);
-            }
-        }
-        break;
-    default: {                                 /* square outline */
-        float a = 10.0f + s, b = 10.0f - s;
-        ps3ui_path_rect(&p, cx - a, cy - a, cx + a, cy + a);
-        ps3ui_path_move(&p, cx - b, cy - b);
-        ps3ui_path_line(&p, cx - b, cy + b);
-        ps3ui_path_line(&p, cx + b, cy + b);
-        ps3ui_path_line(&p, cx + b, cy - b);
-        break;
-    }
-    }
-    ps3ui_path_cover(&p, m, im->w, im->h);
-    float c[3];
-    ps3ui_rgb_hex(col[which], c);
-    for (int y = 0; y < im->h; y++)
-        for (int x = 0; x < im->w; x++)
-            ps3ui_image_over(im, x, y, c, m[y * im->w + x]);
-    free(m);
-}
-
-/* Button glyphs sit on the text's baseline like a font 1 character: the disc
+/* Button glyphs sit on the text's baseline like a font 1 character: the icon
  * spans 42 above the baseline to 2 below at cap 37, and advances 48. */
 static float ps3ui_button_adv(float cap) { return 48.0f * cap / 37.0f; }
 
@@ -1649,6 +1369,68 @@ static void ps3ui_draw_button(ps3ui_canvas_t *cv, int code, float x, float basel
     float k = cap / 37.0f;
     ps3ui_mat_t m = ps3ui_mat_mul(ps3ui_mat_translate(x, baseline - 44.0f * k), ps3ui_mat_scale(k, k));
     ps3ui_draw_image(cv, im, m, opacity, PS3UI_BLEND_NORMAL, NULL);
+}
+
+/* The menus' blue backdrop: dark blue down to darker. */
+static void ps3ui__paint_bg_grada(ps3ui_image_t *im)
+{
+    for (int y = 0; y < im->h; y++)
+        ps3ui__rect(im, 0, y, im->w, y + 1,
+                    ps3ui__mix(ps3ui__hex4(0x122868, 255), ps3ui__hex4(0x001735, 255),
+                               (float)y / (float)(im->h - 1)));
+}
+
+/* The thick rail over a panel: grey, white, grey. */
+static void ps3ui__paint_ovr_line_mid(ps3ui_image_t *im)
+{
+    ps3ui__rect(im, 0, 0, 3, im->h, ps3ui__hex4(PS3UI__GREY, 255));
+    ps3ui__rect(im, 3, 0, 13, im->h, ps3ui__hex4(0xFFFFFF, 255));
+    ps3ui__rect(im, 13, 0, 16, im->h, ps3ui__hex4(PS3UI__GREY, 255));
+}
+
+/* The thick rail's end. */
+static void ps3ui__paint_ovr_line_edg(ps3ui_image_t *im)
+{
+    ps3ui__rect(im, 0, 0, 16, 16, ps3ui__hex4(PS3UI__GREY, 255));
+    ps3ui__rect(im, 3, 0, 13, 13, ps3ui__hex4(0xFFFFFF, 0xFD));
+}
+
+/* The thin rail under a panel: grey, white, grey, clear. */
+static void ps3ui__paint_udr_line_mid(ps3ui_image_t *im)
+{
+    ps3ui__rect(im, 0, 0, 3, im->h, ps3ui__hex4(PS3UI__GREY, 255));
+    ps3ui__rect(im, 3, 0, 6, im->h, ps3ui__hex4(0xFFFFFF, 0xF6));
+    ps3ui__rect(im, 6, 0, 9, im->h, ps3ui__hex4(PS3UI__GREY, 255));
+    ps3ui__rect(im, 9, 0, 10, im->h, ps3ui__hex4(0xFFFFFF, 0));
+}
+
+/* The thin rail's outside corner, bottom right: grey, white, grey bent 90 degrees. */
+static void ps3ui__paint_udr_line_cnr(ps3ui_image_t *im)
+{
+    for (int y = 0; y < im->h; y++)
+        for (int x = 0; x < im->w; x++) {
+            ps3ui__c4 c = ps3ui__hex4(PS3UI__GREY, 255);
+            if (x < 7 && y < 7 && (x >= 4 || y >= 4)) c = ps3ui__hex4(0xFFFFFF, 0xF8);
+            if (x == 0 && y == 0) c = ps3ui__hex4(0xFFFFFF, 0);
+            ps3ui__put(im, x, y, c);
+        }
+}
+
+/* The match window's top corner. The bottom border stops short of the left
+ * edge: the panel's white side rail runs on down from there. */
+static void ps3ui__paint_win_top_cnr(ps3ui_image_t *im)
+{
+    ps3ui__paint_plate(im, 200.0f, 1, 1, 1, 1);
+    ps3ui__rect(im, 3, im->h - 3, 13, im->h, ps3ui__hex4(0xFFFFFF, 0xFC));
+}
+
+/* The match window's bottom corner: white in a grey frame. */
+static void ps3ui__paint_win_btm_cnr(ps3ui_image_t *im)
+{
+    ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(0xFFFFFF, 255));
+    ps3ui__rect(im, 0, 0, 3, im->h, ps3ui__hex4(PS3UI__GREY, 255));
+    ps3ui__rect(im, 0, 13, im->w, im->h, ps3ui__hex4(PS3UI__GREY, 255));
+    ps3ui__rect(im, 13, 0, 16, 3, ps3ui__hex4(PS3UI__GREY, 255));
 }
 
 /* ---- the sprite table ------------------------------------------------------ */
@@ -1666,60 +1448,22 @@ static void ps3ui_paint(int id, ps3ui_image_t *im)
     case PS3UI_SPR_CHIP_CYAN:   ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(0x00FFFF, 255)); break;
     case PS3UI_SPR_CHIP_D_BLUE: ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(0x184684, 255)); break;
     case PS3UI_SPR_CHIP_L_BLUE: ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(0x00BAFF, 255)); break;
-    case PS3UI_SPR_BG_GRADA:
-        for (int y = 0; y < im->h; y++)
-            ps3ui__rect(im, 0, y, im->w, y + 1,
-                        ps3ui__mix(ps3ui__hex4(0x122868, 255), ps3ui__hex4(0x001735, 255),
-                                   (float)y / (float)(im->h - 1)));
-        break;
-    case PS3UI_SPR_HW_PLA_CENTER:
-        ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(PS3UI__PANEL, PS3UI__PANEL_A));
-        break;
+    case PS3UI_SPR_BG_GRADA:         ps3ui__paint_bg_grada(im); break;
+    case PS3UI_SPR_HW_PLA_CENTER:    ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(PS3UI__PANEL, PS3UI__PANEL_A)); break;
     case PS3UI_SPR_HW_PLA_OVR_MID: case PS3UI_SPR_HW_PLA_SIDE: case PS3UI_SPR_HW_PLA_UDR_MID:
     case PS3UI_SPR_HW_PLA_OVR_CNR: case PS3UI_SPR_HW_PLA_UDR_CNR:
         ps3ui__paint_pla(im, id);
         break;
-    case PS3UI_SPR_HW_OVR_LINE_MID:
-        ps3ui__rect(im, 0, 0, 3, im->h, ps3ui__hex4(PS3UI__GREY, 255));
-        ps3ui__rect(im, 3, 0, 13, im->h, ps3ui__hex4(0xFFFFFF, 255));
-        ps3ui__rect(im, 13, 0, 16, im->h, ps3ui__hex4(PS3UI__GREY, 255));
-        break;
-    case PS3UI_SPR_HW_OVR_LINE_EDG:
-        ps3ui__rect(im, 0, 0, 16, 16, ps3ui__hex4(PS3UI__GREY, 255));
-        ps3ui__rect(im, 3, 0, 13, 13, ps3ui__hex4(0xFFFFFF, 0xFD));
-        break;
-    case PS3UI_SPR_HW_UDR_LINE_MID:
-        ps3ui__rect(im, 0, 0, 3, im->h, ps3ui__hex4(PS3UI__GREY, 255));
-        ps3ui__rect(im, 3, 0, 6, im->h, ps3ui__hex4(0xFFFFFF, 0xF6));
-        ps3ui__rect(im, 6, 0, 9, im->h, ps3ui__hex4(PS3UI__GREY, 255));
-        ps3ui__rect(im, 9, 0, 10, im->h, ps3ui__hex4(0xFFFFFF, 0));
-        break;
-    case PS3UI_SPR_HW_UDR_LINE_CNR:
-        /* the thin rail's outside corner, bottom right: grey, white, grey bent 90 degrees */
-        for (int y = 0; y < im->h; y++)
-            for (int x = 0; x < im->w; x++) {
-                ps3ui__c4 c = ps3ui__hex4(PS3UI__GREY, 255);
-                if (x < 7 && y < 7 && (x >= 4 || y >= 4)) c = ps3ui__hex4(0xFFFFFF, 0xF8);
-                if (x == 0 && y == 0) c = ps3ui__hex4(0xFFFFFF, 0);
-                ps3ui__put(im, x, y, c);
-            }
-        break;
+    case PS3UI_SPR_HW_OVR_LINE_MID:  ps3ui__paint_ovr_line_mid(im); break;
+    case PS3UI_SPR_HW_OVR_LINE_EDG:  ps3ui__paint_ovr_line_edg(im); break;
+    case PS3UI_SPR_HW_UDR_LINE_MID:  ps3ui__paint_udr_line_mid(im); break;
+    case PS3UI_SPR_HW_UDR_LINE_CNR:  ps3ui__paint_udr_line_cnr(im); break;
     case PS3UI_SPR_HW_OVR_LINE_CNR_L: ps3ui__paint_tab(im); break;
     case PS3UI_SPR_PLA_S_EDG:        ps3ui__paint_plate(im, 204.0f, 1, 1, 1, 1); break;
     case PS3UI_SPR_PLA_S_MID:        ps3ui__paint_plate(im, 204.0f, 1, 1, 0, 0); break;
-    case PS3UI_SPR_MATCH_WIN_TOP_CNR:
-        /* the bottom border stops short of the left edge: the panel's white
-         * side rail runs on down from there */
-        ps3ui__paint_plate(im, 200.0f, 1, 1, 1, 1);
-        ps3ui__rect(im, 3, im->h - 3, 13, im->h, ps3ui__hex4(0xFFFFFF, 0xFC));
-        break;
+    case PS3UI_SPR_MATCH_WIN_TOP_CNR: ps3ui__paint_win_top_cnr(im); break;
     case PS3UI_SPR_MATCH_WIN_TOP_MID: ps3ui__paint_plate(im, 200.0f, 1, 1, 0, 0); break;
-    case PS3UI_SPR_MATCH_WIN_BTM_CNR:
-        ps3ui__rect(im, 0, 0, im->w, im->h, ps3ui__hex4(0xFFFFFF, 255));
-        ps3ui__rect(im, 0, 0, 3, im->h, ps3ui__hex4(PS3UI__GREY, 255));
-        ps3ui__rect(im, 0, 13, im->w, im->h, ps3ui__hex4(PS3UI__GREY, 255));
-        ps3ui__rect(im, 13, 0, 16, 3, ps3ui__hex4(PS3UI__GREY, 255));
-        break;
+    case PS3UI_SPR_MATCH_WIN_BTM_CNR: ps3ui__paint_win_btm_cnr(im); break;
     case PS3UI_SPR_MATCH_S_WIN_MID:  ps3ui__paint_glass(im, 0); break;
     case PS3UI_SPR_MATCH_S_WIN_SIDE: ps3ui__paint_glass(im, 1); break;
     case PS3UI_SPR_MATCH_VS_VS:      ps3ui__paint_vs(im); break;
@@ -1778,8 +1522,9 @@ static void ps3ui_paint(int id, ps3ui_image_t *im)
         ps3ui__paint_net(im, id - PS3UI_SPR_X_NET_00);
         break;
     case PS3UI_SPR_X_BTN_CIRCLE: case PS3UI_SPR_X_BTN_CROSS: case PS3UI_SPR_X_BTN_TRIANGLE:
-    case PS3UI_SPR_X_BTN_SQUARE:
-        ps3ui__paint_button(im, id - PS3UI_SPR_X_BTN_CIRCLE);
+    case PS3UI_SPR_X_BTN_SQUARE: case PS3UI_SPR_X_BTN_L1: case PS3UI_SPR_X_BTN_L2:
+    case PS3UI_SPR_X_BTN_R1: case PS3UI_SPR_X_BTN_R2:
+        ps3ui__paint_prompt(im, ps3ui__btn_prompt[id - PS3UI_SPR_X_BTN_CIRCLE]);
         break;
     default:
         if (id < PS3UI_SPR_COUNT)

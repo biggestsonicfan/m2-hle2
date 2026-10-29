@@ -26,6 +26,7 @@
 }
 :root { color-scheme: dark; --text: #ffffff; --dim: #B9C5DE; --edge: #303a55; }
 * { box-sizing: border-box; }
+html { touch-action: manipulation; }   /* no double-tap zoom (m2hle-nozoom.js does it for Safari) */
 body {
   margin: 0; min-height: 100vh; color: var(--text);
   font: 500 1rem/1.45 "PS3 Text", system-ui, sans-serif;
@@ -82,6 +83,7 @@ footer a { color: #CFF3FF; }
 </footer>
 <script src="m2hle-lang.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-games.js?v=@M2HLE_VERSION@"></script>
+<script src="m2hle-nozoom.js?v=@M2HLE_VERSION@"></script>
 <script src="m2hle-home.js?v=@M2HLE_VERSION@"></script>
 </body>
 </html>

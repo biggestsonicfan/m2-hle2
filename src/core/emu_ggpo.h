@@ -19,6 +19,19 @@
  * frames' samples were heard the first time, so the sound board runs muted
  * through them (g_sound_mute), its clock still moving.
  *
+ * A linked game (game_profile_t.link_twin: Virtual-On, Power Sled) is two
+ * cabinets, one player on each: a match runs both on each machine
+ * (core/emu_twin.h), and a
+ * GGPO frame is both boards' frame. Each player's word is then a whole
+ * cabinet's controls, and their screen is their own cabinet's.
+ *
+ * A SOLO session (Pinboard #1110) is the twin without GGPO, for a linked
+ * game that cannot be played on one board: Power Sled's ride races only with
+ * a Main unit on its ring. The player's cabinet is live and the other board
+ * runs hidden beside it, its panel worked by the profile (link_solo). It is
+ * what such a game runs whenever nothing else owns the board (no GGPO match,
+ * no room, no comm link, no replay); --ggpo-solo 0 leaves the board alone.
+ *
  * --ggpo-synctest N runs GGPO's own determinism test instead of a session:
  * both players are this machine's, and every frame is rolled back N frames
  * and run again, the snapshot's checksum held against the first run. A
@@ -44,7 +57,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { EMU_GGPO_OFF = 0, EMU_GGPO_P2P, EMU_GGPO_SYNCTEST } emu_ggpo_mode_t;
+typedef enum { EMU_GGPO_OFF = 0, EMU_GGPO_P2P, EMU_GGPO_SYNCTEST, EMU_GGPO_SOLO } emu_ggpo_mode_t;
 
 /* What the command line asked for. Read when the emu thread starts running. */
 typedef struct {
@@ -53,12 +66,13 @@ typedef struct {
     char            remote_ip[64];
     uint16_t        remote_port;
     int             player;            /* 1 or 2 */
-    int             delay;             /* local input delay, frames */
+    int             delay;             /* local input delay, frames; -1 from the ping */
     int             synctest_frames;   /* how far synctest rolls back */
     char            synclog_dir[240];
+    bool            no_solo;           /* --ggpo-solo 0: a linked game's board runs alone */
 } emu_ggpo_cfg_t;
 
-static emu_ggpo_cfg_t g_ggpo_cfg = { EMU_GGPO_OFF, 7000, "", 7001, 1, 2, 1, "" };
+static emu_ggpo_cfg_t g_ggpo_cfg = { EMU_GGPO_OFF, 7000, "", 7001, 1, -1, 1, "", false };
 
 #ifdef M2HLE_GGPO
 #include "../net/ggpo_lobby.h"   /* the lobby that sets up a match (ggpo.sonicthefighte.rs) */
@@ -92,12 +106,13 @@ static inline bool emu_ggpo_cli_arg(int argc, char **argv, int *i) {
         else LOG_WARN("--ggpo-remote %s: expected IP:PORT", v);
     }
     else if (strcmp(a, "player") == 0)    g_ggpo_cfg.player = atoi(v) == 2 ? 2 : 1;
-    else if (strcmp(a, "delay") == 0)     g_ggpo_cfg.delay = atoi(v);
+    else if (strcmp(a, "delay") == 0)     g_ggpo_cfg.delay = strcmp(v, "auto") == 0 ? -1 : atoi(v);
     else if (strcmp(a, "synctest") == 0) {
         g_ggpo_cfg.mode = EMU_GGPO_SYNCTEST;
         g_ggpo_cfg.synctest_frames = atoi(v) > 0 ? atoi(v) : 1;
     }
     else if (strcmp(a, "synclog") == 0)   snprintf(g_ggpo_cfg.synclog_dir, sizeof g_ggpo_cfg.synclog_dir, "%s", v);
+    else if (strcmp(a, "solo") == 0)      { g_ggpo_cfg.no_solo = atoi(v) == 0; return true; }
     else { --*i; return false; }
 #ifndef M2HLE_GGPO
     LOG_WARN("--ggpo-%s: this build has no GGPO (M2HLE_GGPO off)", a);
@@ -110,15 +125,46 @@ static inline bool emu_ggpo_cli_arg(int argc, char **argv, int *i) {
 
 #include "../net/ggpo_port/ggpo_port.h"
 #include "rollback.h"
+#include "emu_twin.h"   /* a linked game's two cabinets (Pinboard #1080) */
 
 #define EMU_GGPO_INPUT_SIZE  ((int)sizeof(uint32_t))   /* one word a player */
 #define EMU_GGPO_SKIP_MAX    8                         /* frames a timesync may hold us */
+#define EMU_GGPO_HOLD_GAP    4                         /* frames run between two of them */
+
+/* The input delay from the ping (--ggpo-delay auto, the default; Pinboard
+ * #1258). GGPO's delay is the local side's alone, so each machine picks its
+ * own, once, before its first input: a change later leaves a gap in the
+ * frames GGPO sends the peer. The peer's input for frame F reaches us about
+ * a one-way trip and a poll after it was pressed, so a rollback goes back
+ * that much less the delay; the delay keeps it near EMU_GGPO_AUTO_ROLLBACK.
+ * A long rollback runs every frame again in one host frame (~3.5 ms each for
+ * VF2 here), and beyond GGPO's 8 frames of prediction the board stops dead. */
+#define EMU_GGPO_AUTO_MIN       2     /* the old fixed delay: near peers keep it */
+#define EMU_GGPO_AUTO_MAX       7
+#define EMU_GGPO_AUTO_ROLLBACK  3
+#define EMU_GGPO_AUTO_WAIT      360   /* frames to wait for GGPO's first ping: it
+                                       * reports once a second, and the first is often
+                                       * lost on a peer still synchronizing */
+
+static inline int emu_ggpo_auto_delay(int ping_ms) {
+    int one_way = (ping_ms * 3 + 99) / 100;     /* ping / 2 in frames, rounded up */
+    int d = one_way + 1 - EMU_GGPO_AUTO_ROLLBACK;
+    return d < EMU_GGPO_AUTO_MIN ? EMU_GGPO_AUTO_MIN : d > EMU_GGPO_AUTO_MAX ? EMU_GGPO_AUTO_MAX : d;
+}
 
 static struct {
     bool              on;          /* a session is open */
+    emu_ggpo_mode_t   mode;        /* the open session's */
     bool              running;     /* GGPO said RUNNING */
     bool              resim;       /* inside a rollback's advance_frame */
     int               skip;        /* frames to hold for a timesync */
+    int               since_hold;  /* frames run since the last one */
+    int               delay;       /* the input delay set, -1 not yet */
+    int               delay_wait;  /* frames waited for a ping */
+    int               ping;        /* GGPO's last round trip, ms */
+    int               ping_unset;  /* what GGPO's stats said at RUNNING */
+    uint32_t          holds;       /* frames held for a timesync */
+    uint32_t          stalls;      /* frames GGPO's prediction limit held */
     emu_thread_ctx_t *ctx;
     uint32_t          frames;      /* frames run live */
     uint32_t          rollbacks;   /* loads */
@@ -146,50 +192,101 @@ static struct {
 /* Every EMU_GGPO_CHECK_EVERY frames a session logs the board's checksum, taken
  * when that frame was last saved; by EMU_GGPO_CHECK_LAG frames later no
  * rollback can reach it, so both machines' lines must agree. */
+#ifndef EMU_GGPO_CHECK_EVERY
 #define EMU_GGPO_CHECK_EVERY 600
+#endif
 #define EMU_GGPO_CHECK_LAG   30
 
-static inline bool emu_ggpo_active(void) { return g_ggpo.on; }
+/* A GGPO match is open (a SOLO session is none). */
+static inline bool emu_ggpo_active(void) { return g_ggpo.on && g_ggpo.mode != EMU_GGPO_SOLO; }
 
-/* One side's word from one key set; the cabinet's service/test only on 1P. */
+/* SOLO, refused for this profile once its start failed. */
+static const game_profile_t *g_ggpo_solo_refused;
+/* The frontend's own session, which SOLO must not run under (libretro's
+ * RetroArch lockstep); NULL none. */
+static bool (*g_ggpo_solo_veto)(void);
+
+/* Whether a linked game's board should be a SOLO session now: its profile
+ * plays one (link_solo) and nothing else has the board. A comm peer with no
+ * twin is a real link (a room's, --comm-master / --comm-slave). */
+/* Something else has the board: a session, a room, a link, a replay or a follow. */
+static inline bool emu_ggpo__board_taken(void) {
+    if (netplay_in_room() || netplay_active() || comm_role_waiting() || comm_role_linked()) return true;
+    if (replay_playing() || follow_following() || follow_leading()) return true;
+    return g_ggpo_solo_veto && g_ggpo_solo_veto();
+}
+
+static inline bool emu_ggpo_solo_wanted(void) {
+    const game_profile_t *p = g_active_profile;
+    if (g_ggpo_cfg.no_solo || !p || !p->link_solo || !emu_twin_wanted(p) || g_ggpo_solo_refused == p) return false;
+    if (!g_netplay.reset_board || emu_ggpo__board_taken()) return false;
+    return g_twin.on || !g_m2comm_link.peer;
+}
+
+/* One side's word from one key set; the cabinet's bits (service, test, gears) only on 1P. */
 static inline uint32_t emu_ggpo__word(uint32_t held, const uint32_t *bits, bool cabinet) {
     uint32_t word = 0;
     for (int i = 0; i < 10; i++)
         if (bits[i] && (held & bits[i])) word |= 1u << i;
-    if (cabinet) {
-        if (g_netplay.bit_p1[NP_BIT_SERVICE] && (held & g_netplay.bit_p1[NP_BIT_SERVICE]))
-            word |= 1u << NP_BIT_SERVICE;
-        if (g_netplay.bit_p1[NP_BIT_TEST] && (held & g_netplay.bit_p1[NP_BIT_TEST]))
-            word |= 1u << NP_BIT_TEST;
-    }
+    if (cabinet)
+        for (int i = NP_BIT_SERVICE; i < NP_BIT_COUNT; i++)
+            if (g_netplay.bit_p1[i] && (held & g_netplay.bit_p1[i])) word |= 1u << i;
     return word;
 }
 
-/* This machine's player: either key set plays our side (netplay_sample_local). */
+/* This machine's player: either key set plays our side (netplay_sample_local).
+ * A twin's player has a cabinet of their own, both key sets. */
 static inline uint32_t emu_ggpo_sample_local(void) {
     uint32_t held = g_input.held;
+    if (g_twin.on) return emu_twin_word(held);
     bool cabinet = g_ggpo_cfg.player == 1;
     return emu_ggpo__word(held, g_netplay.bit_p1, cabinet) | emu_ggpo__word(held, g_netplay.bit_p2, false);
 }
 
-/* One board frame on these two words: slices to the vblank, then its count. */
+/* A frame's count, once per frame however often a rollback runs it. */
+static inline void emu_ggpo__count(emu_thread_ctx_t *ctx) {
+    uint32_t budget = ctx->frame_budget;
+    if (g_ggpo.resim) ctx->frame_budget = 0;   /* a run_frames counts frames once */
+    emu_slice_count_frame(ctx);
+    if (g_ggpo.resim) ctx->frame_budget = budget;
+}
+
+static inline void emu_ggpo__result(int result) {
+    if (result && g_ggpo.cur_frame > g_ggpo.done_frame) {
+        g_ggpo.pend_frame  = g_ggpo.cur_frame;
+        g_ggpo.pend_winner = result;
+    }
+    g_ggpo.cur_frame++;
+}
+
+/* One board frame on these two words: slices to the vblank, then its count.
+ * A twin's: both boards' frame (emu_twin_frame), the result board A's. */
 static inline bool emu_ggpo_run_frame(emu_thread_ctx_t *ctx, const uint32_t in[2]) {
+    if (g_twin.on) {
+        int result = 0;
+        bool ran = emu_twin_frame(ctx, in, emu_ggpo__count, &result);
+        if (ran) emu_ggpo__result(result);
+        return ran;
+    }
     netplay_apply_inputs(in[0], in[1]);
     for (int n = 0; n < 64; n++) {
         emu_slice_body(ctx);
         if (g_vblank_edge || ctx->cpu->halted) break;
     }
     if (!g_vblank_edge) return false;
-    if (g_versus_result && g_ggpo.cur_frame > g_ggpo.done_frame) {
-        g_ggpo.pend_frame  = g_ggpo.cur_frame;
-        g_ggpo.pend_winner = g_versus_result;
-    }
-    g_ggpo.cur_frame++;
-    uint32_t budget = ctx->frame_budget;
-    if (g_ggpo.resim) ctx->frame_budget = 0;   /* a run_frames counts frames once */
-    emu_slice_count_frame(ctx);
-    if (g_ggpo.resim) ctx->frame_budget = budget;
+    emu_ggpo__result(g_versus_result);
+    emu_ggpo__count(ctx);
     return true;
+}
+
+/* A GGPO buffer's bytes, its checksum and its parts: one board's, or a twin's. */
+static inline size_t emu_ggpo__size(void) { return g_twin.on ? g_twin.size : g_rollback.size; }
+static inline uint32_t emu_ggpo__checksum(const void *buf) {
+    return g_twin.on ? emu_twin_checksum(buf) : rollback_checksum(buf);
+}
+static inline void emu_ggpo__log(FILE *f, const void *buf) {
+    if (g_twin.on) emu_twin_log(f, buf);
+    else rollback_log(f, buf);
 }
 
 /* ---- GGPO's callbacks ---------------------------------------------------- */
@@ -202,25 +299,30 @@ static inline void emu_ggpo_check_file(int frame, const void *buf) {
     snprintf(path, sizeof path, "%s/check-%05d.log", g_ggpo_cfg.synclog_dir, frame);
     FILE *f = fopen(path, "w");
     if (!f) return;
-    rollback_log(f, buf);
+    emu_ggpo__log(f, buf);
     fclose(f);
 }
 
 static void *emu_ggpo_cb_save(void *ud, int *len, int *checksum, int frame) {
     emu_thread_ctx_t *ctx = (emu_thread_ctx_t *)ud;
     (void)frame;
-    savestate_emu_t e = emu_state_latches(ctx);
-    void *buf = rollback_save(&e);
-    *len = buf ? (int)g_rollback.size : 0;
+    void *buf;
+    if (g_twin.on) {
+        buf = emu_twin_save(ctx);
+    } else {
+        savestate_emu_t e = emu_state_latches(ctx);
+        buf = rollback_save(&e);
+    }
+    *len = buf ? (int)emu_ggpo__size() : 0;
     g_ggpo.cur_frame = frame;
     g_ggpo.saved[frame & 15].buf   = buf;
     g_ggpo.saved[frame & 15].frame = frame;
     replay_ggpo_mark(frame);
     /* Only synctest reads it, and it is a pass over 16 MB. */
-    *checksum = (buf && g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST) ? (int)rollback_checksum(buf) : 0;
+    *checksum = (buf && g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST) ? (int)emu_ggpo__checksum(buf) : 0;
     if (buf && g_ggpo_cfg.mode == EMU_GGPO_P2P && frame > 0 && frame % EMU_GGPO_CHECK_EVERY == 0) {
         g_ggpo.check_frame = frame;
-        g_ggpo.check_sum = rollback_checksum(buf);
+        g_ggpo.check_sum = emu_ggpo__checksum(buf);
         emu_ggpo_check_file(frame, buf);
     }
     return buf;
@@ -228,10 +330,14 @@ static void *emu_ggpo_cb_save(void *ud, int *len, int *checksum, int frame) {
 
 static bool emu_ggpo_cb_load(void *ud, const void *buf, int len) {
     emu_thread_ctx_t *ctx = (emu_thread_ctx_t *)ud;
-    if ((size_t)len != g_rollback.size) return false;
-    savestate_emu_t e;
-    rollback_load(buf, ctx->bus, &e);          /* settles the sound thread first */
-    emu_state_put_latches(ctx, &e);
+    if ((size_t)len != emu_ggpo__size()) return false;
+    if (g_twin.on) {
+        emu_twin_load(ctx, buf);
+    } else {
+        savestate_emu_t e;
+        rollback_load(buf, ctx->bus, &e);      /* settles the sound thread first */
+        emu_state_put_latches(ctx, &e);
+    }
     emu_attn_bump();
     ctx->cpu_prev_snapshot = *ctx->cpu;
     ctx->cpu_snapshot      = *ctx->cpu;
@@ -250,7 +356,8 @@ static void emu_ggpo_cb_free(void *ud, void *buf) {
     (void)ud;
     for (int i = 0; i < 16; i++)
         if (g_ggpo.saved[i].buf == buf) g_ggpo.saved[i].buf = NULL;
-    rollback_free(buf);
+    if (g_twin.on) emu_twin_free(buf);
+    else rollback_free(buf);
 }
 
 static bool emu_ggpo_cb_advance(void *ud) {
@@ -269,9 +376,15 @@ static bool emu_ggpo_cb_advance(void *ud) {
 static void emu_ggpo_cb_log(void *ud, const char *filename, const void *buf, int len) {
     (void)ud;
     FILE *f = NULL;
-    if ((size_t)len != g_rollback.size || ggpo_port_fopen(&f, filename, "w") != 0 || !f) return;
-    rollback_log(f, buf);
+    if ((size_t)len != emu_ggpo__size() || ggpo_port_fopen(&f, filename, "w") != 0 || !f) return;
+    emu_ggpo__log(f, buf);
     fclose(f);
+}
+
+/* GGPO's round trip, when it has one. */
+static inline int emu_ggpo__ping(void) {
+    int ping = 0, kbps = 0, lb = 0, rb = 0;
+    return ggpo_port_stats(&ping, &kbps, &lb, &rb) == GGPO_PORT_OK ? ping : 0;
 }
 
 static void emu_ggpo_cb_event(void *ud, int code, int handle, int a, int b) {
@@ -283,7 +396,11 @@ static void emu_ggpo_cb_event(void *ud, int code, int handle, int a, int b) {
     case GGPO_PORT_EV_CONNECTED:     LOG_INFO("ggpo: connected to player %d", player + 1); break;
     case GGPO_PORT_EV_SYNCHRONIZING: break;
     case GGPO_PORT_EV_SYNCHRONIZED:  LOG_INFO("ggpo: synchronized with player %d", player + 1); break;
-    case GGPO_PORT_EV_RUNNING:       LOG_INFO("ggpo: running"); g_ggpo.running = true; break;
+    case GGPO_PORT_EV_RUNNING:
+        LOG_INFO("ggpo: running");
+        g_ggpo.running = true;
+        g_ggpo.ping_unset = emu_ggpo__ping();
+        break;
     case GGPO_PORT_EV_DISCONNECTED:
         LOG_WARN("ggpo: player %d disconnected; the session ends", player + 1);
         g_ggpo_cfg.mode = EMU_GGPO_OFF;
@@ -330,7 +447,7 @@ static inline int emu_ggpo_open(emu_thread_ctx_t *ctx) {
     int err = ggpo_port_start_p2p(&cb, EMU_GGPO_INPUT_SIZE, c->local_port, c->player,
                                   c->remote_ip, c->remote_port);
     if (err == GGPO_PORT_OK) {
-        ggpo_port_set_frame_delay(c->delay);
+        if (c->delay >= 0) ggpo_port_set_frame_delay(c->delay);
         ggpo_port_set_disconnect_timeout(5000);
     }
     return err;
@@ -350,56 +467,97 @@ static inline void emu_ggpo_replay_begin(emu_thread_ctx_t *ctx) {
     }
 }
 
+static inline const char *emu_ggpo__delay_name(void) {
+    static char s[16];
+    if (g_ggpo_cfg.delay < 0) return "auto";
+    snprintf(s, sizeof s, "%d", g_ggpo_cfg.delay);
+    return s;
+}
+
+/* A started session in the log. */
+static inline void emu_ggpo__log_start(void) {
+    if (g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST)
+        LOG_INFO("ggpo: synctest, rolling back %d frame(s) every frame; snapshot %zu bytes",
+                 g_ggpo_cfg.synctest_frames, emu_ggpo__size());
+    else if (!ggpo_port_bound())
+        LOG_INFO("ggpo: player %d through the lobby's transport, delay %s; snapshot %zu bytes",
+                 g_ggpo_cfg.player, emu_ggpo__delay_name(), emu_ggpo__size());
+    else
+        LOG_INFO("ggpo: player %d on UDP %u, peer %s:%u, delay %s; snapshot %zu bytes",
+                 g_ggpo_cfg.player, (unsigned)g_ggpo_cfg.local_port, g_ggpo_cfg.remote_ip,
+                 (unsigned)g_ggpo_cfg.remote_port, emu_ggpo__delay_name(), emu_ggpo__size());
+}
+
+/* A linked game's two cabinets, made before GGPO's first save: the same boot
+ * on both machines, so before the session is fine. False if they could not be. */
+static inline bool emu_ggpo__twin_start(emu_thread_ctx_t *ctx, emu_ggpo_mode_t mode) {
+    if (!emu_twin_wanted(g_active_profile)) return true;
+    /* SOLO's player has the SLAVE (a ride), the profile the MASTER. */
+    int local = mode == EMU_GGPO_SOLO || (mode == EMU_GGPO_P2P && g_ggpo_cfg.player == 2) ? 1 : 0;
+    return emu_twin_start(ctx, g_active_profile, local);
+}
+
 /* Mutex held. */
-static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx) {
+static inline bool emu_ggpo_start(emu_thread_ctx_t *ctx, emu_ggpo_mode_t mode) {
     memset(&g_ggpo, 0, sizeof g_ggpo);
+    g_ggpo.mode = mode;
     g_ggpo.ctx = ctx;
     g_ggpo.check_frame = -1;
+    g_ggpo.delay = mode == EMU_GGPO_P2P ? g_ggpo_cfg.delay : 0;
     g_ggpo.pend_frame = g_ggpo.done_frame = -1;
     g_ggpo.vs_mode_was = g_vs_mode;
     /* Both boards play the same rules, and a decided match goes back to
      * select: the players choose to go again or leave (ps3ui's prompt). */
-    if (g_ggpo_cfg.mode == EMU_GGPO_P2P) g_vs_mode = 1;
+    if (mode == EMU_GGPO_P2P) g_vs_mode = 1;
     netplay_build_masks(g_active_profile);
     if (!emu_ggpo_cold_boot(ctx)) {
         LOG_ERROR("ggpo: no board-reset hook; not starting");
         return false;
     }
     rollback_layout(ctx->cpu, ctx->bus);
+    if (!emu_ggpo__twin_start(ctx, mode)) return false;
+    if (mode == EMU_GGPO_SOLO) {
+        if (!g_twin.on) return false;
+        g_twin.op = g_active_profile->link_solo;
+        g_ggpo.on = g_ggpo.running = true;
+        LOG_INFO("solo: the %s's other cabinet runs beside this one; snapshot %zu bytes",
+                 g_active_profile->id, g_twin.board);
+        return true;
+    }
     int err = emu_ggpo_open(ctx);
     if (err != GGPO_PORT_OK) {
         LOG_ERROR("ggpo: could not start the session (GGPO error %d)", err);
+        emu_twin_stop();
         rollback_drain();
         return false;
     }
     g_ggpo.on = true;
-    if (g_ggpo_cfg.mode == EMU_GGPO_P2P) emu_ggpo_replay_begin(ctx);
-    if (g_ggpo_cfg.mode == EMU_GGPO_SYNCTEST)
-        LOG_INFO("ggpo: synctest, rolling back %d frame(s) every frame; snapshot %zu bytes",
-                 g_ggpo_cfg.synctest_frames, g_rollback.size);
-    else if (!ggpo_port_bound())
-        LOG_INFO("ggpo: player %d through the lobby's transport, delay %d; snapshot %zu bytes",
-                 g_ggpo_cfg.player, g_ggpo_cfg.delay, g_rollback.size);
-    else
-        LOG_INFO("ggpo: player %d on UDP %u, peer %s:%u, delay %d; snapshot %zu bytes",
-                 g_ggpo_cfg.player, (unsigned)g_ggpo_cfg.local_port, g_ggpo_cfg.remote_ip,
-                 (unsigned)g_ggpo_cfg.remote_port, g_ggpo_cfg.delay, g_rollback.size);
+    /* A replay is one board's inputs: not a twin's yet. */
+    if (g_ggpo_cfg.mode == EMU_GGPO_P2P && !g_twin.on) emu_ggpo_replay_begin(ctx);
+    emu_ggpo__log_start();
     return true;
 }
 
 /* Mutex held. The board goes back to the keyboard and the player's battery. */
 static inline void emu_ggpo_stop(void) {
     if (!g_ggpo.on) return;
-    replay_ggpo_end();      /* before GGPO frees its frames: nothing rolls back now */
-    ggpo_port_close();      /* hands GGPO's saved frames back through free_buf */
+    bool solo = g_ggpo.mode == EMU_GGPO_SOLO;
+    if (!solo) {
+        replay_ggpo_end();  /* before GGPO frees its frames: nothing rolls back now */
+        ggpo_port_close();  /* hands GGPO's saved frames back through free_buf */
+    }
+    emu_twin_stop();        /* the local cabinet stays, alone */
     rollback_drain();
     sound_settle();
     g_sound_mute = 0;
     netplay_release_inputs();
     backup_ram_reattach();
     g_vs_mode = g_ggpo.vs_mode_was;
-    LOG_INFO("ggpo: session over: %u frames, %u rollbacks, %u frames run again, %u sync errors",
-             g_ggpo.frames, g_ggpo.rollbacks, g_ggpo.resim_frames, ggpo_port_sync_errors());
+    if (solo) LOG_INFO("solo: over after %u frames; the board is alone", g_ggpo.frames);
+    else LOG_INFO("ggpo: session over: %u frames, %u rollbacks, %u frames run again, %u sync errors; "
+             "delay %d, ping %d ms, %u frames held for the peer, %u for timesyncs",
+             g_ggpo.frames, g_ggpo.rollbacks, g_ggpo.resim_frames, ggpo_port_sync_errors(),
+             g_ggpo.delay, g_ggpo.ping, g_ggpo.stalls, g_ggpo.holds);
     g_ggpo.on = false;
 }
 
@@ -431,6 +589,39 @@ static inline void emu_ggpo_report_check(void) {
     g_ggpo.check_frame = -1;
 }
 
+/* --ggpo-delay auto: no input goes in until the delay is set, from GGPO's
+ * first ping after RUNNING (its quality report, one round trip), or the
+ * minimum if none comes. The peer runs on into its prediction meanwhile.
+ * GGPO leaves its round trip uninitialised until the first reply, so the
+ * value read at RUNNING is not a ping (it read 616435125 ms; #1268). */
+static inline bool emu_ggpo__delay_ready(void) {
+    if (g_ggpo.delay >= 0) return true;
+    if (!g_ggpo.running) return false;
+    int ping = emu_ggpo__ping();
+    if (ping == g_ggpo.ping_unset) ping = 0;
+    if (ping <= 0 && ++g_ggpo.delay_wait < EMU_GGPO_AUTO_WAIT) return false;
+    g_ggpo.ping  = ping;
+    g_ggpo.delay = ping > 0 ? emu_ggpo_auto_delay(ping) : EMU_GGPO_AUTO_MIN;
+    ggpo_port_set_frame_delay(g_ggpo.delay);
+    if (ping > 0) LOG_INFO("ggpo: ping %d ms: input delay %d frames", ping, g_ggpo.delay);
+    else LOG_WARN("ggpo: no ping from the peer in %d frames: input delay %d", EMU_GGPO_AUTO_WAIT, g_ggpo.delay);
+    return true;
+}
+
+/* The link as the players had it, beside the check lines: a log sent in
+ * from far away says what the match ran on (Pinboard #1258). */
+static inline void emu_ggpo_report_net(void) {
+    if (g_ggpo_cfg.mode != EMU_GGPO_P2P || g_ggpo.frames % EMU_GGPO_CHECK_EVERY != 0) return;
+    int ping = emu_ggpo__ping();
+    if (ping > 0) g_ggpo.ping = ping;
+    const ggl_status_t *st = &g_ggl.st;
+    const char *path = !st->match[0] ? "straight" : st->direct ? "direct" : "relayed";
+    LOG_INFO("ggpo: net frame %u: ping %d ms, delay %d, %s; %u rollbacks, %u frames again, "
+             "%u frames held for the peer, %u for timesyncs",
+             g_ggpo.frames, g_ggpo.ping, g_ggpo.delay, path, g_ggpo.rollbacks, g_ggpo.resim_frames,
+             g_ggpo.stalls, g_ggpo.holds);
+}
+
 /* A result no rollback can take back any more is counted. */
 static inline void emu_ggpo_settle_result(void) {
     if (g_ggpo.pend_frame < 0 || g_ggpo.cur_frame < g_ggpo.pend_frame + EMU_GGPO_RESULT_SETTLE) return;
@@ -451,6 +642,15 @@ static inline uint32_t emu_ggpo_results(int *winner) {
 
 /* This frame's inputs in, and the frame run. Mutex held. True when it ran. */
 static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
+    if (g_ggpo.mode == EMU_GGPO_SOLO) {
+        /* The player's keys are the ride's; the Main's come from link_solo. */
+        uint32_t in[2] = { 0, emu_twin_word(g_input.held) };
+        g_twin.op_held = g_input.held;
+        bool ran = emu_ggpo_run_frame(ctx, in);
+        g_ggpo.frames++;
+        if (g_ggpo.frames % EMU_GGPO_CHECK_EVERY == 0) emu_twin_say(g_ggpo.frames);
+        return ran;
+    }
     ggpo_port_idle(0);
     emu_ggpo_unmute();
     int err;
@@ -458,11 +658,14 @@ static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
         uint32_t held = g_input.held;
         uint32_t w0 = emu_ggpo__word(held, g_netplay.bit_p1, true);
         uint32_t w1 = emu_ggpo__word(held, g_netplay.bit_p2, false);
+        if (g_twin.on) w0 = w1 = emu_twin_word(held);   /* both cabinets the keys' */
         err = ggpo_port_add_local_input(0, &w0, EMU_GGPO_INPUT_SIZE);
         if (err == GGPO_PORT_OK) err = ggpo_port_add_local_input(1, &w1, EMU_GGPO_INPUT_SIZE);
     } else {
+        if (!emu_ggpo__delay_ready()) return false;
         uint32_t w = emu_ggpo_sample_local();
         err = ggpo_port_add_local_input(0, &w, EMU_GGPO_INPUT_SIZE);
+        if (err == GGPO_PORT_PREDICTION_LIMIT) g_ggpo.stalls++;
     }
     if (err != GGPO_PORT_OK) return false;     /* not running yet, or too far ahead */
     uint32_t in[2] = { 0, 0 };
@@ -472,8 +675,10 @@ static inline bool emu_ggpo_frame(emu_thread_ctx_t *ctx) {
     ggpo_port_advance_frame();
     emu_ggpo_unmute();
     g_ggpo.frames++;
+    if (g_twin.on && g_ggpo.frames % EMU_GGPO_CHECK_EVERY == 0) emu_twin_say(g_ggpo.frames);
     emu_ggpo_report_errors();
     emu_ggpo_report_check();
+    emu_ggpo_report_net();
     emu_ggpo_settle_result();
     return ran;
 }
@@ -486,16 +691,27 @@ typedef enum { EMU_GGPO_TICK_IDLE, EMU_GGPO_TICK_HELD, EMU_GGPO_TICK_RAN } emu_g
 static inline emu_ggpo_tick_t emu_ggpo_tick(emu_thread_ctx_t *ctx) {
     emu_ggpo_tick_t r = EMU_GGPO_TICK_HELD;
     emu_mutex_lock(&ctx->mutex);
-    if (g_ggpo_cfg.mode == EMU_GGPO_OFF || !g_ggpo.on) {
-        bool go = g_ggpo_cfg.mode != EMU_GGPO_OFF && emu_ggpo_start(ctx);
+    emu_ggpo_mode_t want = g_ggpo_cfg.mode != EMU_GGPO_OFF ? g_ggpo_cfg.mode
+                         : emu_ggpo_solo_wanted() ? EMU_GGPO_SOLO : EMU_GGPO_OFF;
+    if (g_ggpo.on && g_ggpo.mode != want) {
+        emu_ggpo_stop();                       /* the next pass opens what is wanted now */
+        r = EMU_GGPO_TICK_IDLE;
+    } else if (!g_ggpo.on) {
+        bool go = want != EMU_GGPO_OFF && emu_ggpo_start(ctx, want);
         if (!go) {
             emu_ggpo_stop();
-            g_ggpo_cfg.mode = EMU_GGPO_OFF;
+            if (want == EMU_GGPO_SOLO) g_ggpo_solo_refused = g_active_profile;
+            else g_ggpo_cfg.mode = EMU_GGPO_OFF;
         }
         r = EMU_GGPO_TICK_IDLE;
-    } else if (g_ggpo.skip > 0) {
-        g_ggpo.skip--;                         /* ahead of the peer: hold a frame */
+    } else if (g_ggpo.skip > 0 && g_ggpo.since_hold >= EMU_GGPO_HOLD_GAP) {
+        /* Ahead of the peer: hold a frame. One at a time, a few frames apart:
+         * GGPO asks for up to 9 at once, and 9 held together are a freeze. */
+        g_ggpo.skip--;
+        g_ggpo.since_hold = 0;
+        g_ggpo.holds++;
     } else if (emu_ggpo_frame(ctx)) {
+        g_ggpo.since_hold++;
         r = EMU_GGPO_TICK_RAN;
     }
     emu_mutex_unlock(&ctx->mutex);
@@ -508,6 +724,8 @@ static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
     if (emu_slice_should_stop(ctx)) return false;
     int64_t t0 = emu_now_us();
     emu_ggpo_tick_t r = emu_ggpo_tick(ctx);
+    /* The UI thread draws from the bus: not while the hidden cabinet is in it. */
+    g_twin.ui_lock = g_twin.on ? &ctx->mutex : NULL;
     if (r == EMU_GGPO_TICK_IDLE) return false;
     bool ran = r == EMU_GGPO_TICK_RAN;
     int64_t t1 = emu_now_us();
@@ -524,11 +742,20 @@ static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) {
 
 /* The lobby, every pass of the run loop, running or not. Outside the mutex. */
 static inline void emu_ggpo_lobby_pump(void) {
-    ggl_pump(g_ggpo.on, g_active_profile ? g_active_profile->id : "m2");
+    ggl_pump(emu_ggpo_active(), g_active_profile ? g_active_profile->id : "m2");
 }
 
 /* Whether the run loop hands RUNNING to emu_ggpo_step. */
-static inline bool emu_ggpo_wanted(void) { return g_ggpo_cfg.mode != EMU_GGPO_OFF || g_ggpo.on; }
+static inline bool emu_ggpo_wanted(void) {
+    return g_ggpo_cfg.mode != EMU_GGPO_OFF || g_ggpo.on || emu_ggpo_solo_wanted();
+}
+
+/* A SOLO session is open: the board runs, but no match holds it. */
+static inline bool emu_ggpo_solo(void) { return g_ggpo.on && g_ggpo.mode == EMU_GGPO_SOLO; }
+
+/* A match asked for or open: the frontends' pause, reset and menus wait for
+ * it. SOLO is not one: one player, nobody else's board to keep up with. */
+static inline bool emu_ggpo_match(void) { return g_ggpo_cfg.mode != EMU_GGPO_OFF || emu_ggpo_active(); }
 
 /* At the emu thread's end. */
 static inline void emu_ggpo_shutdown(emu_thread_ctx_t *ctx) {
@@ -537,16 +764,41 @@ static inline void emu_ggpo_shutdown(emu_thread_ctx_t *ctx) {
     emu_mutex_unlock(&ctx->mutex);
 }
 
+/* RPCN under SOLO, once a frame outside the mutex: the login, the lobby and a
+ * room go on, and SOLO ends as soon as a room (or a board reset) has the
+ * board, both cabinets booting again from the next solo start. */
+static inline void emu_ggpo_solo_netplay(emu_thread_ctx_t *ctx) {
+    if (!emu_ggpo_solo()) return;
+    uint32_t resets = ctx->reset_count;
+    emu_netplay_pump(ctx);
+    if (ctx->reset_count != resets || !emu_ggpo_solo_wanted()) emu_ggpo_shutdown(ctx);
+}
+
+/* Around the renderer's reads of the bus (game_frame.h), on the UI thread. */
+static inline emu_mutex_t *emu_twin_ui_enter(void) {
+    emu_mutex_t *m = g_twin.ui_lock;
+    if (m) emu_mutex_lock(m);
+    return m;
+}
+static inline void emu_twin_ui_leave(emu_mutex_t *m) { if (m) emu_mutex_unlock(m); }
+
 #else  /* !M2HLE_GGPO */
+
+static inline emu_mutex_t *emu_twin_ui_enter(void) { return NULL; }
+static inline void emu_twin_ui_leave(emu_mutex_t *m) { (void)m; }
 
 static inline bool emu_ggpo_active(void) { return false; }
 static inline bool emu_ggpo_wanted(void) { return false; }
+static inline bool emu_ggpo_solo(void) { return false; }
+static inline bool emu_ggpo_match(void) { return false; }
 static inline void emu_ggpo_lobby_pump(void) {}
 static inline bool emu_ggpo_step(emu_thread_ctx_t *ctx) { (void)ctx; return false; }
 typedef enum { EMU_GGPO_TICK_IDLE, EMU_GGPO_TICK_HELD, EMU_GGPO_TICK_RAN } emu_ggpo_tick_t;
 static inline emu_ggpo_tick_t emu_ggpo_tick(emu_thread_ctx_t *ctx) { (void)ctx; return EMU_GGPO_TICK_IDLE; }
 static inline uint32_t emu_ggpo_results(int *winner) { if (winner) *winner = 0; return 0; }
 static inline void emu_ggpo_shutdown(emu_thread_ctx_t *ctx) { (void)ctx; }
+static inline void emu_ggpo_solo_netplay(emu_thread_ctx_t *ctx) { (void)ctx; }
+static bool (*g_ggpo_solo_veto)(void);
 
 #endif
 

@@ -1,12 +1,15 @@
 // The arcade, on the page that runs the game (m2-hle2's web build at arcade.sonicthefighte.rs,
-// ?game=sfight or ?game=srallyc).
+// ?game=sfight, ?game=srallyc, ...).
 //
 //   <meta name="stf-arcade-api" content="https://scores.sonicthefighte.rs">
-//   <script type="module" src="arcade/stf-arcade.mjs?game=srallyc"></script>
+//   <script type="module" src="arcade/stf-arcade.mjs?game=srallyc&profile=srallyc"></script>
 //
-// ?game= names the game (games.mjs): sfight, the default, or srallyc. Each has its own
-// shared board, its own cookies and its own words; Sega Rally's never mention the Fly,
-// which plays only Sonic the Fighters.
+// ?game= names the game (games.mjs): sfight, the default, or any other listed there. Each
+// has its own shared board, its own cookies and its own words; only Sonic the Fighters'
+// mention the Fly, which plays only Sonic. ?profile= is the m2-hle2 profile that runs: a
+// game run as several (games.mjs `sets`) keeps the board under that profile's own key, and
+// a profile that does not share the board, or a game the arcade does not know, plays alone
+// (the module then only answers the page: ready, keepSave() true).
 //
 // The page ships its own copy of this file, ranking.mjs and stf-arcade.css (m2-hle2's
 // web/site/arcade/: its build refuses scripts from other sites); only the API calls go to
@@ -28,12 +31,13 @@
 //   window.stfArcade.onGame(mode)   once the game runs: 'solo' 'netplay' 'ggpo' 'follow'
 
 import { hexToBytes, newEntries } from './ranking.mjs';
-import { gameFor } from './games.mjs';
+import { gameFor, nvramKeyFor } from './games.mjs';
 
-const GAME = gameFor(new URL(import.meta.url).searchParams.get('game')) || gameFor();
+const ASKED = new URL(import.meta.url).searchParams;
+const GAME = gameFor(ASKED.get('game'));
 const API = (document.querySelector('meta[name=stf-arcade-api]') || {}).content ||
   new URL('.', import.meta.url).origin;
-const NVRAM_KEY = GAME.nvramKey;
+const NVRAM_KEY = GAME && nvramKeyFor(GAME, ASKED.get('profile'));
 const LOCAL_KEY = NVRAM_KEY + '.local';      // the player's own board, kept while they play ours
 const YEAR = 365 * 24 * 3600;
 
@@ -46,8 +50,13 @@ const PAGE = {
   srallyc: {
     cookie: 'srally', sentKey: 'srallyArcade.sent', asksKeep: true, privacy: 'srally-privacy.html',
   },
-}[GAME.id];
-const SENT_KEY = PAGE.sentKey;               // entries the shared board already has
+}[GAME && GAME.id] || (GAME && {
+  // Every other game: its own cookies (named for its id, so no other game's answer is
+  // reused), its save kept in this browser as m2-hle2 always kept it, words without the Fly.
+  cookie: GAME.id, sentKey: GAME.id + 'Arcade.sent', asksKeep: false,
+  privacy: `game-privacy.html?game=${GAME.id}`, words: GAME.score ? 'score' : 'time',
+});
+const SENT_KEY = PAGE && PAGE.sentKey;       // entries the shared board already has
 
 /* The words, by language (Pinboard #944), as HTML: the game page's m2hleLang picks one
  * (?lang=); without it they are English. A game's own are arcade.<game id>.*. */
@@ -66,6 +75,16 @@ Your settings and best times are kept in this browser too.</p>
 everything and every visit starts on a fresh board.</p>`,
     'arcade.srallyc.share': 'Arcade: share my best times, race on the shared board',
     'arcade.srallyc.only': 'Best times only',
+    'arcade.score.what': `<p><b>Arcade: shared high scores.</b> Your game starts on the same board as everyone
+else's who plays {title} here, and goes for the same high scores. When you set one, its
+<b>initials and score</b> are sent to the arcade and shown to everyone.</p>`,
+    'arcade.score.share': 'Arcade: share my high scores, play on the shared board',
+    'arcade.score.only': 'High scores only',
+    'arcade.time.what': `<p><b>Arcade: shared best times.</b> Your game starts on the same board as everyone
+else's who plays {title} here, and goes for the same best times. When you set one, its
+<b>initials and time</b> are sent to the arcade and shown to everyone.</p>`,
+    'arcade.time.share': 'Arcade: share my best times, play on the shared board',
+    'arcade.time.only': 'Best times only',
     'arcade.stats': `<b>Usage stats.</b> Anonymous counts that help us keep the site working: that the page
 opened, that a game started (alone, netplay or watching), and how long it ran.
 Nothing else: no address, no browser details, no tracking across sites.`,
@@ -96,6 +115,12 @@ can see or delete what was sent. Your choice is kept in the cookie <code>{consen
 <p><b>セーブをここに保存。</b>または、このブラウザだけに保存して何も送らないこともできます。すべて断ると、毎回まっさらな基板から始まります。</p>`,
     'arcade.srallyc.share': 'アーケード：ベストタイムを共有し、共有の基板でレースする',
     'arcade.srallyc.only': 'ベストタイムのみ',
+    'arcade.score.what': `<p><b>アーケード：ハイスコアの共有。</b>ここで{title}をプレイするみんなと同じ基板でゲームが始まり、同じハイスコアを競います。記録を出すと、その<b>イニシャルとスコア</b>がアーケードに送られ、全員に表示されます。</p>`,
+    'arcade.score.share': 'アーケード：ハイスコアを共有し、共有の基板でプレイする',
+    'arcade.score.only': 'ハイスコアのみ',
+    'arcade.time.what': `<p><b>アーケード：ベストタイムの共有。</b>ここで{title}をプレイするみんなと同じ基板でゲームが始まり、同じベストタイムを競います。記録を出すと、その<b>イニシャルとタイム</b>がアーケードに送られ、全員に表示されます。</p>`,
+    'arcade.time.share': 'アーケード：ベストタイムを共有し、共有の基板でプレイする',
+    'arcade.time.only': 'ベストタイムのみ',
     'arcade.stats': `<b>利用統計。</b>サイトの運営に役立つ匿名の集計です。ページを開いたこと、ゲームを始めたこと（ひとりで、オンライン対戦で、観戦で）、そのプレイ時間だけを送ります。アドレスやブラウザの詳細は送らず、サイトをまたいだ追跡もしません。`,
     'arcade.ids': `どちらかを共有すると、送った内容を確認・削除できるよう、このブラウザにランダムな ID（Cookie <code>{player}</code>）が付きます。選択は Cookie <code>{consent}</code> に保存されます。<a href="{privacy}" target="_blank" rel="noopener">詳しくはこちら（英語）</a>。`,
     'arcade.later': '選択は次にゲームを始めたときから有効です。今すぐ基板を切り替えるには、ページを再読み込みしてください。',
@@ -119,7 +144,12 @@ const LANG = typeof m2hleLang === 'object' ? m2hleLang : null;   // a page scrip
 if (LANG) LANG.add(WORDS);
 const tr = (key, vars) => (LANG ? LANG.t(key, vars) :
   WORDS.en[key].replace(/\{(\w+)\}/g, (m, k) => (vars && k in vars ? vars[k] : m)));
-const own = (what) => tr(`arcade.${GAME.id}.${what}`);
+/* The game's title in the page's language, when the page has its list (m2hle-games.js). */
+function pageTitle() {
+  try { return m2hleGames.text(GAME.id).title; } catch { return null; }   // no list, or not in it
+}
+const TITLE = GAME && (pageTitle() || GAME.title);
+const own = (what) => tr(`arcade.${PAGE.words || GAME.id}.${what}`, { title: TITLE });
 
 /* ---- The choice, in cookies ------------------------------------------------- */
 
@@ -132,7 +162,7 @@ function setCookie(name, value, maxAge = YEAR) {
   document.cookie = `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; SameSite=Lax; Secure`;
 }
 
-const CONSENT = PAGE.cookie + '_consent', PLAYER = PAGE.cookie + '_player';
+const CONSENT = PAGE && PAGE.cookie + '_consent', PLAYER = PAGE && PAGE.cookie + '_player';
 const CHOICES = ['arcade', 'usage', 'keep'];
 
 /* { arcade, usage, keep } once they chose, null before. */
@@ -282,7 +312,7 @@ addEventListener('pagehide', () => {
 
 /* ---- The banner and the panel -------------------------------------------- */
 
-const WHAT = `${own('what')}
+const WHAT = PAGE && `${own('what')}
 <p>${tr('arcade.stats')}</p>
 <p>${tr('arcade.ids', { player: PLAYER, consent: CONSENT, privacy: `${API}/${PAGE.privacy}` })}</p>`;
 
@@ -374,6 +404,13 @@ function start() {
   if (!readConsent()) banner();
 }
 
-let ready = prepare().then(() => usage('visit'));
-window.stfArcade = { get ready() { return ready; }, onGame, readConsent, keepSave, game: GAME.id };
-if (document.body) start(); else addEventListener('DOMContentLoaded', start);
+let ready;
+if (NVRAM_KEY) {
+  ready = prepare().then(() => usage('visit'));
+  window.stfArcade = { get ready() { return ready; }, onGame, readConsent, keepSave, game: GAME.id };
+  if (document.body) start(); else addEventListener('DOMContentLoaded', start);
+} else {
+  // No board for this game or profile: the game keeps its own save, and nothing is asked.
+  window.stfArcade = { ready: Promise.resolve(), onGame() {}, readConsent: () => null,
+    keepSave: () => true, game: null };
+}

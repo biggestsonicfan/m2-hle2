@@ -80,7 +80,8 @@ biggest remaining differences are letterforms (the fonts are not Sega's).
   own w x h, so a `_rb` placeholder's corner is `m(w, h)`, not `m(0, 0)`.
 - **The button glyphs** are font characters: U+E000..E003 in the strings are drawn as the PS
   faces (circle, cross, triangle, square) on a Western console, where cross confirms. Here
-  they travel as `\x01`..`\x04`.
+  they travel as `\x01`..`\x04`, with `\x05`..`\x08` for L1, L2, R1, R2, and are drawn
+  with Kenney's Input Prompts (CC0), not graded against the PS3's (Pinboard #1408).
 - **The PS3's Yes/No dialog starts on No, and circle does nothing**: to answer no you move to
   No and press cross. Every shell menu clamps its cursor; the room list wraps.
 - **The countdown in the VS lobby is 30 s** (5 s in a room of three or more), and at zero

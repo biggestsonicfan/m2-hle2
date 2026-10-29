@@ -109,12 +109,8 @@ const mame = [];
 
 /* ---- here ----------------------------------------------------------------- */
 
-async function playHere(port) {
-    const avPort = port + 100;
-    const emu = await M2Hle.launch({ rom: findRom().primary, port,
-        extraArgs: ['--av-port', String(avPort), '--av-size', `${W}x${H}`] });
-    const pictures = new Map();
-    let sock = null, keep = false;
+/* The board's memory and pads, as the steps below use them. */
+function boardIo(emu) {
     const u8 = async (a) => (await emu.readMemory(a, 1))[0];
     const u32 = async (a) => (await emu.readMemory(a, 4)).readUInt32LE(0);
     const w16 = (a, v) => emu.writeMemory(a, [v & 0xff, (v >> 8) & 0xff]);
@@ -125,91 +121,124 @@ async function playHere(port) {
             await emu.waitFrames(1);
         }
     };
+    return { u8, u32, w16, tap, until };
+}
+
+/* The --av-port stream: every video picture, by board frame, while av.keep is set. */
+function readPictures(sock, pictures, av) {
+    let buf = Buffer.alloc(0), hdr = false;
+    sock.on('error', () => {});
+    sock.on('data', (d) => {
+        buf = Buffer.concat([buf, d]);
+        for (;;) {
+            if (!hdr) { if (buf.length < 32) return; buf = buf.subarray(32); hdr = true; }
+            if (buf.length < 24) return;
+            const size = buf.readUInt32LE(4);
+            if (buf.length < 24 + size) return;
+            if (buf[0] === 0x56 && av.keep) pictures.set(Number(buf.readBigUInt64LE(8)), Buffer.from(buf.subarray(24, 24 + size)));
+            buf = buf.subarray(24 + size);
+        }
+    });
+}
+
+/* Coin, start, and the fighter picked at the select screen. */
+async function pickFighter(emu, io) {
+    await emu.waitFrames(900);
+    await io.tap(COIN1);
+    await emu.waitFrames(60);
+    await io.tap(IN.START1);
+    await io.until('character select', async () => await io.u8(MODE) === 7 && await io.u8(SUB) === 5);
+    await emu.waitFrames(400);
+    for (let i = 0; i < 12 && await io.u8(P1_ROB + ROB_CHAR) !== CHAR; i++) await io.tap(IN.P1_RIGHT, 10);
+    const picked = await io.u8(P1_ROB + ROB_CHAR);
+    rep.check(`fighter ${CHAR} picked here`, picked === CHAR, `cursor on ${picked}`);
+    await io.tap(IN.P1_B2);
+}
+
+/* The rounds, cheated as lunar-fox.lua does, until MEZASE_DEATHEGG_MASK_INT. */
+async function cheatToCutscene(emu, io) {
+    let full = null;
+    for (const end = Date.now() + 600000; ;) {
+        const mode = await io.u8(MODE), sub = await io.u8(SUB);
+        if (sub === SUB_MASK_INT) break;
+        if (mode === 3) throw new Error('the game went back to attract: P1 lost');
+        if (mode === 7 && sub <= 7) await emu.writeMemory(STAGE_ID, [8]);
+        if (sub === 8) full = (await emu.readMemory(await io.u32(FA_ROB0) + ROB_ENERGY, 2)).readUInt16LE(0);
+        if (sub === 9 && full !== null) {
+            await io.w16(await io.u32(FA_ROB0) + ROB_ENERGY, full);
+            await io.w16(await io.u32(FA_ROB1) + ROB_ENERGY, 1);
+            if ((await emu.readMemory(GAME_TIMER, 2)).readInt16LE(0) > 60) await io.w16(GAME_TIMER, 60);
+        }
+        if (Date.now() > end) throw new Error(`the cutscene never came (mode ${mode}, sub ${sub})`);
+        await emu.waitFrames(1);
+    }
+}
+
+/* The random seed held through the cutscene, a frame at a time, as
+ * lunar-fox.lua's frame hook does. */
+async function holdRandom(emu, io) {
+    await emu.rpc('emu_stop', {});
+    for (let sub = await io.u8(SUB); sub >= SUB_MASK_INT && sub < SUB_DSP; sub = await io.u8(SUB)) {
+        await emu.writeMemory(RANDOM, [RANDOM_SEED & 0xff, (RANDOM_SEED >> 8) & 0xff, (RANDOM_SEED >> 16) & 0xff, RANDOM_SEED >>> 24]);
+        /* the stop lands at a frame edge, a moment after emu_stop answers */
+        for (let k = 0; !(await emu.rpc('run_frames', { count: 1 }, { allowFail: true })).ok; k++) {
+            if (k > 200) throw new Error('the board never stopped');
+            await new Promise((r2) => setTimeout(r2, 5));
+        }
+    }
+    await emu.rpc('emu_run', {});
+}
+
+/* (part, am_cntr) -> board frame, over the frames MEZASE_DEATHEGG_DSP ran */
+function cutsceneFrames(marks) {
+    const at = new Map();
+    let part = 0, last = -1, done = false;
+    for (const m of marks) {
+        const sub = m[2] & 0xff, am = m[3] & 0xffff;
+        if (sub !== SUB_DSP) { if (last >= 0) done = true; continue; }
+        if (done) break;
+        if (am < last) part++;
+        if (am !== last) at.set(`${part}:${am}`, m[0]);
+        if (FIXRAND && am !== last && am % 50 === 0) rep.note(`  random at part ${part} am ${am}: ${(m[4] >>> 0).toString(16).toUpperCase()}`);
+        last = am;
+    }
+    return at;
+}
+
+async function playHere(port) {
+    const avPort = port + 100;
+    const emu = await M2Hle.launch({ rom: findRom().primary, port,
+        extraArgs: ['--av-port', String(avPort), '--av-size', `${W}x${H}`] });
+    const pictures = new Map();
+    const av = { keep: false };
+    const io = boardIo(emu);
+    let sock = null;
     try {
         if (Object.keys(SET).length) await emu.rpc('set_camera', SET);
         sock = net.connect(avPort, '127.0.0.1');
-        let buf = Buffer.alloc(0), hdr = false;
-        sock.on('error', () => {});
-        sock.on('data', (d) => {
-            buf = Buffer.concat([buf, d]);
-            for (;;) {
-                if (!hdr) { if (buf.length < 32) return; buf = buf.subarray(32); hdr = true; }
-                if (buf.length < 24) return;
-                const size = buf.readUInt32LE(4);
-                if (buf.length < 24 + size) return;
-                if (buf[0] === 0x56 && keep) pictures.set(Number(buf.readBigUInt64LE(8)), Buffer.from(buf.subarray(24, 24 + size)));
-                buf = buf.subarray(24 + size);
-            }
-        });
+        readPictures(sock, pictures, av);
         await emu.waitForRom();
         if (FIXRAND) {
             const w = (a, v) => emu.rpc('write_memory', { addr: '0x' + a.toString(16), data: v.toString(16).padStart(8, '0').match(/../g).reverse().join(''), rom: '1' });
             await w(0x66bc, 0x5c681e01);
             for (const a of [0x66c8, 0x66d4, 0x66e0]) await w(a, 0x5c681e00);
         }
-        await emu.waitFrames(900);
-        await tap(COIN1);
-        await emu.waitFrames(60);
-        await tap(IN.START1);
-        await until('character select', async () => await u8(MODE) === 7 && await u8(SUB) === 5);
-        await emu.waitFrames(400);
-        for (let i = 0; i < 12 && await u8(P1_ROB + ROB_CHAR) !== CHAR; i++) await tap(IN.P1_RIGHT, 10);
-        const picked = await u8(P1_ROB + ROB_CHAR);
-        rep.check(`fighter ${CHAR} picked here`, picked === CHAR, `cursor on ${picked}`);
-        await tap(IN.P1_B2);
-        /* the rounds, cheated as lunar-fox.lua does, until MEZASE_DEATHEGG_MASK_INT */
-        let full = null;
-        for (const end = Date.now() + 600000; ;) {
-            const mode = await u8(MODE), sub = await u8(SUB);
-            if (sub === SUB_MASK_INT) break;
-            if (mode === 3) throw new Error('the game went back to attract: P1 lost');
-            if (mode === 7 && sub <= 7) await emu.writeMemory(STAGE_ID, [8]);
-            if (sub === 8) full = (await emu.readMemory(await u32(FA_ROB0) + ROB_ENERGY, 2)).readUInt16LE(0);
-            if (sub === 9 && full !== null) {
-                await w16(await u32(FA_ROB0) + ROB_ENERGY, full);
-                await w16(await u32(FA_ROB1) + ROB_ENERGY, 1);
-                if ((await emu.readMemory(GAME_TIMER, 2)).readInt16LE(0) > 60) await w16(GAME_TIMER, 60);
-            }
-            if (Date.now() > end) throw new Error(`the cutscene never came (mode ${mode}, sub ${sub})`);
-            await emu.waitFrames(1);
-        }
-        rep.note(`MEZASE_DEATHEGG_MASK_INT reached here, stage ${await u8(0x500064)}`);
-        keep = true;
-        if (FIXRAND) {
-            /* a frame at a time, as lunar-fox.lua's frame hook does */
-            await emu.rpc('emu_stop', {});
-            for (let sub = await u8(SUB); sub >= SUB_MASK_INT && sub < SUB_DSP; sub = await u8(SUB)) {
-                await emu.writeMemory(RANDOM, [RANDOM_SEED & 0xff, (RANDOM_SEED >> 8) & 0xff, (RANDOM_SEED >> 16) & 0xff, RANDOM_SEED >>> 24]);
-                /* the stop lands at a frame edge, a moment after emu_stop answers */
-                for (let k = 0; !(await emu.rpc('run_frames', { count: 1 }, { allowFail: true })).ok; k++) {
-                    if (k > 200) throw new Error('the board never stopped');
-                    await new Promise((r2) => setTimeout(r2, 5));
-                }
-            }
-            await emu.rpc('emu_run', {});
-        }
+        await pickFighter(emu, io);
+        await cheatToCutscene(emu, io);
+        rep.note(`MEZASE_DEATHEGG_MASK_INT reached here, stage ${await io.u8(0x500064)}`);
+        av.keep = true;
+        if (FIXRAND) await holdRandom(emu, io);
         const prefix = path.join(OUT, 'here');
         const r = await emu.rpc('capture_dl', {
             frames: 1100, path: prefix, probes: `${SUB.toString(16)}:4,${AM_CNTR.toString(16)}:4,${RANDOM.toString(16)}:4`,
             lo: 0x8cfff0, hi: 0x8d0000, max_words: 1024, timeout_ms: 900000,
         });
         await new Promise((r2) => setTimeout(r2, 500));   /* the last pictures in flight */
-        keep = false;
+        av.keep = false;
         const meta = JSON.parse(fs.readFileSync(prefix + '.json', 'utf8'));
         for (const ext of ['.bin', '.json']) fs.rmSync(prefix + ext, { force: true });
         if (!r.complete) rep.note(`capture_dl stopped after ${r.frames} frames`);
-        /* (part, am_cntr) -> board frame, over the frames MEZASE_DEATHEGG_DSP ran */
-        const at = new Map();
-        let part = 0, last = -1, done = false;
-        for (const m of meta.marks) {
-            const sub = m[2] & 0xff, am = m[3] & 0xffff;
-            if (sub !== SUB_DSP) { if (last >= 0) done = true; continue; }
-            if (done) break;
-            if (am < last) part++;
-            if (am !== last) at.set(`${part}:${am}`, m[0]);
-            if (FIXRAND && am !== last && am % 50 === 0) rep.note(`  random at part ${part} am ${am}: ${(m[4] >>> 0).toString(16).toUpperCase()}`);
-            last = am;
-        }
+        const at = cutsceneFrames(meta.marks);
         const keys = [...pictures.keys()], frames = [...at.values()];
         rep.note(`here: ${pictures.size} pictures (board frames ${Math.min(...keys)}..${Math.max(...keys)}), ` +
                  `cutscene on board frames ${Math.min(...frames)}..${Math.max(...frames)}`);

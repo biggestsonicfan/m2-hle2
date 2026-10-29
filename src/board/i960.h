@@ -114,6 +114,13 @@ typedef struct i960_cpu {
      * reinitialize). Its interrupt table is where an interrupt pin's vector
      * finds its handler (hle_irq_vector_handler). */
     uint32_t       prcb;
+
+    /* The PRCB's interrupt table and interrupt stack, as the processor took
+     * them when it read the PRCB (i960_prcb_cache): it does not read them
+     * again at an interrupt. Pilot Kids and Zero Gunner clear their RAM PRCB
+     * after the IAC reinitialize and run on (MAME patches the clear out).
+     * prcb_cached is the PRCB they came from; 0, nothing taken yet. */
+    uint32_t       prcb_cached, intr_table, intr_stack;
 } i960_cpu_t;
 
 /* How the i960 is charged: MAME's per-opcode table (i960_cycle_cost), or, for a

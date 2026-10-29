@@ -11,6 +11,9 @@
  * to every pad. The first pad plays player 1; a second plays player 2 unless the
  * panel says otherwise. Under netplay both reach the local player (netplay.h,
  * netplay_sample_local), which is what a player with two pads plugged in expects.
+ * A four-player game (Air Walkers, web_four_players) gives a third and fourth
+ * pad to players 3 and 4 (web_pad_far_set), on this machine only: the board
+ * reads them only outside a session.
  *
  * Browsers hide pads from a page until a button is pressed on one: "no controller"
  * before that is not a fault.
@@ -33,6 +36,7 @@ m2hleLang.add({
     'pad.axis': 'Axis {n} {dir}',
     'pad.sub.macros': 'Macros: one press holds several buttons',
     'pad.sub.page': 'The page: offline only, as the button beside the menu',
+    'pad.sub.cab': 'The cabinet: the first pad only',
     'pad.none': 'Not set',
     'pad.remove': 'Remove',
     'pad.remove.from': 'Remove {button} from {action}',
@@ -41,6 +45,7 @@ m2hleLang.add({
     'pad.status.none': 'No controller found. Connect one and press any button on it.',
     'pad.status.p1': 'Player 1: {name}',
     'pad.status.p2': 'Player 2: {name}',
+    'pad.status.p3': 'Player 3: {name}', 'pad.status.p4': 'Player 4: {name}',
     'pad.status.also': 'Also player 1: {name}',
     'pad.status.odd': '{pads} (unrecognised layout: buttons are shown by number)',
     'pad.status.twin': '{pads} (Saturn Twin Stick layout, through the Bliss-Box)',
@@ -59,6 +64,7 @@ m2hleLang.add({
     'pad.axis': '軸{n} {dir}',
     'pad.sub.macros': 'マクロ：1回押すと複数のボタンを同時に押します',
     'pad.sub.page': 'ページ：オフライン時のみ。メニュー横のボタンと同じです',
+    'pad.sub.cab': '筐体：1台目のパッドのみ',
     'pad.none': '未設定',
     'pad.remove': '削除',
     'pad.remove.from': '{action}から{button}を削除',
@@ -67,6 +73,7 @@ m2hleLang.add({
     'pad.status.none': 'コントローラーが見つかりません。接続して、いずれかのボタンを押してください。',
     'pad.status.p1': 'プレイヤー1：{name}',
     'pad.status.p2': 'プレイヤー2：{name}',
+    'pad.status.p3': 'プレイヤー3：{name}', 'pad.status.p4': 'プレイヤー4：{name}',
     'pad.status.also': 'こちらもプレイヤー1：{name}',
     'pad.status.odd': '{pads}（未対応の配置のため、ボタンは番号で表示しています）',
     'pad.status.twin': '{pads}（Bliss-Box 経由のセガサターン ツインスティック配置）',
@@ -84,6 +91,12 @@ const m2hlePad = (() => {
    * mean something else by every button. */
   const TWIN = !!m2hleGame.twin;
   const STORE = TWIN ? 'm2hle.pad.' + m2hleGame.id : 'm2hle.pad';
+  /* A light-gun game's flash on each shot (lightgun_host.h), off unless asked for. */
+  const GUN = !!m2hleGame.gun;
+  const GUN_FLASH_KEY = 'm2hle.gunflash';
+  const GUN_FLASH_FRAMES = 2;
+  let gunFlash = false;
+  try { gunFlash = localStorage.getItem(GUN_FLASH_KEY) === '1'; } catch (e) { /* private mode */ }
 
   /* The rows of the panel. `act` is the GAME_INPUT_* index for player 1
    * (src/core/game_profile.h), `acts` a macro's; player 2's is 10 further on. */
@@ -111,11 +124,21 @@ const m2hlePad = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* The cabinet's own switches, the first pad only: the board's Service and
+     * Test, and a racing game's gear buttons (m2hleGame.gears), one per gate of
+     * the lever (src/board/io_5649.h). Unbound until the player binds them. */
+    { id: 'service', act: 20, cab: true },
+    { id: 'test',    act: 21, cab: true },
+    { id: 'gearn',   act: 22, cab: true, gears: true },
+    { id: 'gear1',   act: 23, cab: true, gears: true },
+    { id: 'gear2',   act: 24, cab: true, gears: true },
+    { id: 'gear3',   act: 25, cab: true, gears: true },
+    { id: 'gear4',   act: 26, cab: true, gears: true },
     /* The page's Pause (m2hle-page.js), not a game button: it holds nothing.
      * Unbound until the player binds it, as every standard button has a job. */
     { id: 'pause', acts: [],        page: true },
   ];
-  const ACTIONS = ALL.filter((a) => (TWIN ? !a.macro : !a.twin));
+  const ACTIONS = ALL.filter((a) => (TWIN ? !a.macro : !a.twin) && (!a.gears || m2hleGame.gears));
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   for (const a of ACTIONS) a.label = m2hleGame.labels[a.id] || a.label || m2hleLang.t('keys.act.' + a.id);
   const P2_OFFSET = 10;
@@ -135,6 +158,7 @@ const m2hlePad = (() => {
     start: [{ b: 9 }],
     coin:  [{ b: 8 }],
     pk: [], pb: [], kb: [], pkb: [], pause: [],
+    service: [], test: [], gearn: [], gear1: [], gear2: [], gear3: [], gear4: [],
   };
 
   /* A twin-stick game on a standard pad, as YAMP's full set does it: the d-pad and
@@ -156,7 +180,7 @@ const m2hlePad = (() => {
     b3: [], b4: [],
     start:  [{ b: 9 }],
     coin:   [{ b: 8 }],
-    pause: [],
+    pause: [], service: [], test: [],
   };
 
   /* Sega's Saturn Twin Stick (HSS-0151) through a Bliss-Box adapter, which the
@@ -183,7 +207,7 @@ const m2hlePad = (() => {
     rdash:  [{ b: 7 }],
     b3: [], b4: [],
     start:  [{ b: 5 }],
-    coin: [], pause: [],
+    coin: [], pause: [], service: [], test: [],
   };
 
   /* Bliss-Box: vendor 16d0, product 0d04 and up, one per port. Chrome names a pad
@@ -211,7 +235,10 @@ const m2hlePad = (() => {
   let touchMask = 0;          /* what the touch buttons hold (m2hle-touch.js, setTouch) */
   let keyMask = 0;            /* what the keyboard holds (m2hle-keys.js, setKeys) */
   let pauseHeld = false;      /* a pad held Pause at the last poll */
+  let claim = null;           /* shown the pads each poll; true takes them from the game (setClaim) */
   const PAUSE_ROW = 1 << ACTIONS.findIndex((a) => a.id === 'pause');
+  /* The cabinet rows' action bits: only the first pad presses them. */
+  const CAB_BITS = ACTIONS.reduce((m, a) => (a.cab ? m | a.mask : m), 0);
 
   function load() {
     try {
@@ -285,6 +312,12 @@ const m2hlePad = (() => {
     return v !== undefined && v * x.d > DEAD;
   }
 
+  /* Does the pad at this index play player 3 or 4 (a four-player game's third
+   * and fourth pads)? */
+  function farPad(i) {
+    return (i === 2 || i === 3) && !TWIN && ready && !!Module._web_four_players && Module._web_four_players() !== 0;
+  }
+
   /* The rows this pad holds, one bit per ACTIONS index. */
   function padRows(pad) {
     let r = 0;
@@ -300,26 +333,152 @@ const m2hlePad = (() => {
     return m;
   }
 
+  /* What the pads hold: the near players' actions, the far players' (a
+   * four-player cabinet's 3P / 4P), and whether any asks for the pause. */
+  function readPads(list) {
+    let mask = 0, far = 0, pause = false;
+    list.forEach((pad, i) => {
+      const r = padRows(pad), m = i === 0 ? rowActions(r) : rowActions(r) & ~CAB_BITS;
+      if (farPad(i)) far |= i === 3 ? m << P2_OFFSET : m;
+      else mask |= (i === 1 && secondIsP2 && !TWIN) ? m << P2_OFFSET : m;
+      pause = pause || !!(r & PAUSE_ROW);
+      if (i === 0) showHeld(r);
+    });
+    return { mask, far, pause };
+  }
+
+  /* The far players' actions to the board. */
+  function sendFar(far) {
+    if (ready && Module._web_pad_far_set) Module._web_pad_far_set(far >>> 0);
+  }
+
+  /* Something else has taken the pads (claim): the board holds nothing of theirs. */
+  function letGo() {
+    padMask = 0; pauseHeld = false; showHeld(0);
+    sendFar(0);
+    send();
+  }
+
   function poll() {
     requestAnimationFrame(poll);
     const list = pads();
     if (listening) { capture(list); return; }
+    if (claim && claim(list)) { letGo(); return; }
 
-    let mask = 0, pause = false;
-    list.forEach((pad, i) => {
-      const r = padRows(pad), m = rowActions(r);
-      mask |= (i === 1 && secondIsP2 && !TWIN) ? m << P2_OFFSET : m;
-      pause = pause || !!(r & PAUSE_ROW);
-      if (i === 0) showHeld(r);
-    });
+    let { mask, far, pause } = readPads(list);
     if (pause && !pauseHeld) window.dispatchEvent(new Event('m2hle-pause'));
     pauseHeld = pause;
     if (list.length === 0) showHeld(0);
+    if (ready && Module._web_wheel) mask |= wheel(list);
     padMask = mask;
+    if (!listening) sendFar(far);
     /* Every frame, not only on a change: the emulator forgets what the pad held
      * whenever it lets go of the keyboard (focus lost, the drawer opened), and a
      * direction still held should come straight back. */
     send();
+    if (ready && Module._web_ffb) rumble(list);
+  }
+
+  /* ---- Analog wheel and pedals -------------------------------------------------
+   *
+   * Sega Rally and Daytona USA read where the wheel is turned and how far a
+   * pedal is down (main_web.c, web_wheel; Pinboard #1082). Player 1's pads
+   * give them: the axis bound to Left / Right turns the wheel (a "standard"
+   * pad's stick past a small dead zone, any other pad's axis, a racing wheel's,
+   * all of it), and the analog value of what is bound to Button 1 (the
+   * accelerator) and Button 2 (the brake) presses the pedals; a standard
+   * pad's right and left triggers are those pedals too. A pedal on an axis is
+   * read from where it rested when first seen. Sessions and replays read the
+   * buttons, so the triggers press Button 1 / 2 past half as well. */
+  const STICK_DEAD = 2500 / 32767, PEDAL_HALF = 0.5;
+  const wheelRest = new Map();   /* pad index -> the axes as first seen */
+
+  function axisPedal(pad, x) {
+    let rest = wheelRest.get(pad.index);
+    if (!rest) { rest = pad.axes.slice(); wheelRest.set(pad.index, rest); }
+    const r = rest[x.a] || 0, v = pad.axes[x.a] || 0;
+    const span = x.d > 0 ? 1 - r : r + 1;
+    return span > 0.25 ? Math.min(1, Math.max(0, (v - r) * x.d / span)) : 0;
+  }
+
+  /* Where a pad turns the wheel, -1 .. 1: the furthest of its Left / Right axes. */
+  function padSteer(pad, binds, std) {
+    let st = 0;
+    for (const x of binds.left || []) if (x.a !== undefined) { const v = -(pad.axes[x.a] || 0) * x.d; if (Math.abs(v) > Math.abs(st)) st = v; }
+    for (const x of binds.right || []) if (x.a !== undefined) { const v = (pad.axes[x.a] || 0) * x.d; if (Math.abs(v) > Math.abs(st)) st = v; }
+    if (std) st = Math.abs(st) <= STICK_DEAD ? 0 : Math.sign(st) * (Math.abs(st) - STICK_DEAD) / (1 - STICK_DEAD);
+    return st;
+  }
+
+  /* How far a pad presses a pedal, 0 .. 1: what row is bound to, or a standard
+   * pad's trigger. */
+  function padPedal(pad, binds, std, row, trigger) {
+    let p = std && pad.buttons[trigger] ? pad.buttons[trigger].value : 0;
+    for (const x of binds[row] || []) {
+      const v = x.b !== undefined ? (pad.buttons[x.b] ? pad.buttons[x.b].value : 0) : axisPedal(pad, x);
+      if (v > p) p = v;
+    }
+    return p;
+  }
+
+  function wheel(list) {
+    if (!Module._web_wheel_on || !Module._web_wheel_on()) { Module._web_wheel(0, 0, 0, 0); return 0; }
+    let on = false, steer = 0, accel = 0, brake = 0, mask = 0;
+    list.forEach((pad, i) => {
+      if (i === 1 && secondIsP2 && !TWIN) return;
+      const binds = sets[layoutOf(pad)], std = pad.mapping === 'standard';
+      const st = padSteer(pad, binds, std);
+      const ac = padPedal(pad, binds, std, 'b1', 7), br = padPedal(pad, binds, std, 'b2', 6);
+      if (Math.abs(st) > Math.abs(steer)) steer = st;
+      accel = Math.max(accel, ac);
+      brake = Math.max(brake, br);
+      if (std && pad.buttons[7] && pad.buttons[7].value > PEDAL_HALF) mask |= 1 << 4;   /* GAME_INPUT_P1_B1 */
+      if (std && pad.buttons[6] && pad.buttons[6].value > PEDAL_HALF) mask |= 1 << 5;   /* GAME_INPUT_P1_B2 */
+      on = true;
+    });
+    const q = (v) => Math.round(Math.max(-1, Math.min(1, v)) * 32767);
+    Module._web_wheel(on ? 1 : 0, q(steer), q(accel), q(brake));
+    return mask;
+  }
+
+  /* ---- Force feedback ----------------------------------------------------------
+   *
+   * The drive board (main_web.c, web_ffb): Daytona USA's kicks and shakes and
+   * Sega Rally's hard turns of the wheel (a slide, a crash) on player 1's pad,
+   * the two motors of a 'dual-rumble' effect (Chrome, Edge, Safari) or a pulse
+   * (Firefox), renewed while they last. With no pad, a phone buzzes for each
+   * kick the board starts, at most once a RUMBLE_MS. A pad has no spring or
+   * friction, so the wheel's weight is not in it. */
+  const RUMBLE_MS = 200, RUMBLE_RENEW_MS = 120;
+  let rumbleOn = false, rumbleAt = 0, rumbleCmd = 0;
+
+  function padRumble(pad, strong, weak) {
+    const fx = pad.vibrationActuator;
+    try {
+      if (fx && fx.playEffect) {
+        if (strong || weak) fx.playEffect('dual-rumble', { startDelay: 0, duration: RUMBLE_MS, strongMagnitude: strong, weakMagnitude: weak });
+        else if (fx.reset) fx.reset();
+      } else if (pad.hapticActuators && pad.hapticActuators[0]) {
+        pad.hapticActuators[0].pulse(Math.max(strong, weak), strong || weak ? RUMBLE_MS : 0);
+      }
+    } catch (e) { /* a pad that cannot rumble */ }
+  }
+
+  function rumble(list) {
+    const v = Module._web_ffb() >>> 0;
+    const strong = ((v >>> 16) & 255) / 255, weak = ((v >>> 8) & 255) / 255, cmd = v & 255;
+    const on = strong > 0 || weak > 0, now = performance.now();
+    if (list.length) {
+      if (on && (!rumbleOn || cmd !== rumbleCmd || now - rumbleAt >= RUMBLE_RENEW_MS)) {
+        padRumble(list[0], strong, weak);
+        rumbleAt = now;
+      } else if (!on && rumbleOn) padRumble(list[0], 0, 0);
+    } else if (on && cmd !== rumbleCmd && now - rumbleAt >= RUMBLE_MS && touchMask && navigator.vibrate) {
+      navigator.vibrate(Math.round(40 + 80 * Math.max(strong, weak)));
+      rumbleAt = now;
+    }
+    rumbleOn = on;
+    rumbleCmd = cmd;
   }
 
   /* The touch buttons and the keyboard share this one channel to the emulator:
@@ -357,6 +516,7 @@ const m2hlePad = (() => {
     /* Nothing reaches the game while a press is being captured: binding Punch
      * should not throw one. */
     if (ready) Module._web_pad_set(0);
+    if (ready && Module._web_pad_far_set) Module._web_pad_far_set(0);
     render();
   }
 
@@ -419,6 +579,12 @@ const m2hlePad = (() => {
         sub.textContent = m2hleLang.t('pad.sub.macros');
         rows.appendChild(sub);
       }
+      if (a.cab && a === ACTIONS.find((x) => x.cab)) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = m2hleLang.t('pad.sub.cab');
+        rows.appendChild(sub);
+      }
       if (a.page) {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
@@ -447,7 +613,9 @@ const m2hlePad = (() => {
         chip.type = 'button';
         chip.title = m2hleLang.t('pad.remove');
         chip.setAttribute('aria-label', m2hleLang.t('pad.remove.from', { button: bindName(x, standard, layout), action: a.label }));
-        chip.textContent = bindName(x, standard, layout) + ' ×';
+        /* the pad's own faces (m2hle-prompts.js); a Bliss-Box's Saturn names stay words */
+        const icon = standard && layout === 'std' && m2hlePrompts.pad(x, list[0]);
+        m2hlePrompts.chip(chip, icon, bindName(x, standard, layout));
         chip.addEventListener('click', () => { binds[a.id].splice(i, 1); save(); render(); });
         chips.appendChild(chip);
       });
@@ -475,7 +643,8 @@ const m2hlePad = (() => {
       el.textContent = m2hleLang.t('pad.status.none');
       return;
     }
-    const names = list.map((p, i) => m2hleLang.t(i === 0 ? 'pad.status.p1' : (i === 1 && secondIsP2 && !TWIN ? 'pad.status.p2' : 'pad.status.also'),
+    const names = list.map((p, i) => m2hleLang.t(i === 0 ? 'pad.status.p1' : (i === 1 && secondIsP2 && !TWIN ? 'pad.status.p2'
+                                                 : farPad(i) ? (i === 2 ? 'pad.status.p3' : 'pad.status.p4') : 'pad.status.also'),
                                                  { name: p.id.replace(/\s*\(.*?Vendor.*?\)\s*/i, ' ').trim() }));
     const pads = names.join(' · ');
     el.textContent = list[0].mapping === 'standard' ? pads
@@ -493,12 +662,26 @@ const m2hlePad = (() => {
     });
   }
 
+  /* The panel's tabs: Keyboard, Controller, Touch. Until one is picked it opens
+   * on Keyboard, or on Touch on a phone (the touch buttons are what it is for there). */
+  const TABS = { keys: 'key-section', pad: 'pad-section', touch: 'touch-section' };
+  let tabPicked = null;
+
+  function showTab(tab) {
+    if (tab !== 'pad') stopListening();
+    for (const t in TABS) {
+      $('ctl-tab-' + t).setAttribute('aria-selected', String(t === tab));
+      $(TABS[t]).hidden = t !== tab;
+    }
+  }
+
   function toggle(open) {
     const panel = $('controls');
     if (open === undefined) open = panel.hidden;
     if (!open) stopListening();
     /* Play online opens in the same place: one at a time. */
     if (open && !$('online').hidden) $('np-close').click();
+    if (open) showTab(tabPicked || (matchMedia('(pointer: coarse)').matches || !$('touch').hidden ? 'touch' : 'keys'));
     panel.hidden = !open;
     $('btn-controls').setAttribute('aria-expanded', String(open));
     shownHeld = -1;
@@ -510,9 +693,17 @@ const m2hlePad = (() => {
     load();
     $('btn-controls').addEventListener('click', () => toggle());
     $('pad-close').addEventListener('click', () => toggle(false));
+    for (const t in TABS) $('ctl-tab-' + t).addEventListener('click', () => { tabPicked = t; showTab(t); });
     $('btn-online').addEventListener('click', () => toggle(false));
     $('pad-reset').addEventListener('click', () => { sets = defaultSets(); secondIsP2 = true; save(); stopListening(); });
     $('pad-p2').addEventListener('change', (e) => { secondIsP2 = e.target.checked; save(); render(); });
+    $('gun-flash-row').hidden = !GUN;
+    $('gun-flash').checked = gunFlash;
+    $('gun-flash').addEventListener('change', (e) => {
+      gunFlash = e.target.checked;
+      try { localStorage.setItem(GUN_FLASH_KEY, gunFlash ? '1' : '0'); } catch (err) { /* private mode */ }
+      if (ready) Module._web_set_gun_flash(gunFlash ? GUN_FLASH_FRAMES : 0);
+    });
     $('controls').addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { if (listening) stopListening(); else toggle(false); }
     });
@@ -528,9 +719,16 @@ const m2hlePad = (() => {
   }
 
   /* Called from Module.onM2hleReady. */
-  function onReady() { ready = true; }
+  /* A page menu the pads drive (m2hle-cardboard.js): fn(pads) sees them every
+   * poll, and while it returns true the game gets nothing from them. */
+  function setClaim(fn) { claim = fn; }
+
+  function onReady() {
+    ready = true;
+    if (GUN) Module._web_set_gun_flash(gunFlash ? GUN_FLASH_FRAMES : 0);
+  }
 
   document.addEventListener('DOMContentLoaded', init);
 
-  return { onReady, toggle, setTouch, setKeys, get binds() { return clone(sets.std); }, get sets() { return clone(sets); } };
+  return { onReady, toggle, setTouch, setKeys, setClaim, get binds() { return clone(sets.std); }, get sets() { return clone(sets); } };
 })();

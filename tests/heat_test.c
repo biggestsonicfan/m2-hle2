@@ -37,18 +37,21 @@ static int64_t two_episodes(heat_guard_t *g, int limit, int64_t t) {
     return t + SEC(60);
 }
 
-int main(void) {
-    heat_guard_t g;
+/* The guard (B) to (D) take on from where the last left it. */
+static heat_guard_t g;
 
-    /* (A) Off, and no zones. */
+/* (A) Off, and no zones. */
+static void test_off(void) {
     heat_guard_init(&g, 0);
     CHECK(heat_guard_update(&g, 95, 0) == HEAT_NONE, "A: off, 95 C: no event");
     CHECK(heat_guard_draw_every(&g) == 1 && !g.sound_off, "A: off: every frame, sound stays");
     heat_guard_init(&g, 85);
     CHECK(heat_guard_update(&g, -1, 0) == HEAT_NONE, "A: no zones: no event");
     CHECK(heat_guard_draw_every(&g) == 1 && !g.sound_off, "A: no zones: every frame, sound stays");
+}
 
-    /* (B) One episode, with the hysteresis. */
+/* (B) One episode, with the hysteresis. */
+static void test_one_episode(void) {
     heat_guard_init(&g, 85);
     CHECK(heat_guard_update(&g, 70, 0) == HEAT_NONE && heat_guard_draw_every(&g) == 1, "B: 70 C: nothing");
     CHECK(heat_guard_update(&g, 84, SEC(1)) == HEAT_NONE && heat_guard_draw_every(&g) == 1, "B: 84 C: still nothing");
@@ -60,16 +63,20 @@ int main(void) {
     CHECK(heat_guard_draw_every(&g) == 1, "B: cooled: every frame again");
     CHECK(g.episodes == 1 && !g.stuck && !g.sound_off, "B: one episode, not stuck, sound stays");
     CHECK(heat_guard_update(&g, 84, SEC(10)) == HEAT_NONE && heat_guard_draw_every(&g) == 1, "B: 84 C after cooling: every frame");
+}
 
-    /* (C) The second episode sticks. */
+/* (C) The second episode sticks. */
+static void test_sticks(void) {
     CHECK(heat_guard_update(&g, 85, SEC(12)) == HEAT_STUCK, "C: hot again: stuck");
     CHECK(heat_guard_draw_every(&g) == 2 && g.stuck && g.episodes == 2, "C: stuck: every second frame");
     CHECK(!g.sound_off, "C: sticking alone does not drop the sound board");
     CHECK(heat_guard_update(&g, 80, SEC(14)) == HEAT_COOLED_STUCK, "C: cooled while stuck");
     CHECK(heat_guard_draw_every(&g) == 2, "C: cooled, still every second frame");
     CHECK(heat_guard_update(&g, 60, SEC(16)) == HEAT_NONE && heat_guard_draw_every(&g) == 2, "C: cold, still every second frame");
+}
 
-    /* (D) Still hot: the third episode. */
+/* (D) Still hot: the third episode. */
+static void test_third_episode(void) {
     CHECK(heat_guard_update(&g, 85, SEC(18)) == HEAT_HOT_STUCK, "D: a third episode");
     CHECK(g.sound_off, "D: third episode: the sound board should go");
     CHECK(heat_guard_draw_every(&g) == 2, "D: and every second frame");
@@ -77,8 +84,10 @@ int main(void) {
     CHECK(heat_guard_update(&g, 80, SEC(22)) == HEAT_COOLED_STUCK && !g.sound_off, "D: cooled: the verdict is withdrawn");
     CHECK(heat_guard_draw_every(&g) == 2, "D: cooled after the third: still every second frame");
     CHECK(heat_guard_update(&g, 85, SEC(24)) == HEAT_HOT_STUCK && g.sound_off, "D: a fourth episode says so again");
+}
 
-    /* (D) Still hot: never cooled after sticking. */
+/* (D) Still hot: never cooled after sticking. */
+static void test_never_cooled(void) {
     int64_t stuck_at = two_episodes(&g, 85, 0);
     CHECK(g.stuck && !g.sound_off, "D: stuck, sound stays at first");
     CHECK(heat_guard_update(&g, 86, stuck_at + SEC(30)) == HEAT_NONE && !g.sound_off, "D: 30 s hot at every second frame: sound stays");
@@ -92,8 +101,10 @@ int main(void) {
     heat_guard_update(&g, 80, stuck_at + SEC(20));
     CHECK(!g.sound_off && g.stuck, "D: cooled within the minute: sound stays");
     CHECK(heat_guard_update(&g, 85, stuck_at + SEC(120)) == HEAT_HOT_STUCK && g.sound_off, "D: hot again later: the sound board should go at once");
+}
 
-    /* (E) Limits. */
+/* (E) Limits. */
+static void test_limits(void) {
     two_episodes(&g, 85, 0);
     heat_guard_set_limit(&g, 85);
     CHECK(g.stuck && g.episodes == 2 && g.hot, "E: the same limit changes nothing");
@@ -105,6 +116,15 @@ int main(void) {
     CHECK(heat_guard_update(&g, 99, SEC(4)) == HEAT_NONE && heat_guard_draw_every(&g) == 1 && !g.sound_off, "E: off: nothing, whatever the reading");
     heat_guard_set_limit(&g, -3);
     CHECK(g.limit_c == 0, "E: a negative limit is off");
+}
+
+int main(void) {
+    test_off();
+    test_one_episode();
+    test_sticks();
+    test_third_episode();
+    test_never_cooled();
+    test_limits();
 
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "PASSED", g_fail);
     return g_fail ? 1 : 0;

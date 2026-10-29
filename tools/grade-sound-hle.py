@@ -20,6 +20,8 @@ is not there to spread the work out in time -- so this grades what matters:
 Usage:
   python tools/grade-sound-hle.py <snd_replay> <out-dir> <input-prefix>... [--seconds S]
   inputs: tools/snd_stimuli.py's (bgm, sfx, sys, fuzz) or a MAME capture
+  --crx: the board runs CRX_drv (Dynamite Cop, House of the Dead, Motor
+         Raid), whose state is at 0x300-0xFFF (snd_replay's $SND_RAM_BASE)
   $ROMDIR as snd_replay wants it (sfight.zip and schamp.zip)
 
 numpy only. Nothing it writes belongs in the repo.
@@ -142,7 +144,16 @@ def restarts(inp):
     return [a[i, 2] / CLK for i in np.nonzero(tag == 1)[0] if (a[i, 1] & 0xFF) == 0xFF]
 
 
-def state(pa, pb, skip):
+# CRX_drv's: sequencers but their countdown and position, engine records,
+# globals but the queue's, tracks; the RAM dump from 0x300
+CRX_BASE = 0x300
+CRX_REGIONS = {'globals': [0xC04, 0xC18, 0xC19, 0xC1A] + [a for a in range(0xED7, 0xF00) if a not in (0xEDE, 0xEDF, 0xEE4, 0xEE5, 0xEE6, 0xEE7, 0xEF4, 0xEF5, 0xEF6, 0xEF7, 0xEF8, 0xEFA)],
+               'sequencers': [0x300 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 11],
+               'engines': list(range(0x380, 0x400)),
+               'tracks': [0xC40 + t * 32 + b for t in range(20) for b in range(16)]}
+
+
+def state(pa, pb, skip, crx=False):
     A = np.fromfile(pa + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     B = np.fromfile(pb + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     n, hold = min(len(A), len(B)), int(1.0 * 57.524)
@@ -152,13 +163,14 @@ def state(pa, pb, skip):
     # HLE applies an event's effects when it takes it, where the board may be
     # busy with it for a while (a song's preload holds its track set-up 0.3 s),
     # so a difference counts only when it lasts a second.
-    regions = {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
+    base = CRX_BASE if crx else 0x1000
+    regions = CRX_REGIONS if crx else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
                'sequencers': [0x2000 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 7],
                'tracks': list(range(0x3000, 0x3140)),
                'controllers': list(range(0x3200, 0x3250)) + list(range(0x3270, 0x3290))}   # not SC08's TL save
     out = []
     for name, cols in regions.items():
-        cols = np.array(cols)
+        cols = np.array(cols) - (CRX_BASE if crx else 0)   # the CRX lists are addresses, STF's dump offsets
         D = A[:n][:, cols] != B[:n][:, cols]
         for j, col_addr in enumerate(cols):
             col, k = D[:, j], 0
@@ -171,7 +183,7 @@ def state(pa, pb, skip):
                     e += 1
                 t = k * MARK / RATE
                 if e - k >= hold and not any(s - 0.1 <= t <= s + 3.1 for s in skip) and t > 3.2:
-                    out.append(f'{name} 0x{0x1000 + col_addr:04X} {t:.2f}-{e * MARK / RATE:.2f} s: '
+                    out.append(f'{name} 0x{base + col_addr:04X} {t:.2f}-{e * MARK / RATE:.2f} s: '
                                f'board {A[k, col_addr]:02X} HLE {B[k, col_addr]:02X}')
                 k = e
     return out
@@ -183,7 +195,10 @@ def main():
     ap.add_argument('out')
     ap.add_argument('inputs', nargs='+')
     ap.add_argument('--seconds', type=float, default=120)
+    ap.add_argument('--crx', action='store_true')
     args = ap.parse_args()
+    if args.crx:
+        os.environ['SND_RAM_BASE'] = hex(CRX_BASE)
     os.makedirs(args.out, exist_ok=True)
     for inp in args.inputs:
         name = os.path.basename(inp)
@@ -205,7 +220,7 @@ def main():
             print(f'   audio: {len(rows)} windows; loudness C/board {loud.min():.3f}-{loud.max():.3f}; '
                   f'envelope correlation median {np.median(corr):.3f}, worst {corr.min():.3f}; '
                   'bands (dB) ' + ' '.join(f'{np.median(db[:, i]):+.2f}' for i in range(len(BANDS))))
-        diffs = state(pa, pb, restarts(inp))
+        diffs = state(pa, pb, restarts(inp), args.crx)
         print(f'   state: {len(diffs)} driver RAM differences lasting over a second')
         for d in diffs[:8]:
             print('     ' + d)

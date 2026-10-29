@@ -12,6 +12,10 @@
  * Local override: if files named sfight/epr-19001.15 and sfight/epr-19002.16
  * exist on disk, they're used INSTEAD of the zip's maincpu pair (CRC check
  * skipped) — supports working with hacked ROMs without re-zipping every time.
+ * sfight/epr-19021.31 does the same for the sound board's 68000 program, on
+ * its own: homebrew ships all three the way MAME takes them (a folder named
+ * sfight before the stock zip), and m2-pacman's i960 program pings its own
+ * sound program, so with STF's driver from the zip it ran silent.
  *
  * Per-game install behaviour: copies romset into bus regions, then mirrors
  * romset.main_data[0x01000000..] into bus->xtra_data. The mirror was found
@@ -124,7 +128,11 @@ static inline int sfight_load(romset_t *rs, const char *child, const char *paren
     /* audiocpu (512KB) — byte-swapped on load */
     rs->audiocpu_size = 0x80000;
     rs->audiocpu = (uint8_t *)calloc(1, rs->audiocpu_size);
-    tmp1 = zip_extract_from_set(child, parent, "epr-19021.31", &fsize, 0x0b9f7583);
+    tmp1 = file_load("sfight/epr-19021.31", &fsize);
+    if (tmp1)
+        LOG_INFO("sfight: using hacked audiocpu from sfight/ (%zu bytes; CRC skipped)", fsize);
+    else
+        tmp1 = zip_extract_from_set(child, parent, "epr-19021.31", &fsize, 0x0b9f7583);
     if (!tmp1) { ok = 0; goto done; }
     load_16_word_swap(rs->audiocpu, rs->audiocpu_size, tmp1, fsize, 0);
     free(tmp1); tmp1 = NULL;
@@ -170,11 +178,11 @@ static inline uint32_t sfight_read32(const uint8_t *buf, uint32_t off) {
  * keep it. */
 static void (*s_sfight_on_vs_rematch)(void);
 
-static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+/* The board's side of an STF install, which schamp (schamp.h) shares. */
+static inline void sfight_install_board(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     if (!rs->loaded) { LOG_ERROR("sfight_install: romset not loaded"); return; }
     s_sfight_on_vs_rematch = NULL;
     m2_texload_forget();   /* a new program: check its texture loader again */
-    sfight_native_install("sfight");
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
@@ -227,6 +235,12 @@ static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bu
         }
     }
     LOG_INFO("sfight_install: initial IP = 0x%08X", cpu->sfr.ip);
+}
+
+static inline void sfight_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!rs->loaded) { LOG_ERROR("sfight_install: romset not loaded"); return; }
+    sfight_native_install("sfight");
+    sfight_install_board(rs, cpu, bus);
 }
 
 /* ---- HLE hook functions -------------------------------------------------- */
@@ -761,6 +775,16 @@ static inline uint16_t sfight_make_crc(const uint8_t *p, uint32_t n) {
     return crc;
 }
 
+/* Read the block the game runs on, through its own pointer. Before the boot
+ * check sets it this is not a usable address; take the work copy then. */
+static inline void sfight_read_settings(memory_bus_t *bus, uint8_t blk[SFIGHT_SETTINGS_LEN]) {
+    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
+    uint32_t src  = (base == 0x00599000u || base == 0x01D00000u)
+                  ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
+    for (uint32_t i = 0; i < SFIGHT_SETTINGS_LEN; i++)
+        blk[i] = (uint8_t)mem_read8(bus, src + i);
+}
+
 /*
  * Apply the PS3 menu settings s[8] (sfight_menu_settings_t's layout) to the
  * board: versus = 0 is Settings_ApplyArcade, non-zero Settings_ApplyRoomRules.
@@ -785,14 +809,8 @@ static inline void sfight_apply_menu_settings(memory_bus_t *bus, const uint8_t s
     unsigned b = s[6] < 10 ? s[6] : 0;
     uint8_t  barriers = (uint8_t)(b + 1);
 
-    /* Read the block the game runs on, through its own pointer. Before the boot
-     * check sets it this is not a usable address; take the work copy then. */
-    uint32_t base = mem_read32(bus, SFIGHT_SETTINGS_PTR);
-    uint32_t src  = (base == 0x00599000u || base == 0x01D00000u)
-                  ? base + 0x3340u : SFIGHT_SETTINGS_WORK;
     uint8_t blk[SFIGHT_SETTINGS_LEN];
-    for (uint32_t i = 0; i < SFIGHT_SETTINGS_LEN; i++)
-        blk[i] = (uint8_t)mem_read8(bus, src + i);
+    sfight_read_settings(bus, blk);
 
     if (!versus) {
         blk[0x00] = rounds[r];
@@ -887,7 +905,10 @@ _Static_assert(sizeof((hle_hook_entry_t[]){ SFIGHT_BASE_HOOKS }) ==
         [GAME_INPUT_P2_B2]    = 0x00020000,                                     \
         [GAME_INPUT_P2_B3]    = 0x00040000,                                     \
         [GAME_INPUT_P2_START] = 0x00000020,                                     \
-        [GAME_INPUT_SERVICE]  = 0x00000004,                                     \
+        /* IN0 0x04 is the cabinet's test switch, 0x08 its service button     \
+         * (MAME's model2 ports, m2emulator's F2 and F1: Pinboard #1347). */  \
+        [GAME_INPUT_TEST]     = 0x00000004,                                     \
+        [GAME_INPUT_SERVICE]  = 0x00000008,                                     \
         /* Coins map to IN0 (held byte0) COIN1/COIN2 — active-low at IO+0x02. \
          * The game's read_sw edge-detects these and updates credits. */        \
         [GAME_INPUT_P1_COIN]  = 0x00000001,                                     \

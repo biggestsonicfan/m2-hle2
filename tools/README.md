@@ -63,8 +63,8 @@ runs the emulator from a directory of its own per port (`<tmp>/m2hle-run-<port>`
 or its `cwd` option), so its log never lands beside the ROM, and finds
 `schamp.zip` beside the `--rom` path. Running from the ROM's folder is also
 wrong for a second reason: the sfight profile loads a loose
-`sfight/epr-19001.15` / `epr-19002.16` from the working directory over the
-zip's, and `claude_mame/mame/roms` has such a folder (a homebrew program).
+`sfight/epr-19001.15` / `epr-19002.16` (and the sound program
+`epr-19021.31`) from the working directory over the zip's, and `claude_mame/mame/roms` has such a folder (a homebrew program).
 The C tests that load STF (`rom_test`, `boot_test`, `geo_test`, `input_test`,
 `snd_replay`, `snd_bench`, `m68k_fuzz`) take `$ROMDIR`, else `$ROMS_DIR`.
 
@@ -129,7 +129,8 @@ its built-in `WebSocket`.
 | `lib/report.mjs` | the PASS / FAIL / SKIP report and exit code every grader ends with; a skip is not a pass |
 | `lib/dl.mjs` | the display list off a running emulator (`capture_dl`), in the layouts the explorer toolkit's checks expect: the fight a capture is taken in, `captureStage`, and the probes |
 | `lib/capture.mjs` | pinning a scene, verifying the game actually loaded it, waiting for the upload to settle |
-| `lib/noclip.mjs` | locates the explorer; `$M2_NOCLIP` overrides the submodule |
+| `noclip-reads.mjs` | not a grader: the explorer's reads of one set's model table (entries, first records, `decodeModel`'s headers, triangles and lighting), printed as the `noclip_reads_t` initializer `tests/prepared_test.c` holds a profile to. `node tools/noclip-reads.mjs dynmcopb dynamcop` takes names from `$ROMS_DIR` (the parent zip second for a split set). It probes a temporary copy of the submodule's `model.js`, so a new table costs one run, and a bumped submodule that changes a hash is found by running it on the sets the test has. Its first line names the longest mesh, which `GEO3D_IA_MAX_VPS` must cover |
+| `lib/noclip.mjs` | locates the explorer; `$M2_NOCLIP` overrides the submodule. `nc()` imports `romset.js` first, the order `app.js` uses: entering noclip's `romset.js` → `powsled.js` → `display.js` cycle elsewhere trips `powsled.js`'s load-time `AT_EYE` (noclip `629adcd`) |
 | `lib/texref.mjs` | the board digests and the exact slices they are cut at |
 | `lib/cop-replay.mjs` | the coprocessor's current matrix replayed from the FIFO words, every matrix-writing command and the three matrix banks included, in the chip's float32 or in double; and a capture walked into per-frame draws |
 | `lib/matrix.mjs` | row-major 4x4s in the board's convention, and an explorer op list turned into one |
@@ -884,6 +885,15 @@ B/scsp_lazy_test 5                                      # the lazy chip's RAM ra
 node tools/ab-builds.mjs A/m2hle.exe B/m2hle.exe --marks 600,1800,3600,6000 --sound
 ```
 
+Run every one of those with the exact chip on both sides (`SCSP_EXACT=1` for
+`snd_replay`, `snd_bench`, `scsp_fuzz` and `m68k_fuzz`; `--scsp-exact` for
+`det_digest` and `m2hle`): by default the DSP is skipped while it is quiet (`scsp.h`, "A quiet
+DSP"), which the fuzz shows as a different DEC and `det_digest --sound` as a
+different sound-RAM hash. The margin of the quiet path itself is measured, not
+held to bits: `python tools/scsp-ab.py exact.wav quiet.wav` on two `snd_replay`
+WAVs prints the frames that differ, the max and RMS difference, the SNR and a
+per-octave spectral difference (SCSP.md has master's numbers: 1 LSB, 72 dB).
+
 The SCSP makes its samples late (`scsp.h`, "The chip's own time"), so the
 chip's checks drive it the way the emulator does: `scsp_fuzz` leaves half its
 scenarios alone for long stretches and keeps a quarter "tame" (no FM, no noise,
@@ -905,7 +915,18 @@ trusted.
 `tools/gen-scsp-dsp.py` compiles the DSP programs listed in
 `tools/scsp-dsp-programs.txt` to C (`src/board/scsp_dsp_known.h`); a game whose
 program is not listed runs on the interpreter. `scsp_dsp_test` holds each
-compiled program against the reference step.
+compiled program against the reference step. A compiled program checks its delay
+ring against the end of sound RAM once a sample (`ring_ok`) and reads and writes
+the ring directly inside it; a ring past the end takes `scsp_ram_w/ww` as the
+interpreter does (#1474, PERF-PROFILE.md). Nine programs are listed: STF/FV's
+reverb and, since #1713, those of House of the Dead (Dynamite Cop's is the same),
+Motor Raid, VF2, Virtual-On, DOA, Last Bronx, Air Walkers and Power Sled. Sega
+Rally, Virtua Cop and Pilot Kids start none in attract (Daytona's Model 1 sound
+board has no SCSP). To find
+ a game's, dump MPRO
+from `g_sound.scsp.dsp.mpro` after a few hundred frames of attract (a throwaway
+`det_digest` that writes it out does) and `--add` it.
+
 
 ### Over a long session it drifts, and 70 seconds does not show it
 
@@ -1155,6 +1176,14 @@ det_digest <merged zip> --frames 20000 --script "..." --out a.txt              #
 det_digest <merged zip> --frames 20000 --script "..." --sound-hle --out b.txt  # ...and with the driver in C
 ```
 
+Another game on a driver build it knows (SCSP.md "Other games' builds"):
+`SND_SET=<dir>`, the set's region images from `m2hle --export-roms` (only
+`audiocpu.bin` and `samples.bin` are read), in place of `$ROMDIR`:
+
+```sh
+SND_SET=roms-out/doa python tools/grade-sound-hle.py build/Release/snd_replay.exe cap/doa stim/bgm stim/sfx stim/sys stim/fuzz --seconds 60
+```
+
 The first five columns of the two `det_digest` outputs (frame, check, work
 RAM, buffer RAM, COP) must be identical: the i960 only sees the UART, which
 board time clocks. `--pcm FILE` writes each run's audio, for a gameplay
@@ -1255,6 +1284,21 @@ off the frame hook), so it enters from a frame that wanders by a few either way:
 runs of one build differ by 15% of wall clock and by a fraction of a percent of
 throughput. The window's instruction count is printed beside it, so the milliseconds
 an optimisation is worth are the report's last line.
+
+### The voices in C against the slots (`grade-sound-synth.py`)
+
+`--sound-synth` (`src/board/sound_synth.h`, SCSP.md "The voices in C") plays
+the driver's voices in C instead of the SCSP's slots, and it is meant to be
+bit-exact, so it is `cmp`ed: `grade-sound-synth.py` runs `snd_replay` twice on
+each input under the driver in C, `SND_HLE=1` and `SND_HLE=1 SND_SYNTH=1`, and
+the wav, register-write log, RAM dumps and register dumps must be identical.
+`--exact` runs both with `SCSP_EXACT=1`. On a difference it says where the
+audio first parts.
+
+```sh
+ROMDIR=<zips> python tools/grade-sound-synth.py build/Release/snd_replay.exe cap/synth stim/bgm stim/sfx stim/sys stim/fuzz
+ROMDIR=<zips> python tools/grade-sound-synth.py build/Release/snd_replay.exe cap/synth stim/bgm stim/sfx stim/sys stim/fuzz --exact
+```
 
 ### What the first two states measured (2026-09-22)
 
@@ -1511,6 +1555,16 @@ moves x into d beside the op that makes its first guess, and with MAME's order t
 (tgp.h, `tgp_alu_d`). Over 3000 frames of attract the largest error is now 1.7e-7 for 0x58
 and under 1e-4 for every command (0x5C's worst is a difference of near-equal products).
 
+## Each TGP op's argument and reply counts (`tgp-ops.py`)
+
+`python3 tools/tgp-ops.py LOG [--names CSV]` splits det_digest's `--cop` log of any Model 2A
+game into commands where the TGP program's main loop takes a word (the loop PC is found by
+itself: the one that reads only headers, of more than one op) and prints each op's count of
+commands, arguments, replies and first frame. With a CSV of `opcode,name,ps2_args` it names
+the ops and exits 1 where a count is off the table. Run on VF2 2.1 with vf2-decomp's
+`decomp/tgp/commands.csv` (Pinboard #1393), 72 ops over 3000 attract frames all match the PS2
+port's counts; [VF2-DECOMP.md](../VF2-DECOMP.md) has the run and what it corrected there.
+
 ## `tools/mame` and `tests/`
 
 The MAME side runs under the sibling `claude_mame` checkout (its
@@ -1525,6 +1579,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `mame/match-replay.lua`, `mame/osage-select.lua` | the autoboot scripts behind `match-replay.mjs --mame` and `grade-osage.mjs --mame` (above) |
 | `mame/snd-capture.lua`, `mame/snd_capture.py`, `mame/snd_compare.py` | the sound board's capture and comparison (see "The sound board") |
 | `grade-sound-hle.py` | the sound driver in C (`--sound-hle`) against the driver on the 68000, over `snd_replay` inputs: notes matched by what they play, timing, holds, audio per window, lasting driver-state differences (see "The driver in C against the 68000") |
+| `grade-sound-synth.py` | the voices in C (`--sound-synth`) against the SCSP's slots, both under the driver in C: wav, register log, RAM and register dumps must be the same bytes (see "The voices in C against the slots") |
 | `grade-midi.py` | the board's music against ValleyBell's M2MidiDec: per-song `snd_replay` inputs, the MIDIs corrected to the board's tempo and channels, then notes, pitch (and absolute pitch against the SF2's root keys), lengths, levels and spectra (see "Music against M2MidiDec") |
 | `tests/cop_replay.c` | replays a coprocessor capture through `sharc_exec()`, command by command with the arguments the firmware read, and checks every word it answers: `cop_replay <prefix> [examples-per-op] [only-op-hex]`. `$COPRO_ROM` names the COP data ROM; `OSAGE=<file>` dumps every `Fn_osage` call and `DRAWS=<file>` the draws as CSV, and `RESYNC` / `STATE_EXACT` tune the matrix-state check (`STATE_EXACT`: any differing bit is a bad state, not only 1e-3) |
 | `tests/snd_replay.c` | MAME's MIDI stream through `board/sound.h`: `snd_replay <mame-prefix> <out-prefix> [seconds]`, `$ROMDIR` for the zips. Run it from two builds and `cmp` the five outputs to prove a sound-board change bit-exact (`tools/snd_stimuli.py` writes four more inputs; see "Holding a sound-board change to the same bits") |
@@ -1532,7 +1587,7 @@ this MAME's SHARC recompiler fails the COP self-test.
 | `tests/i960_fuzz.c` | the i960 and its bus running random code: memory instructions of every width and addressing mode aimed at page, region and MMIO edges, real ROM words and random ones, after 300 real frames. One file to `cmp` between two builds or compilers; `det_digest` holds the game's own code, this the forms it never takes. `i960_fuzz <merged zip> <out> [scenarios] [steps]` |
 | `tests/tile_test.c` | the tile compositor against the pixel-by-pixel original it replaced, kept verbatim as the reference: 48 random boards, every pair control mode, and the pen table against `tile_pen_lut`. A ctest; `tile_test --bench` times both compositors on one frame |
 | `tests/arc_bench.c` | not a CMake target: the handheld's per-slice work (emulation, then the frame's CPU-side render on sokol's dummy backend), timed per stage with no window. `--draw-digest` and `--verify-atlas` make it a check as well as a benchmark |
-| `perf_inline.py` | a `perf record` of m2hle charged to the innermost INLINED function at each sample (addr2line -i), where `perf report` puts a third of the run on `emu_slice_body`; `--callers SYM` says which inlined code calls a libc memcpy. How to build for it and what it found: [PERF-PROFILE.md](../PERF-PROFILE.md) |
+| `perf_inline.py` | a `perf record` of m2hle charged to the innermost INLINED function at each sample (addr2line -i), where `perf report` puts a third of the run on `emu_slice_body`; `--callers SYM` says which inlined code calls a libc memcpy, `--comm m2-sound` takes one thread. Samples are weighted by their period (cycles), so a thread that sleeps between bursts is not overcounted. How to build for it and what it found: [PERF-PROFILE.md](../PERF-PROFILE.md) |
 
 The rest of `tests/` (`mem_test`, `i960_test`, `rom_test`, `emu_test`,
 `boot_test`, `cop_test`, `geo_test`, `m68k_test`, `input_test`, `net_test`,

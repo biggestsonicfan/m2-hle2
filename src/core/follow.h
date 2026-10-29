@@ -29,6 +29,10 @@
  *          bit 0 a netplay session owns the board (the cabinet's CPU table),
  *          bit 1 the warning skip is held. A feed without one keeps the
  *          follower's own warning skip, as before the record existed.
+ *   GUN    the light guns' host pointers as the slice read them (lightgun.h,
+ *          LIGHTGUN_FEED_BYTES), for a profile with quirks.lightgun, when they
+ *          change. A feed without one aims by the pad alone; a follower from
+ *          before the record skips it, as it does any type it does not know.
  * Anything else that changes the board from outside -- a reset, a state load,
  * a single step, a COP command, SKY EYE, a netplay session -- cannot be put in
  * the feed. It ends the segment (follow_lead_break) and the next slice starts a
@@ -81,6 +85,8 @@ static inline void follow_slice_end(emu_thread_ctx_t *ctx, bool frame_end) { (vo
 #include <pthread.h>
 #endif
 
+#include "../board/lightgun.h"
+
 #define FOLLOW_MAGIC       "M2FOLLOW"
 #define FOLLOW_VERSION     1u
 #define FOLLOW_HDR_BYTES   32u
@@ -91,7 +97,7 @@ static inline void follow_slice_end(emu_thread_ctx_t *ctx, bool frame_end) { (vo
 #define FOLLOW_ROM_MAX     65536u          /* ROM patch bytes carried into each segment */
 #define FOLLOW_EVERY_DEF   (60u * 60u * 5u) /* a new segment every five minutes */
 
-enum { FOLLOW_INPUT = 1, FOLLOW_WRITE, FOLLOW_SET, FOLLOW_CHECK, FOLLOW_END, FOLLOW_BOARD };
+enum { FOLLOW_INPUT = 1, FOLLOW_WRITE, FOLLOW_SET, FOLLOW_CHECK, FOLLOW_END, FOLLOW_BOARD, FOLLOW_GUN };
 
 /* What the run loop decides beside the inputs (emu_service_irq), for a board
  * that is not following: bit 0 a netplay session owns it, bit 1 the warning
@@ -101,6 +107,11 @@ enum { FOLLOW_INPUT = 1, FOLLOW_WRITE, FOLLOW_SET, FOLLOW_CHECK, FOLLOW_END, FOL
 static inline uint32_t follow_board_live(void) {
     bool session = netplay_active();
     return (session ? FOLLOW_BOARD_SESSION : 0u) | ((g_warning_skip || session) ? FOLLOW_BOARD_WARNING : 0u);
+}
+
+/* Does this board carry its light guns' pointers in a feed? */
+static inline bool follow_has_gun(void) {
+    return g_active_profile && g_active_profile->quirks.lightgun;
 }
 
 static inline uint64_t follow_key(uint32_t frame, uint32_t slice) {
@@ -162,9 +173,10 @@ typedef struct {
     uint32_t seg_frames;     /* frames into this segment */
     bool     join_due;
     char     why[64];        /* why the last segment ended */
-    bool     held_known, set_known, board_known;
+    bool     held_known, set_known, board_known, gun_known;
     uint32_t held, board;
     int32_t  set[FOLLOW_SET_WORDS];
+    uint8_t  gun[LIGHTGUN_FEED_BYTES];
     int      use_net_was;    /* the netplay latch, put back after the slice */
     bool     latched;
     uint8_t *rom;            /* ROM patches so far, as WRITE payloads, replayed per segment */
@@ -380,7 +392,7 @@ static inline bool follow__lead_join(emu_thread_ctx_t *ctx) {
     follow__lead_write_start();
     L->join_due = false;
     L->why[0] = 0;
-    L->held_known = L->set_known = L->board_known = false;
+    L->held_known = L->set_known = L->board_known = L->gun_known = false;
     L->seg_frames = 0;
     LOG_INFO("follow: segment %u at frame %u slice %u", seg, L->frame, L->slice);
     return true;
@@ -450,6 +462,33 @@ static inline void follow_lead_write(uint32_t addr, bool rom, const uint8_t *dat
     free(p);
 }
 
+/* The slice's input word, latched for the board and recorded when it changes. */
+static inline void follow__lead_latch(follow_lead_t *L) {
+    /* The board reads one word for the whole slice: the host's keys can move
+     * under it on another thread, and the follower has to see what it saw. */
+    uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
+    L->use_net_was = g_input.use_net;
+    L->latched     = true;
+    g_input.net_held = held;
+    g_input.use_net  = 1;
+    if (!L->held_known || held != L->held) {
+        uint8_t p[4];
+        follow_put32(p, held);
+        follow__lead_rec(FOLLOW_INPUT, L->slice, p, 4);
+        L->held = held;
+        L->held_known = true;
+    }
+    if (follow_has_gun()) {   /* and the guns' pointers, one copy for the slice */
+        uint8_t gun[LIGHTGUN_FEED_BYTES];
+        lightgun_latch(gun);
+        if (!L->gun_known || memcmp(gun, L->gun, sizeof gun)) {
+            follow__lead_rec(FOLLOW_GUN, L->slice, gun, sizeof gun);
+            memcpy(L->gun, gun, sizeof gun);
+            L->gun_known = true;
+        }
+    }
+}
+
 static inline void follow__lead_begin(emu_thread_ctx_t *ctx) {
     follow_lead_t *L = &g_follow_lead;
     if (!L->join_due && L->every && L->seg_frames >= L->every && L->slice == 0)
@@ -472,20 +511,7 @@ static inline void follow__lead_begin(emu_thread_ctx_t *ctx) {
         L->board = board;
         L->board_known = true;
     }
-    /* The board reads one word for the whole slice: the host's keys can move
-     * under it on another thread, and the follower has to see what it saw. */
-    uint32_t held = g_input.use_net ? g_input.net_held : g_input.held;
-    L->use_net_was = g_input.use_net;
-    L->latched     = true;
-    g_input.net_held = held;
-    g_input.use_net  = 1;
-    if (!L->held_known || held != L->held) {
-        uint8_t p[4];
-        follow_put32(p, held);
-        follow__lead_rec(FOLLOW_INPUT, L->slice, p, 4);
-        L->held = held;
-        L->held_known = true;
-    }
+    follow__lead_latch(L);
 }
 
 static inline void follow__check_payload(emu_thread_ctx_t *ctx, uint32_t frame, uint32_t slices,
@@ -502,6 +528,7 @@ static inline void follow__lead_end(emu_thread_ctx_t *ctx, bool frame_end) {
         g_input.use_net = L->use_net_was;
         L->latched = false;
     }
+    lightgun_unlatch();
     if (!frame_end) { L->slice++; return; }
     uint8_t p[12];
     uint32_t n;
@@ -531,6 +558,8 @@ typedef struct {
     uint32_t checks, rams;
     uint32_t held;         /* the leader's composed word, put in at every slice */
     uint32_t board;        /* the leader's FOLLOW_BOARD flags */
+    bool     gun_known;    /* a GUN record has come: its copy is put in */
+    uint8_t  gun[LIGHTGUN_FEED_BYTES];
     char     why[128];
 } follow_sub_t;
 
@@ -569,6 +598,7 @@ static inline void follow_stop(void) {
     free(g_follow.buf);
     memset(&g_follow, 0, sizeof g_follow);
     g_input.use_net = 0;
+    lightgun_unlatch();
 }
 
 /* Join: load the segment's state (the caller holds the mutex) and start an
@@ -659,6 +689,12 @@ static inline bool follow__apply(emu_thread_ctx_t *ctx, const uint8_t *r, uint32
     case FOLLOW_BOARD:
         if (n >= 4) g_follow.board = follow_get32(r + FOLLOW_REC_BYTES);
         return true;
+    case FOLLOW_GUN:
+        if (n >= LIGHTGUN_FEED_BYTES) {
+            memcpy(g_follow.gun, r + FOLLOW_REC_BYTES, LIGHTGUN_FEED_BYTES);
+            g_follow.gun_known = true;
+        }
+        return true;
     case FOLLOW_END:
         g_follow.ended = true;
         return false;
@@ -717,6 +753,7 @@ static inline void follow__sub_begin(emu_thread_ctx_t *ctx) {
      * latch between slices when it has no session. */
     g_input.net_held = g_follow.held;
     g_input.use_net  = 1;
+    lightgun_feed_put(g_follow.gun_known ? g_follow.gun : NULL);
 }
 
 static inline void follow__sub_end(emu_thread_ctx_t *ctx, bool frame_end) {

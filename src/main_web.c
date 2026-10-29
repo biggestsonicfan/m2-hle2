@@ -69,6 +69,11 @@
 #include "json_min.h"
 #include "m2lua.h"         /* the cheats scratchpad: a game script from the page */
 #include "m2lua_wide.h"    /* and the picture it asks for (Model2_SetWideScreen) */
+#include "lightgun_sgl.h"   /* the mouse and touches as light guns, and their crosshairs */
+#include "ffb.h"            /* the drive board's force feedback, for the page to rumble */
+#include "cabinet_picture.h" /* the Picture tab's cabinet: another cabinet's colours, live */
+#include "wheel_host.h"     /* the page's analog wheel and pedals (Pinboard #1082) */
+#include "link_check.h"     /* a MASTER cabinet with nobody on the link (#1449) */
 
 /* The single TU that defines g_profiles[] / g_active_profile. Under M2HLE_WEB it
  * registers sfight alone. */
@@ -199,9 +204,11 @@ EM_JS(void, web_gpu_renderer, (char *out, int cap), {
 });
 
 static void web_install_board(void) {
-    g_active_profile->install_fn(&state.romset, &state.cpu, &state.bus);
+    m2_spin_install(&state.romset, &state.cpu, &state.bus);
+    link_check_reset();   /* a new set: nothing asked, the TOSlink cable out */
     irqt_reset();
     if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&state.bus);
         if (state.romset.audiocpu && state.romset.audiocpu_size > 0)
@@ -341,6 +348,7 @@ static bool web_follow_ready(void) {
 static bool web_ggpo_slice(void);
 
 static bool web_slice(void) {
+    emu_ggpo_solo_netplay(&state.emu);
     if (emu_ggpo_wanted()) return web_ggpo_slice();
     netplay_step_t np = emu_netplay_pump(&state.emu);
     g_web_waited = (np == NETPLAY_STEP_WAIT);
@@ -396,7 +404,7 @@ static bool g_web_select_tap;   /* one shell frame of SELECT, from the page */
 static bool g_web_shot_want;    /* the page asked for a screenshot (web_shot_arm) */
 static bool g_web_shot_state;   /* ... and a savestate taken with it */
 
-static bool web_pause_refused(void) { return netplay_in_room() || netplay_active() || emu_ggpo_wanted(); }
+static bool web_pause_refused(void) { return netplay_in_room() || netplay_active() || emu_ggpo_match(); }
 
 /* 1 when the page may offer the button: a game is loaded, no room has us, and
  * the Console shell is not in one of its own menus (which hold the board). */
@@ -420,6 +428,27 @@ EMSCRIPTEN_KEEPALIVE int web_set_paused(int on) {
     }
     g_web_paused = on != 0;
     return web_paused();
+}
+
+/* A linked game set to MASTER with no other cabinet on the link (core/link_check.h,
+ * #1449): the board stands still while the page asks what to do. 0 nothing to
+ * ask; else 1, | 2 with "Back to the test menu" (a Test button), | 4 with the
+ * virtual TOSlink cable (a game that plays on a ring of one). */
+EMSCRIPTEN_KEEPALIVE int web_link_check(void) {
+    if (!state.romset.loaded || !link_check_due()) return 0;
+    return 1 | (link_check_has_test(g_active_profile) ? 2 : 0) | (link_check_has_cable(g_active_profile) ? 4 : 0);
+}
+/* Where the loaded game's test menu sets it to play alone, in the menu's
+ * words, or "" (game_profile_t link_setting). */
+EMSCRIPTEN_KEEPALIVE const char *web_link_setting(void) {
+    const char *s = link_check_setting();
+    return s ? s : "";
+}
+/* The page's answer: 0 back to the test menu, 1 continue anyway, 2 the virtual
+ * TOSlink cable (link_answer_t). */
+EMSCRIPTEN_KEEPALIVE void web_link_answer(int a) {
+    if (a < LINK_ANSWER_TEST_MENU || a > LINK_ANSWER_CABLE) return;
+    link_check_answer((link_answer_t)a, g_emu_frames);
 }
 
 /* A machine that cannot run much faster than the board would rush for ever, in
@@ -498,7 +527,8 @@ static void web_run_owed_slices(void) {
 
     emu_ggpo_lobby_pump();   /* the GGPO lobby, running or not */
     if (g_web_paused && web_pause_refused()) g_web_paused = false;   /* a room or a match took over */
-    if (state.emu.run_state != EMU_RUNNING || g_web_hold || g_web_paused) {
+    link_check_frame(g_emu_frames);   /* lets go of the answer's Test */
+    if (state.emu.run_state != EMU_RUNNING || g_web_hold || g_web_paused || link_check_due()) {
         /* Not running yet (or held under the shell's menus, or paused), and netplay still
          * has to breathe: the login and the room happen before the match
          * starts (emu_thread.h, STOPPED branch). */
@@ -560,10 +590,11 @@ EMSCRIPTEN_KEEPALIVE void web_audio_set_nudge(double nudge) {
 }
 
 /* Who runs the sound driver: the 68000 running the game's own program (0, the
- * default) or STF's driver ported to C (1, board/sound_hle.h), which runs the
- * sound board in about half the time (4-11% of a whole frame here, measured
- * with det_digest under Node) -- the page offers it for slower devices. Any
- * other game keeps the 68000 whatever this says (shle_driver_known).
+ * page's choice) or the driver ported to C (1, board/sound_hle.h, the default
+ * since #1802), which runs the sound board in about half the time (4-11% of a
+ * whole frame here, measured with det_digest under Node). A game
+ * on a driver build the port does not know keeps the 68000 whatever this says
+ * (shle_driver_known).
  *
  * The board takes the choice at a sound reset. With no session that happens
  * here and now: the driver boots afresh, so the music stops until the game's
@@ -823,10 +854,10 @@ static void web_count_callback(void) {
 static bool web_keep_picture(bool have_game, bool lobby, bool overlay, bool afford) {
     static uint64_t s_drawn_slices;
     static int      s_drawn_w, s_drawn_h;
-    static unsigned s_drawn_pots;
+    static unsigned s_drawn_pots, s_drawn_stereo;
     const bool board_moved = g_web_perf.slices != s_drawn_slices;
     const bool resized     = sapp_width() != s_drawn_w || sapp_height() != s_drawn_h;
-    const bool pots_turned = g_crt_pots.gen != s_drawn_pots;
+    const bool pots_turned = g_crt_pots.gen != s_drawn_pots || g_stereo.gen != s_drawn_stereo;
     if (have_game && !lobby && !overlay && !board_moved && !resized && !pots_turned && !g_web_objview_show && !afford
         && !g_web_shot_want) {
         g_web_perf.pictures_skipped++;
@@ -836,6 +867,7 @@ static bool web_keep_picture(bool have_game, bool lobby, bool overlay, bool affo
     s_drawn_w      = sapp_width();
     s_drawn_h      = sapp_height();
     s_drawn_pots   = g_crt_pots.gen;
+    s_drawn_stereo = g_stereo.gen;
     return false;
 }
 
@@ -845,8 +877,34 @@ static int web_picture_width(void) {
     return g_game_wide.extra ? game_render_wide_width() : post_shader_picture_width();
 }
 
+/* With 3D on (stereo.h), the menus go into both eyes at the screen's depth:
+ * recorded once over the left half, drawn there and again `dx` to the right,
+ * where the right eye's picture is. */
+static game_rect_t web_stereo_rect(int h) {
+    return game_frame_stereo_rect((game_rect_t){0, 0, sapp_width(), sapp_height()}, h, web_picture_width());
+}
+
+/* The left eye's menus: the lobby fitted to the left half, the pause menu over
+ * the left picture. */
+static void web_record_menus_stereo(ps3ui_canvas_t *cv, bool overlay) {
+    const int cw = sapp_width() / 2, ch = sapp_height();
+    ps3ui_gpu_record(cv, cw, ch);
+    if (overlay) {
+        ps3ui_canvas_size(cv, cw, ch);
+        const game_rect_t r = web_stereo_rect(0);
+        float k = (float)r.w / 1920.0f;
+        if ((float)r.h / 1080.0f < k) k = (float)r.h / 1080.0f;
+        cv->k = k;
+        cv->ox = (float)r.x + ((float)r.w - 1920.0f * k) * 0.5f;
+        cv->oy = (float)r.y + ((float)r.h - 1080.0f * k) * 0.5f;
+    }
+    if (web_shell_live()) ps3ui_shell_draw(&g_ps3ui_shell, cv);
+    else                ps3ui_app_draw(&g_ps3ui_app, cv);
+}
+
 /* Record the menus into `cv`: the lobby on its own, or the pause menu over the game. */
 static void web_record_menus(ps3ui_canvas_t *cv, bool overlay) {
+    if (g_stereo.on) { web_record_menus_stereo(cv, overlay); return; }
     if (overlay) {
         /* over the game: the 16:9 layout fitted to the game's letterboxed picture */
         game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
@@ -901,9 +959,28 @@ typedef struct {
 static void web_shot_done(const web_picture_t *pic);   /* the page's screenshot (Pinboard #653) */
 static void web_cheats_place(const web_picture_t *pic, bool shown);   /* the Cheats tab's drawing */
 
+/* The recorded menus in both eyes (web_record_menus_stereo): the pause menu
+ * over each picture, the lobby in each half. */
+static void web_draw_menus_stereo(ps3ui_canvas_t *cv, bool overlay) {
+    ps3ui_gpu_draw_at(cv, 0, 0);
+    ps3ui_gpu_draw_at(cv, overlay ? web_stereo_rect(1).x - web_stereo_rect(0).x : sapp_width() / 2, 0);
+}
+
+/* Both eyes side by side (stereo.h), then the pause menu over each. No filter,
+ * light gun crosshairs or pots: they are drawn for one picture. */
+static void web_present_stereo(const web_picture_t *pic, ps3ui_canvas_t *cv) {
+    game_rect_t eyes[2];
+    game_frame_draw_stereo(&state.video, &state.geo3d, &state.bus, &state.romset,
+                           (game_rect_t){0, 0, sapp_width(), sapp_height()}, web_picture_width(),
+                           pic->lerp_t, eyes);
+    if (pic->overlay) web_draw_menus_stereo(cv, true);
+    sgl_draw();
+}
+
 /* The game in its letterbox, through the filter, from the offscreen target or
  * drawn straight in; then the pause menu over it. */
 static void web_present_game(const web_picture_t *pic, ps3ui_canvas_t *cv) {
+    if (g_stereo.on) { web_present_stereo(pic, cv); return; }
     int ox = pic->ox, oy = pic->oy, w = pic->w, h = pic->h;
     if (pic->post)           post_shader_draw(ox, oy, w, h, sapp_width(), sapp_height());
     else if (pic->offscreen) game_render_draw_target(g_web_rt.texture, true, ox, oy, w, h);
@@ -911,6 +988,7 @@ static void web_present_game(const web_picture_t *pic, ps3ui_canvas_t *cv) {
                                    pic->lerp_t);
     crt_pots_record(ox, oy, w, h, sapp_width(), sapp_height());
     if (pic->overlay) ps3ui_gpu_draw(cv);   /* the pause menu over the game */
+    else lightgun_sgl_record(ox, oy, w, h, sapp_width(), sapp_height());
     sgl_draw();
 }
 
@@ -934,7 +1012,8 @@ static void web_present(const web_picture_t *pic, ps3ui_canvas_t *cv) {
     sg_begin_pass(&(sg_pass){ .action = state.pass_action, .swapchain = sglue_swapchain() });
     if (pic->lobby) {
         /* The lobby's 16:9 frame fitted to the canvas; its own colour fills the rest. */
-        ps3ui_gpu_draw(cv);
+        if (g_stereo.on) web_draw_menus_stereo(cv, false);
+        else             ps3ui_gpu_draw(cv);
         sgl_draw();
     } else if (show_objview) {
         web_present_objview();
@@ -951,6 +1030,25 @@ static void web_count_render(int64_t render_t0) {
     uint32_t render_us = (uint32_t)(emu_now_us() - render_t0);
     g_web_perf.render_us += render_us;
     if (render_us > g_web_perf.render_us_max) g_web_perf.render_us_max = render_us;
+}
+
+/* Where the game goes on the page, and the passes drawn before the
+ * swapchain's (the filter's source, the offscreen render scale). */
+static void web_place_picture(web_picture_t *pic, bool game) {
+    /* A filter over the picture (post_shader.h) reads the game from a target of
+     * its own, at the render scale, and only covers the game's rectangle. */
+    game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
+                                          web_picture_width(), VIDEO_HEIGHT);
+    pic->ox = r.x; pic->oy = r.y; pic->w = r.w; pic->h = r.h;
+    crt_pots_place(&pic->ox, &pic->oy, &pic->w, &pic->h);
+    post_shader_set_input_scale(g_web_rt.want);
+    web_cheats_place(pic, game && !pic->overlay && !g_web_objview_show && !g_stereo.on);
+    pic->post = game && !g_web_objview_show && !g_stereo.on && post_shader_active();
+    if (pic->post) web_draw_post_source(pic->w, pic->h, pic->lerp_t);
+
+    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
+    pic->offscreen = game && !pic->post && !g_stereo.on && g_web_rt.scale > 0;
+    if (pic->offscreen) web_draw_offscreen(pic->lerp_t);
 }
 
 static void frame(void) {
@@ -983,20 +1081,7 @@ static void frame(void) {
         pic.lerp_t = game_frame_lerp();
     }
 
-    /* A filter over the picture (post_shader.h) reads the game from a target of
-     * its own, at the render scale, and only covers the game's rectangle. */
-    game_rect_t r = game_render_letterbox(sapp_width(), sapp_height(),
-                                          web_picture_width(), VIDEO_HEIGHT);
-    pic.ox = r.x; pic.oy = r.y; pic.w = r.w; pic.h = r.h;
-    crt_pots_place(&pic.ox, &pic.oy, &pic.w, &pic.h);
-    post_shader_set_input_scale(g_web_rt.want);
-    web_cheats_place(&pic, game && !pic.overlay && !g_web_objview_show);
-    pic.post = game && !g_web_objview_show && post_shader_active();
-    if (pic.post) web_draw_post_source(pic.w, pic.h, pic.lerp_t);
-
-    /* Offscreen first, when there is a render scale: the game at N x 496x384. */
-    pic.offscreen = game && !pic.post && g_web_rt.scale > 0;
-    if (pic.offscreen) web_draw_offscreen(pic.lerp_t);
+    web_place_picture(&pic, game);
 
     web_present(&pic, &lobby_cv);
     if (g_web_shot_want) web_shot_done(&pic);
@@ -1017,6 +1102,116 @@ static void cleanup(void) {
 }
 
 static uint32_t g_web_pad;   /* the actions the page holds (gamepads, touch buttons, keyboard): web_pad_set */
+static uint32_t g_web_pad_far;   /* players 3 and 4's: web_pad_far_set */
+static int g_web_cheats_rect[4];   /* the picture on the canvas: web_cheats_place */
+
+/* The drive board's force (ffb.h, Pinboard #1047) for the page's pads to
+ * rumble (m2hle-pad.js): the strong motor's top byte << 16 | the weak's << 8
+ * | the command. 0 when the game has no drive board. */
+EMSCRIPTEN_KEEPALIVE unsigned web_ffb(void) {
+    ffb_out_t o = ffb_poll();
+    return (unsigned)(o.strong >> 8) << 16 | (unsigned)(o.weak >> 8) << 8 | o.effect.cmd;
+}
+
+/* A driving game's analog wheel and pedals (wheel_host.h, Pinboard #1082):
+ * web_wheel_on says whether the game has them; the page then sends player 1's
+ * pad's turn (-32767 left .. 32767 right) and pedals (0 .. 32767) each poll
+ * (m2hle-pad.js), on = 0 when no pad has them. */
+EMSCRIPTEN_KEEPALIVE int web_wheel_on(void) { return wheel_host_on(); }
+EMSCRIPTEN_KEEPALIVE void web_wheel(int on, int steer, int accel, int brake) {
+    wheel_host_set(on != 0 && web_game_pad(), steer, accel, brake);
+}
+
+/* The page's canvas asks before its context menu: not while a right click reloads a gun. */
+EMSCRIPTEN_KEEPALIVE int web_lightgun_on(void) { return lightgun_host_on(); }
+
+/* The Controls panel's flash on each shot (lightgun_host.h): frames of white, 0 off. */
+EMSCRIPTEN_KEEPALIVE void web_set_gun_flash(int frames) {
+    char v[12];
+    snprintf(v, sizeof v, "%d", frames);
+    lightgun_host_option("--gun-flash", v);
+}
+
+/* Player 1's light gun on the canvas (Pinboard #1040): the mouse aims it, the
+ * left button is the trigger and the right one reloads; a finger aims and
+ * fires where it lands, or reloads when it lands off the picture. Only while
+ * the game has the pad and its picture is up; lightgun.h ignores the pointer
+ * in a session, a follow or a replay. Coordinates are the framebuffer's, as
+ * the picture's rectangle is. */
+static int64_t g_web_gun_touch = -1;   /* the finger holding the gun, or -1 */
+
+/* The picture's rectangle on the canvas, and whether the gun aims at it. */
+typedef struct { float x, y, w, h; bool live; } web_gun_rect_t;
+
+static void web_gun_aim(const web_gun_rect_t *r, float x, float y) {
+    lightgun_host_aim(0, x, y, r->x, r->y, r->w, r->h);
+}
+
+static void web_gun_mouse_move(const sapp_event *ev, const web_gun_rect_t *r) {
+    if (r->live && g_web_gun_touch < 0) web_gun_aim(r, ev->mouse_x, ev->mouse_y);
+}
+
+/* The mouse's buttons: the left one is the trigger, the right one reloads.
+ * A press aims first, unless a finger holds the gun. */
+static void web_gun_mouse_button(const sapp_event *ev, const web_gun_rect_t *r, bool down) {
+    if (down && (!r->live || g_web_gun_touch >= 0)) return;
+    if (down) web_gun_aim(r, ev->mouse_x, ev->mouse_y);
+    if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT)  lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, down);
+    if (ev->mouse_button == SAPP_MOUSEBUTTON_RIGHT) lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, down);
+}
+
+/* A finger lands: it holds the gun, and fires on the picture or reloads off it. */
+static void web_gun_touch_began(const sapp_event *ev, const web_gun_rect_t *r) {
+    for (int i = 0; i < ev->num_touches; i++) {
+        const sapp_touchpoint *t = &ev->touches[i];
+        if (!t->changed || g_web_gun_touch >= 0 || !r->live) continue;
+        g_web_gun_touch = (int64_t)t->identifier;
+        web_gun_aim(r, t->pos_x, t->pos_y);
+        bool on = t->pos_x >= r->x && t->pos_x <= r->x + r->w && t->pos_y >= r->y && t->pos_y <= r->y + r->h;
+        lightgun_host_button(0, on ? LIGHTGUN_HOST_TRIGGER : LIGHTGUN_HOST_RELOAD, true);
+    }
+}
+
+static void web_gun_touch_moved(const sapp_event *ev, const web_gun_rect_t *r) {
+    for (int i = 0; i < ev->num_touches; i++) {
+        const sapp_touchpoint *t = &ev->touches[i];
+        if (t->changed && r->live && (int64_t)t->identifier == g_web_gun_touch)
+            web_gun_aim(r, t->pos_x, t->pos_y);
+    }
+}
+
+/* The finger holding the gun lifts: both its buttons let go. */
+static void web_gun_touch_ended(const sapp_event *ev) {
+    for (int i = 0; i < ev->num_touches; i++) {
+        const sapp_touchpoint *t = &ev->touches[i];
+        if (!t->changed || (int64_t)t->identifier != g_web_gun_touch) continue;
+        g_web_gun_touch = -1;
+        lightgun_host_button(0, LIGHTGUN_HOST_TRIGGER, false);
+        lightgun_host_button(0, LIGHTGUN_HOST_RELOAD, false);
+    }
+}
+
+static void web_gun_event(const sapp_event *ev) {
+    if (!lightgun_host_on()) return;
+    const int *c = g_web_cheats_rect;
+    const web_gun_rect_t r = { (float)c[0], (float)c[1], (float)c[2], (float)c[3],
+                               web_game_pad() && c[2] > 0 };
+    switch (ev->type) {
+    case SAPP_EVENTTYPE_MOUSE_MOVE:
+    case SAPP_EVENTTYPE_MOUSE_ENTER:       web_gun_mouse_move(ev, &r);          break;
+    case SAPP_EVENTTYPE_MOUSE_LEAVE:
+        if (g_web_gun_touch < 0) lightgun_host_aim_away(0);
+        break;
+    case SAPP_EVENTTYPE_MOUSE_DOWN:        web_gun_mouse_button(ev, &r, true);  break;
+    case SAPP_EVENTTYPE_MOUSE_UP:          web_gun_mouse_button(ev, &r, false); break;
+    case SAPP_EVENTTYPE_TOUCHES_BEGAN:     web_gun_touch_began(ev, &r);         break;
+    case SAPP_EVENTTYPE_TOUCHES_MOVED:     web_gun_touch_moved(ev, &r);         break;
+    case SAPP_EVENTTYPE_TOUCHES_ENDED:
+    case SAPP_EVENTTYPE_TOUCHES_CANCELLED: web_gun_touch_ended(ev);             break;
+    default:
+        break;
+    }
+}
 
 static void event(const sapp_event *ev) {
     /* No keys here: the page reads the keyboard through the player's own
@@ -1024,7 +1219,14 @@ static void event(const sapp_event *ev) {
      * touch buttons through web_pad_set. Mapping sokol's key codes as well would
      * press the default keys on top of the remapped ones. */
     /* A tab that loses focus never sees the key-up: let go of everything. */
-    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) { input_reset(); g_web_pad = 0; }
+    if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) {
+        input_reset();
+        g_web_pad = 0;
+        lightgun_host_release_all();
+        g_web_gun_touch = -1;
+        return;
+    }
+    web_gun_event(ev);
 }
 
 /* The page's switches that carry a value (--name=value). */
@@ -1042,6 +1244,8 @@ static void web_value_arg(const char *a) {
         size_t n = (size_t)(strchr(a, '=') - a);
         if (n < sizeof opt) { memcpy(opt, a, n); opt[n] = 0; io5649_wheel_option(opt, a + n + 1); }
     }
+    else if (!strncmp(a, "--gun-flash=", 12)) lightgun_host_option("--gun-flash", a + 12);
+    else if (!strncmp(a, "--ffb-gain=", 11)) ffb_option("--ffb-gain", a + 11);   /* 0-100 */
 }
 
 sapp_desc sokol_main(int argc, char *argv[]) {
@@ -1208,8 +1412,8 @@ EMSCRIPTEN_KEEPALIVE int web_cheats_option(const char *key, int value) {
 EMSCRIPTEN_KEEPALIVE void web_cheats_key(int dik, int down) { m2lua_set_key(dik, down != 0); }
 
 /* Where the game's picture was last put on the canvas, for the page's drawing
- * over it; w 0 while it is not shown (the lobby, the pause menu, no game). */
-static int g_web_cheats_rect[4];
+ * over it and the light guns; w 0 while it is not shown (the lobby, the pause
+ * menu, no game). */
 static void web_cheats_place(const web_picture_t *pic, bool shown) {
     g_web_cheats_rect[0] = pic->ox;
     g_web_cheats_rect[1] = pic->oy;   /* sg_apply_viewport's, from the top left */
@@ -1609,7 +1813,7 @@ EMSCRIPTEN_KEEPALIVE int web_state_load(uint8_t *data, int len) {
  * come yet) is pressed again by its next web_pad_set. */
 /* Only the local keyboard's mask: under netplay the board reads the composed mask,
  * which belongs to the lockstep and is rebuilt from both players' words each frame. */
-EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { input_release_all(); g_web_pad = 0; }
+EMSCRIPTEN_KEEPALIVE void web_release_keys(void) { input_release_all(); g_web_pad = 0; g_web_pad_far = 0; }
 
 /* The page's gamepads, touch buttons and keyboard (web/site/m2hle-pad.js,
  * m2hle-touch.js, m2hle-keys.js), as one bit per GAME_INPUT_* action, sent whole
@@ -1635,6 +1839,25 @@ EMSCRIPTEN_KEEPALIVE void web_pad_set(uint32_t actions) {
         else                     input_action_up(a);
     }
     g_web_pad = actions;
+}
+
+/* Does the game seat four (m2hle-pad.js gives the third and fourth pads to
+ * players 3 and 4, web_pad_far_set)? */
+EMSCRIPTEN_KEEPALIVE int web_four_players(void) { return input_four_players(); }
+
+/* Players 3 and 4 of a four-player cabinet (Air Walkers): the page's third and
+ * fourth pads, as web_pad_set's bits, player 3 on player 1's and player 4 on
+ * player 2's (input_far_down). Only the changes are pressed or released; with
+ * the menus up they hold nothing. The board reads them only outside a session. */
+EMSCRIPTEN_KEEPALIVE void web_pad_far_set(uint32_t actions) {
+    if (!web_game_pad()) actions = 0;
+    uint32_t changed = actions ^ g_web_pad_far;
+    for (int a = 0; a < GAME_INPUT_COUNT; a++) {
+        if (!(changed & (1u << a))) continue;
+        if (actions & (1u << a)) input_far_down(a);
+        else                     input_far_up(a);
+    }
+    g_web_pad_far = actions;
 }
 
 /* The page's "Online" button: the lobby, as the PS3's Online Battle opens it. */
@@ -1743,9 +1966,33 @@ EMSCRIPTEN_KEEPALIVE int web_shader_mode(void) { return (int)post_shader_mode();
 EMSCRIPTEN_KEEPALIVE void web_shader_set_arcade(int on) { post_shader_set_arcade(on != 0); }
 EMSCRIPTEN_KEEPALIVE int web_shader_arcade(void) { return post_shader_arcade() ? 1 : 0; }
 
+/* Side-by-side 3D for a Cardboard viewer (stereo.h, m2hle-cardboard.js): on,
+ * then Depth (parallax at infinity, a fraction of a picture), Focus (a multiple
+ * of the scene's distance), Spacing (between the pictures' centres, a fraction
+ * of the canvas), Size (a fraction of a half) and Swap. Out of range is clamped. */
+EMSCRIPTEN_KEEPALIVE void web_stereo_set(int on, float depth, float focus, float spacing, float size, int swap) {
+    stereo_set(on, depth, focus, spacing, size, swap);
+}
+EMSCRIPTEN_KEEPALIVE int web_stereo_on(void) { return g_stereo.on; }
+/* The scene's distance the focus is a multiple of, for the page's log. */
+EMSCRIPTEN_KEEPALIVE float web_stereo_scene(void) { return g_stereo.scene_z; }
+
 /* Depth per pixel, not the board's one key a polygon (geo3d.h): 0 off, 1 on. */
 EMSCRIPTEN_KEEPALIVE void web_set_pixel_depth(int on) { g_geo3d_pixel_depth = on != 0; }
 EMSCRIPTEN_KEEPALIVE int web_pixel_depth(void) { return g_geo3d_pixel_depth; }
+
+/* The Picture tab's cabinet (core/cabinet_picture.h): the game's cabinets, and
+ * the one to show live ("" = whatever its test menu is set to). */
+EMSCRIPTEN_KEEPALIVE int web_cabinet_count(void) {
+    return g_active_profile && g_active_profile->cabinet_xlat_fn ? g_active_profile->cabinet_count : 0;
+}
+EMSCRIPTEN_KEEPALIVE const char *web_cabinet_id(int i) {
+    return i >= 0 && i < web_cabinet_count() ? g_active_profile->cabinets[i].id : "";
+}
+EMSCRIPTEN_KEEPALIVE const char *web_cabinet_label(int i) {
+    return i >= 0 && i < web_cabinet_count() ? g_active_profile->cabinets[i].label : "";
+}
+EMSCRIPTEN_KEEPALIVE void web_set_cabinet(const char *id) { cabinet_picture_choose(id); }
 
 /* The monitor's pots (crt_pots.h, CRT_POT_*), from the Picture tab. */
 EMSCRIPTEN_KEEPALIVE void  web_crt_pot_set(int id, float v) { crt_pots_set(id, v); }
@@ -2162,6 +2409,18 @@ static void web_status_play(web_json_t *w, const netplay_status_t *st) {
     web_put(w, ",\"empty_room\":%s", web_tf(st->empty_room));
 }
 
+/* A linked game's comm link (netplay_comm_open: Virtual-On, Power Sled): open
+ * once the room's match starts, the role the board booted into
+ * (game_link_role_t), the ring (node of nodes, up) and the datagrams, with
+ * those lost to the inbox or torn. */
+static void web_status_comm(web_json_t *w, const struct netplay_comm_status *c) {
+    web_put(w, ",\"comm\":{\"open\":%s,\"linked\":%s,\"role\":%u,\"ring_up\":%s,\"node\":%u,\"nodes\":%u,"
+            "\"ring_sent\":%u,\"ring_taken\":%u,\"sent\":%u,\"taken\":%u,\"lost\":%u}",
+            web_tf(c->open), web_tf(c->linked), (unsigned)c->role, web_tf(c->ring_up), (unsigned)c->node,
+            (unsigned)c->nodes, c->ring_sent, c->ring_taken, c->sent, c->taken,
+            c->overflow + c->too_big + c->torn);
+}
+
 /* One row of the room search, `i` rows down, with why this build cannot join it. */
 static void web_status_listing(web_json_t *w, uint32_t i, const rpcn_room_listing_t *r) {
     const char *why = netplay_room_reject_reason(r->flag_attr, g_active_profile);
@@ -2204,6 +2463,7 @@ EMSCRIPTEN_KEEPALIVE const char *web_netplay_status(unsigned log_from) {
     web_status_sign_in(&w, &st);
     web_status_room(&w, &st);
     web_status_play(&w, &st);
+    web_status_comm(&w, &st.comm);
     web_put(&w, ",\"search_pending\":%s,\"rooms\":[", web_tf(st.search_pending));
     for (uint32_t i = 0; i < st.room_count && i < RPCN_MAX_ROOMS; i++) web_status_listing(&w, i, &st.rooms[i]);
     web_put(&w, "]");

@@ -255,27 +255,35 @@ class Replay {
  * clip_point_check_yoko's lattice (when it ran), then area_clip under a pushed
  * 1.6 scale, closed by its pop.
  */
+const GROUND_HEAD = [OP.PUSH, OP.ANG_Z, OP.ANG_X, OP.ANG_Y, OP.TRANSLATE];
+
+/* The draws at the top level of the area_clip pass opened at ops[from], up
+ * to its closing pop. */
+function areaDraws(cmds, ops, after, from) {
+    const draws = [];
+    let depth = 0, glo = false;
+    for (let k = from; k < cmds.length; k++) {
+        if (ops[k] === OP.PUSH) depth++;
+        else if (ops[k] === OP.POP) { if (depth-- === 0) break; }
+        else if (ops[k] === OP.GLO_TO_LOC) glo = true;
+        else if (ops[k] === OP.DRAW && depth === 0) {
+            draws.push({ args: cmds[k].args, m: after[k], afterGlo: glo });
+        }
+    }
+    return draws;
+}
+
 function groundPass(cmds, replay) {
     const after = cmds.map((c) => { replay.apply(c); return replay.m; });
     const ops = cmds.map((c) => c.op);
     for (let i = 0; i + 6 < cmds.length; i++) {
-        if (ops[i] !== OP.PUSH || ops[i + 1] !== OP.ANG_Z || ops[i + 2] !== OP.ANG_X
-            || ops[i + 3] !== OP.ANG_Y || ops[i + 4] !== OP.TRANSLATE) continue;
+        if (GROUND_HEAD.some((op, n) => ops[i + n] !== op)) continue;
         let j = i + 5;
         const lattice = [];
         while (j < cmds.length && ops[j] === OP.POINT) lattice.push(cmds[j++].args);
         if (ops[j] !== OP.PUSH || ops[j + 1] !== OP.SCALE
             || !cmds[j + 1].args.every((w) => w === SCALE_16)) continue;
-        const draws = [];
-        let depth = 0, glo = false;
-        for (let k = j + 2; k < cmds.length; k++) {
-            if (ops[k] === OP.PUSH) depth++;
-            else if (ops[k] === OP.POP) { if (depth-- === 0) break; }
-            else if (ops[k] === OP.GLO_TO_LOC) glo = true;
-            else if (ops[k] === OP.DRAW && depth === 0) {
-                draws.push({ args: cmds[k].args, m: after[k], afterGlo: glo });
-            }
-        }
+        const draws = areaDraws(cmds, ops, after, j + 2);
         /* The view is the matrix ground_disp pushed over: the one standing
          * before its first op. */
         return { Y: after[i + 4], C: i > 0 ? after[i - 1] : null, lattice, draws };

@@ -8,21 +8,42 @@ import zlib from 'node:zlib';
 
 const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+/* The header's fields and the IDAT chunks of a PNG file's bytes. */
+function pngChunks(b) {
+    const h = { width: 0, height: 0, depth: 0, type: 0, interlace: 0, idat: [] };
+    for (let o = 8; o < b.length;) {
+        const len = b.readUInt32BE(o), kind = b.toString('latin1', o + 4, o + 8), data = b.subarray(o + 8, o + 8 + len);
+        if (kind === 'IHDR') {
+            h.width = data.readUInt32BE(0); h.height = data.readUInt32BE(4);
+            h.depth = data[8]; h.type = data[9]; h.interlace = data[12];
+        } else if (kind === 'IDAT') h.idat.push(data);
+        else if (kind === 'IEND') break;
+        o += 12 + len;
+    }
+    return h;
+}
+
+/* One row through its filter f into cur, prev the row above. */
+function unfilterRow(f, row, cur, prev, bpp, stride) {
+    for (let x = 0; x < stride; x++) {
+        const a = x >= bpp ? cur[x - bpp] : 0, up = prev[x], c = x >= bpp ? prev[x - bpp] : 0;
+        let v = row[x];
+        if (f === 1) v += a;
+        else if (f === 2) v += up;
+        else if (f === 3) v += (a + up) >> 1;
+        else if (f === 4) {
+            const p = a + up - c, pa = Math.abs(p - a), pb = Math.abs(p - up), pc = Math.abs(p - c);
+            v += pa <= pb && pa <= pc ? a : pb <= pc ? up : c;
+        }
+        cur[x] = v & 0xff;
+    }
+}
+
 /** Decode a PNG file to { width, height, rgb } with rgb 3 bytes a pixel. */
 export function readPng(file) {
     const b = fs.readFileSync(file);
     if (!b.subarray(0, 8).equals(SIG)) throw new Error(`${file}: not a PNG`);
-    let width = 0, height = 0, depth = 0, type = 0, interlace = 0;
-    const idat = [];
-    for (let o = 8; o < b.length;) {
-        const len = b.readUInt32BE(o), kind = b.toString('latin1', o + 4, o + 8), data = b.subarray(o + 8, o + 8 + len);
-        if (kind === 'IHDR') {
-            width = data.readUInt32BE(0); height = data.readUInt32BE(4);
-            depth = data[8]; type = data[9]; interlace = data[12];
-        } else if (kind === 'IDAT') idat.push(data);
-        else if (kind === 'IEND') break;
-        o += 12 + len;
-    }
+    const { width, height, depth, type, interlace, idat } = pngChunks(b);
     if (depth !== 8 || (type !== 2 && type !== 6) || interlace)
         throw new Error(`${file}: only 8-bit RGB/RGBA non-interlaced PNGs (depth ${depth}, type ${type}, interlace ${interlace})`);
     const bpp = type === 6 ? 4 : 3, stride = width * bpp;
@@ -31,18 +52,7 @@ export function readPng(file) {
     const rgb = Buffer.alloc(width * height * 3);
     for (let y = 0; y < height; y++) {
         const f = raw[y * (stride + 1)], row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-        for (let x = 0; x < stride; x++) {
-            const a = x >= bpp ? cur[x - bpp] : 0, up = prev[x], c = x >= bpp ? prev[x - bpp] : 0;
-            let v = row[x];
-            if (f === 1) v += a;
-            else if (f === 2) v += up;
-            else if (f === 3) v += (a + up) >> 1;
-            else if (f === 4) {
-                const p = a + up - c, pa = Math.abs(p - a), pb = Math.abs(p - up), pc = Math.abs(p - c);
-                v += pa <= pb && pa <= pc ? a : pb <= pc ? up : c;
-            }
-            cur[x] = v & 0xff;
-        }
+        unfilterRow(f, row, cur, prev, bpp, stride);
         for (let x = 0; x < width; x++) cur.copy(rgb, (y * width + x) * 3, x * bpp, x * bpp + 3);
         cur.copy(prev);
     }

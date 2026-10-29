@@ -104,13 +104,8 @@ static int mem_insn(uint32_t *w) {
     return 1;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: i960_fuzz <merged sfight zip> <out-file> [scenarios] [steps]\n"); return 2; }
-    int scenarios = argc > 3 ? atoi(argv[3]) : 300;
-    int steps = argc > 4 ? atoi(argv[4]) : 20000;
-    out = fopen(argv[2], "wb");
-    if (!out) { fprintf(stderr, "cannot write %s\n", argv[2]); return 1; }
-
+/* The board booted from the zip and run 300 frames in. 0, or 2. */
+static int board_boot(const char *path) {
     log_set_path("off");     /* random code warns on nearly every step; the file would be the bottleneck */
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
@@ -118,13 +113,13 @@ int main(int argc, char **argv) {
     wp_init();
     for (size_t i = 0; i < g_profile_count; i++)
         if (!strcmp(g_profiles[i]->id, "sfight")) g_active_profile = g_profiles[i];
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 2; }
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
     uint8_t *zip = (uint8_t *)malloc((size_t)len);
-    if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", argv[1]); return 2; }
+    if (!zip || fread(zip, 1, (size_t)len, f) != (size_t)len) { fprintf(stderr, "cannot read %s\n", path); return 2; }
     fclose(f);
     rl_mem_zip_set(zip, (size_t)len, true);
     if (g_active_profile->load_fn(&romset, NULL, NULL) != 0) { fprintf(stderr, "ROM load failed\n"); return 2; }
@@ -132,6 +127,7 @@ int main(int argc, char **argv) {
     g_active_profile->install_fn(&romset, &cpu, &bus);
     irqt_reset();
     if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&bus);
         if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
@@ -143,51 +139,78 @@ int main(int argc, char **argv) {
     emu_ctx_init(&emu, &cpu, &bus);
     emu_run(&emu);
     while (g_emu_frames < 300) { emu_slice_body(&emu); emu_slice_finish(&emu); }
+    return 0;
+}
+
+/* A scenario's 64 KB of code at CODE and its registers, from its seed. */
+static void scenario_start(int sc, uint32_t code) {
+    rs = 0x9E3779B1u * (uint32_t)(sc + 1);
+    for (uint32_t a = 0; a < 0x10000; ) {
+        uint32_t w[2], n = 1, k = rnd() % 3;
+        if (k == 0) n = (uint32_t)mem_insn(w);
+        else if (k == 1) w[0] = mem_read32(&bus, (rnd() % (ROM_SIZE / 4)) * 4);   /* a real instruction word */
+        else w[0] = rnd32();
+        for (uint32_t i = 0; i < n && a < 0x10000; i++, a += 4) mem_write32(&bus, code + a, w[i]);
+    }
+    for (int i = 0; i < 16; i++) {
+        uint32_t v = rnd() & 1 ? edge() : rnd32();
+        ((uint32_t *)&cpu.globals)[i] = v;
+    }
+    for (int i = 3; i < 16; i++) {
+        uint32_t v = rnd() & 1 ? edge() : rnd32();
+        cpu.locals.r[i] = v;
+    }
+    uint32_t sp = RAM_BASE + 0xC0000 + (rnd() & 0xFFC0);
+    cpu.locals.r[1] = sp;                    /* sp and fp inside work RAM */
+    ((uint32_t *)&cpu.globals)[15] = sp - 0x40;
+    cpu.sfr.ip = code + (rnd() % 0x4000) * 4;
+    cpu.sfr.ac = rnd() & 0x3F;
+    cpu.halted = 0;
+}
+
+/* Up to STEPS instructions, the registers every 16th. How many ran. */
+static uint64_t scenario_run(int steps) {
+    uint64_t total = 0;
+    for (int n = 0; n < steps && !cpu.halted; n++) {
+        i960_step_hot(&cpu, &bus);
+        if ((n & 15) == 15) {
+            uint64_t h = fnv(0xcbf29ce484222325ull, &cpu.globals, sizeof cpu.globals);
+            h = fnv(h, &cpu.locals, sizeof cpu.locals);
+            h = fnv(h, cpu.fp_regs, sizeof cpu.fp_regs);
+            put((uint32_t)h); put((uint32_t)(h >> 32));
+            put(cpu.sfr.ip); put(cpu.sfr.ac); put((uint32_t)cpu.cycles);
+        }
+        total++;
+    }
+    return total;
+}
+
+/* A scenario's end: every writable region's hash and the bus's counts. */
+static void scenario_end(void) {
+    for (int i = 0; i < bus.region_count; i++) {
+        const mem_region_t *r = &bus.regions[i];
+        if (!r->data || r->readonly || r->size > 0x400000) continue;
+        uint64_t h = fnv(0xcbf29ce484222325ull, r->data, r->size);
+        put((uint32_t)h); put((uint32_t)(h >> 32));
+    }
+    put(bus.unmapped_reads & 0xFFFFFFFFu); put(bus.unmapped_writes & 0xFFFFFFFFu); put(bus.ro_writes & 0xFFFFFFFFu);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 3) { fprintf(stderr, "usage: i960_fuzz <merged sfight zip> <out-file> [scenarios] [steps]\n"); return 2; }
+    int scenarios = argc > 3 ? atoi(argv[3]) : 300;
+    int steps = argc > 4 ? atoi(argv[4]) : 20000;
+    out = fopen(argv[2], "wb");
+    if (!out) { fprintf(stderr, "cannot write %s\n", argv[2]); return 1; }
+    if (board_boot(argv[1])) return 2;
 
     const uint32_t code = RAM_BASE + 0xE0000;    /* 64 KB of work RAM the game leaves alone here */
     uint64_t total = 0, halts = 0;
     for (int sc = 0; sc < scenarios; sc++) {
-        rs = 0x9E3779B1u * (uint32_t)(sc + 1);
-        for (uint32_t a = 0; a < 0x10000; ) {
-            uint32_t w[2], n = 1, k = rnd() % 3;
-            if (k == 0) n = (uint32_t)mem_insn(w);
-            else if (k == 1) w[0] = mem_read32(&bus, (rnd() % (ROM_SIZE / 4)) * 4);   /* a real instruction word */
-            else w[0] = rnd32();
-            for (uint32_t i = 0; i < n && a < 0x10000; i++, a += 4) mem_write32(&bus, code + a, w[i]);
-        }
-        for (int i = 0; i < 16; i++) {
-            uint32_t v = rnd() & 1 ? edge() : rnd32();
-            ((uint32_t *)&cpu.globals)[i] = v;
-        }
-        for (int i = 3; i < 16; i++) {
-            uint32_t v = rnd() & 1 ? edge() : rnd32();
-            cpu.locals.r[i] = v;
-        }
-        uint32_t sp = RAM_BASE + 0xC0000 + (rnd() & 0xFFC0);
-        cpu.locals.r[1] = sp;                    /* sp and fp inside work RAM */
-        ((uint32_t *)&cpu.globals)[15] = sp - 0x40;
-        cpu.sfr.ip = code + (rnd() % 0x4000) * 4;
-        cpu.sfr.ac = rnd() & 0x3F;
-        cpu.halted = 0;
-        for (int n = 0; n < steps && !cpu.halted; n++) {
-            i960_step_hot(&cpu, &bus);
-            if ((n & 15) == 15) {
-                uint64_t h = fnv(0xcbf29ce484222325ull, &cpu.globals, sizeof cpu.globals);
-                h = fnv(h, &cpu.locals, sizeof cpu.locals);
-                h = fnv(h, cpu.fp_regs, sizeof cpu.fp_regs);
-                put((uint32_t)h); put((uint32_t)(h >> 32));
-                put(cpu.sfr.ip); put(cpu.sfr.ac); put((uint32_t)cpu.cycles);
-            }
-            total++;
-        }
+        scenario_start(sc, code);
+        total += scenario_run(steps);
         halts += cpu.halted != 0;
-        for (int i = 0; i < bus.region_count; i++) {
-            const mem_region_t *r = &bus.regions[i];
-            if (!r->data || r->readonly || r->size > 0x400000) continue;
-            uint64_t h = fnv(0xcbf29ce484222325ull, r->data, r->size);
-            put((uint32_t)h); put((uint32_t)(h >> 32));
-        }
-        put(bus.unmapped_reads & 0xFFFFFFFFu); put(bus.unmapped_writes & 0xFFFFFFFFu); put(bus.ro_writes & 0xFFFFFFFFu);
+        scenario_end();
     }
     fwrite(buf, 4, (size_t)nb, out);
     fclose(out);

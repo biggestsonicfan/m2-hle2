@@ -378,8 +378,8 @@ static inline int32_t i960_bt_count(uint32_t m) {
     return (int32_t)((m * 0x01010101u) >> 24);
 }
 
-/* The load scoreboard, and this instruction's own load or store. */
-static inline int32_t i960_bt_data(i960_bt_t *t, i960_cpu_t *cpu, uint32_t ip, uint32_t w1, uint32_t w2) {
+/* The load scoreboard, and this instruction's own load or store at `ea`. */
+static inline int32_t i960_bt_data(i960_bt_t *t, uint32_t w1, uint32_t ea) {
     uint32_t op = w1 >> 24;
     uint32_t src = i960_bt_sources(w1);
     int32_t e = I960_BT_USE0 * i960_bt_count(src & t->pend0)
@@ -392,8 +392,7 @@ static inline int32_t i960_bt_data(i960_bt_t *t, i960_cpu_t *cpu, uint32_t ip, u
     if (!n) return e;
     uint32_t m = (w1 >> 10) & 15;
     if (((w1 >> 12) & 1) && (m == 7 || m == 14 || m == 15)) e += I960_BT_INDEX;
-    int len;
-    int r = i960_bt_region(mem_ea(cpu, ip, w1, w2, &len));
+    int r = i960_bt_region(ea);
     if (op & 2) return e + g_i960_bt_st[r][n];
     uint32_t mask = i960_bt_block((w1 >> 19) & 31, n);
     t->pend0 = mask;
@@ -401,24 +400,33 @@ static inline int32_t i960_bt_data(i960_bt_t *t, i960_cpu_t *cpu, uint32_t ip, u
     return e + g_i960_bt_ld[r][n];
 }
 
-/* Charge one instruction: the table's cost and the board's extras. */
-static inline void i960_bt_charge(i960_cpu_t *cpu, uint32_t ip, uint32_t w1, uint32_t w2,
-                                  unsigned cost) {
-    i960_bt_t *t = &g_i960_bt;
+/* The board's extras for one instruction at `ip` (a load or store's address
+ * `ea`), in 1/1024 cycles, moving the model `t` on past it. The idle-loop skip
+ * (m2_spin.h) runs it on a copy. */
+static inline int32_t i960_bt_step(i960_bt_t *t, uint32_t ip, uint32_t w1, uint32_t ea, unsigned cost) {
     uint32_t op = w1 >> 24;
     uint32_t mode = (w1 >> 10) & 15;
     uint32_t len = op >= 0x80 && ((w1 >> 12) & 1) && mode >= 5 && mode != 6 && mode != 7 ? 8 : 4;
     bool branched;
     int32_t e = i960_bt_branch(t, ip, &branched);
     e += i960_bt_fetch(t, ip, len, branched, op, cost);
-    e += i960_bt_data(t, cpu, ip, w1, w2);
-    int64_t a = (int64_t)cost * I960_CYC_ONE + e + g_i960_cyc_frac;
-    if (a < 0) a = 0;
-    cpu->cycles += (uint64_t)a >> 10;
-    g_i960_cyc_frac = (uint32_t)(a & (I960_CYC_ONE - 1));
+    e += i960_bt_data(t, w1, ea);
     t->next_ip = ip + len;
     t->prev_op = (uint8_t)op;
     t->prev_valid = 1;
+    return e;
 }
+
+/* Charge one instruction: the table's cost and the board's extras. */
+static inline void i960_bt_charge(i960_cpu_t *cpu, uint32_t ip, uint32_t w1, uint32_t w2,
+                                  unsigned cost) {
+    int len;
+    uint32_t ea = i960_bt_words(w1 >> 24) ? mem_ea(cpu, ip, w1, w2, &len) : 0;
+    int64_t a = (int64_t)cost * I960_CYC_ONE + i960_bt_step(&g_i960_bt, ip, w1, ea, cost) + g_i960_cyc_frac;
+    if (a < 0) a = 0;
+    cpu->cycles += (uint64_t)a >> 10;
+    g_i960_cyc_frac = (uint32_t)(a & (I960_CYC_ONE - 1));
+}
+
 
 #endif /* I960_TIMING_H */

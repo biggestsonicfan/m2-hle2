@@ -160,48 +160,37 @@ static void wav_header(FILE *f, uint32_t frames) {
 
 typedef struct { uint64_t t; uint8_t b; } midi_t;
 
-int main(int argc, char **argv) {
-    const char *in = NULL, *out = NULL; double seconds = 0;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--chip") && i + 1 < argc) {
-            i++;
-            mode = !strcmp(argv[i], "mednafen") ? MDFN : !strcmp(argv[i], "scsp") ? SCSP_ONLY : MIRROR;
-        }
-        else if (!in) in = argv[i];
-        else if (!out) out = argv[i];
-        else seconds = atof(argv[i]);
-    }
-    if (!in || !out) { fprintf(stderr, "usage: snd_lockstep <capture-prefix> <out-prefix> [seconds] [--chip mirror|mednafen|scsp]\n"); return 2; }
-    const char *romdir = getenv("ROMDIR");
-    if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
-
+/* The capture's MIDI bytes (the i960's writes to the UART data port) and its last time stamp. */
+static midi_t *read_capture(const char *in, size_t *nmidi, uint64_t *t_last) {
     char path[1024];
     snprintf(path, sizeof path, "%s.bin", in);
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
+    if (!f) { fprintf(stderr, "cannot open %s\n", path); return NULL; }
     fseek(f, 0, SEEK_END); long nbytes = ftell(f); fseek(f, 0, SEEK_SET);
     size_t nrec = (size_t)nbytes / 16;
     uint32_t *rec = malloc(nrec * 16 + 16);
-    if (!rec || fread(rec, 16, nrec, f) != nrec) { fprintf(stderr, "short read\n"); return 1; }
+    if (!rec || fread(rec, 16, nrec, f) != nrec) { fprintf(stderr, "short read\n"); return NULL; }
     fclose(f);
     midi_t *midi = malloc(sizeof *midi * (nrec ? nrec : 1));
-    size_t nmidi = 0; uint64_t t_last = 0;
+    *nmidi = 0; *t_last = 0;
     for (size_t i = 0; i < nrec; i++) {
         uint32_t *r = rec + i * 4;
-        if (r[2] > t_last) t_last = r[2];
-        if ((r[0] >> 24) == 1 && (r[0] & 0xFFFFFF) == 0x9C0000) { midi[nmidi].t = r[2]; midi[nmidi].b = (uint8_t)r[1]; nmidi++; }
+        if (r[2] > *t_last) *t_last = r[2];
+        if ((r[0] >> 24) == 1 && (r[0] & 0xFFFFFF) == 0x9C0000) { midi[*nmidi].t = r[2]; midi[*nmidi].b = (uint8_t)r[1]; (*nmidi)++; }
     }
     free(rec);
-    uint64_t total = seconds > 0 ? (uint64_t)(seconds * SOUND_RATE) : (t_last >> 8) + 1;
+    return midi;
+}
 
-    static romset_t rs;
+/* The sound board from STF's ROMs, both chips on the same RAM. */
+static int board_up(romset_t *rs, const char *romdir) {
     char child[1024], parent[1024];
     snprintf(child, sizeof child, "%s/sfight.zip", romdir);
     snprintf(parent, sizeof parent, "%s/schamp.zip", romdir);
-    if (sfight_load(&rs, child, parent) != 0 || !rs.audiocpu || !rs.samples) { fprintf(stderr, "ROM load failed (%s)\n", romdir); return 1; }
+    if (sfight_load(rs, child, parent) != 0 || !rs->audiocpu || !rs->samples) { fprintf(stderr, "ROM load failed (%s)\n", romdir); return -1; }
     sound_reset();
-    sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
-    sound_load_samples(rs.samples, (uint32_t)rs.samples_size);
+    sound_load_rom(rs->audiocpu, (uint32_t)rs->audiocpu_size);
+    sound_load_samples(rs->samples, (uint32_t)rs->samples_size);
     mdfn_scsp_reset();
     {   /* the same RAM at power-on (sound_reset copied the vectors into it) */
         uint16_t *mr = mdfn_scsp_ram();
@@ -211,117 +200,111 @@ int main(int argc, char **argv) {
         orig_read = g_sound.m68k.read_cb;   g_sound.m68k.read_cb = hook_read;
         orig_write = g_sound.m68k.write_cb; g_sound.m68k.write_cb = hook_write;
     }
+    return 0;
+}
 
-    printf("capture: %zu MIDI bytes, %.2f s; replaying %.2f s on %s\n", nmidi, (double)t_last / 11289600.0,
-           (double)total / SOUND_RATE, mode == MDFN ? "Mednafen's chip" : mode == SCSP_ONLY ? "scsp.h alone" : "scsp.h, Mednafen's chip in lockstep");
-
-    snprintf(path, sizeof path, "%s.wav", out); FILE *wa = fopen(path, "wb");
-    FILE *wb = NULL;
-    if (mode == MIRROR) { snprintf(path, sizeof path, "%s.mednafen.wav", out); wb = fopen(path, "wb"); }
-    if (!wa || (mode == MIRROR && !wb)) { fprintf(stderr, "cannot write %s.*\n", out); return 1; }
-    wav_header(wa, 0); if (wb) wav_header(wb, 0);
-
-    /* The board's side in snd_replay's capture format (sound.h sndcap), so
-     * tools/mame/snd_compare.py grades any mode against MAME. In mednafen
-     * mode the per-frame register dump reads scsp.h, which is idle there:
-     * the key-on/off events snd_compare grades come from the record stream. */
-    const uint32_t frames_per_mark = SOUND_RATE * 1000u / 57524u;
-    uint32_t nmarks_cap = (uint32_t)(total / frames_per_mark) + 4;
+/* The board's side in snd_replay's capture format (sound.h sndcap), so
+ * tools/mame/snd_compare.py grades any mode against MAME. In mednafen
+ * mode the per-frame register dump reads scsp.h, which is idle there:
+ * the key-on/off events snd_compare grades come from the record stream. */
+static uint32_t (*open_sndcap(const char *out, uint32_t nmarks_cap))[4] {
+    char path[1024];
     uint32_t (*marks)[4] = calloc(nmarks_cap, sizeof *marks);
     snprintf(path, sizeof path, "%s.bin", out);      g_sndcap.f     = fopen(path, "wb");
     snprintf(path, sizeof path, "%s.ram.bin", out);  g_sndcap.ramf  = fopen(path, "wb");
     snprintf(path, sizeof path, "%s.regs.bin", out); g_sndcap.regsf = fopen(path, "wb");
-    if (!marks || !g_sndcap.f || !g_sndcap.ramf || !g_sndcap.regsf) { fprintf(stderr, "cannot write %s.*\n", out); return 1; }
+    if (!marks || !g_sndcap.f || !g_sndcap.ramf || !g_sndcap.regsf) { fprintf(stderr, "cannot write %s.*\n", out); return NULL; }
     g_sndcap.marks = marks; g_sndcap.want = nmarks_cap; g_sndcap.active = 1;
-    uint32_t mark = 0;
+    return marks;
+}
 
-    const uint64_t win = 5 * SOUND_RATE;
-    /* Per window, per chip: the sum and the sum of squares (for the DC and
-     * the level without it) and the cross term. The board's output carries a
-     * DC offset (CLAUDE.md: ~5000, from the DSP path, in MAME's WAV too), so
-     * levels and the error are taken with each chip's own mean removed, and
-     * the error after the one gain that best maps scsp.h onto Mednafen. */
-    double ma = 0, mb = 0, sa = 0, sb = 0, sab = 0;
-    size_t next = 0;
-    double t0 = secs();
-    const int state_probe = getenv("SND_LOCKSTEP_STATE") != NULL;
-    if (mode == MIRROR)
-        printf("%8s %8s %8s %10s %10s %8s %9s %9s\n", "seconds", "ours DC", "mdfn DC", "ours dBFS", "mdfn dBFS",
-               "gain dB", "residual", "corr");
-    for (uint64_t smp = 0; smp < total; smp++) {
-        if (smp % frames_per_mark == 0) sndcap_frame(mark++, 0);
-        while (next < nmidi && (midi[next].t >> 8) <= smp) {
-            if (g_sndcap.active) sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
-            sound_uart_write(&g_sound, midi[next].b, midi[next].t);
-            if (mode != SCSP_ONLY) midi_q[midi_qw++ & 0xFFFF] = midi[next].b;
-            next++;
+static void close_sndcap(const char *out, uint32_t (*marks)[4]) {
+    char path[1024];
+    uint32_t n = g_sndcap.n, nm = g_sndcap.nmarks;
+    sndcap_stop();
+    snprintf(path, sizeof path, "%s.json", out);
+    FILE *m = fopen(path, "w");
+    fprintf(m, "{\"source\":\"snd-lockstep-%s\",\"records\":%u,\"ram_base\":4096,\"ram_size\":16384,\"regs_words\":536,\"marks\":[",
+            mode == MDFN ? "mednafen" : "scsp", n);
+    for (uint32_t i = 0; i < nm; i++) fprintf(m, "%s[%u,%u,%u,%u]", i ? "," : "", marks[i][0], marks[i][1], marks[i][2], marks[i][3]);
+    fprintf(m, "]}\n");
+    fclose(m);
+}
+
+/* SND_LOCKSTEP_STATE=1: every 7 s, the register words the two
+ * chips hold differently (the status block and sound stack left
+ * out: those are timing, not state), and every 10 s the running
+ * mean of each EFREG. This is what found the MADRS mirror. */
+static void state_probe_sample(void) {
+    static double ea[16], eb[16]; static uint64_t en;
+    for (int i = 0; i < 16; i++) { ea[i] += g_sound.scsp.dsp.efreg[i]; eb[i] += (int16_t)mdfn_scsp_read(REG + 0xEC0 + 2 * i, 2); }
+    if (en % (SOUND_RATE * 7) == 0) {
+        int nd = 0;
+        for (uint32_t o = 0; o < 0xC00; o += 2) {
+            if (o >= 0x400 && o < 0x700) continue;          /* status and the sound stack: timing, not state */
+            uint16_t a = scsp_read(&g_sound.scsp, o, 2), b = (uint16_t)mdfn_scsp_read(REG + o, 2);
+            if (a != b && nd++ < 40) printf("  reg %03X scsp.h %04X mednafen %04X\n", o, a, b);
         }
-        int16_t al = 0, ar = 0, bl, br;
-        if (use_mdfn) {
-            run_sample_mdfn(&bl, &br);
-            al = bl; ar = br;
-        } else {
-            uint32_t w0 = g_sound.out_w;
-            sound_run(1);
-            if (g_sound.out_w != w0) { al = g_sound.out[w0 * 2]; ar = g_sound.out[w0 * 2 + 1]; }
-            g_sound.out_r = g_sound.out_w;
-            if (mode == MIRROR) { midi_forward(); mdfn_scsp_sample(&bl, &br); } else bl = br = 0;
-            if (mode == MIRROR && state_probe) {
-                /* SND_LOCKSTEP_STATE=1: every 7 s, the register words the two
-                 * chips hold differently (the status block and sound stack left
-                 * out: those are timing, not state), and every 10 s the running
-                 * mean of each EFREG. This is what found the MADRS mirror. */
-                static double ea[16], eb[16]; static uint64_t en;
-                for (int i = 0; i < 16; i++) { ea[i] += g_sound.scsp.dsp.efreg[i]; eb[i] += (int16_t)mdfn_scsp_read(REG + 0xEC0 + 2 * i, 2); }
-                if (en % (SOUND_RATE * 7) == 0) {
-                    int nd = 0;
-                    for (uint32_t o = 0; o < 0xC00; o += 2) {
-                        if (o >= 0x400 && o < 0x700) continue;          /* status and the sound stack: timing, not state */
-                        uint16_t a = scsp_read(&g_sound.scsp, o, 2), b = (uint16_t)mdfn_scsp_read(REG + o, 2);
-                        if (a != b && nd++ < 40) printf("  reg %03X scsp.h %04X mednafen %04X\n", o, a, b);
-                    }
-                    printf("state @%.0fs: %d register words differ\n", en / (double)SOUND_RATE, nd);
-                }
-                if (++en % (SOUND_RATE * 10) == 0) {
-                    printf("efreg mean @%3.0fs:", en / (double)SOUND_RATE);
-                    for (int i = 0; i < 16; i++) if (ea[i] || eb[i]) printf(" [%d] %.0f/%.0f", i, ea[i] / en, eb[i] / en);
-                    printf("\n");
-                }
-            }
-        }
-        int16_t pa[2] = {al, ar}, pb[2] = {bl, br};
-        fwrite(pa, 2, 2, wa);
-        if (wb) {
-            fwrite(pb, 2, 2, wb);
-            ma += (double)al + ar; mb += (double)bl + br;
-            sa += (double)al * al + (double)ar * ar; sb += (double)bl * bl + (double)br * br;
-            sab += (double)al * bl + (double)ar * br;
-            if ((smp + 1) % win == 0) {
-                double n = 2.0 * win, da = ma / n, db = mb / n;
-                double va = sa / n - da * da, vb = sb / n - db * db, cab = sab / n - da * db;
-                double g = va > 0 ? cab / va : 0.0;                          /* best gain, ours -> Mednafen */
-                double res = vb > 0 ? sqrt(fmax(0.0, vb - g * cab) / vb) : 0.0; /* what the gain leaves, of Mednafen */
-                printf("%8.0f %8.0f %8.0f %10.1f %10.1f %+8.1f %9.3f %9.4f\n", (double)(smp + 1) / SOUND_RATE, da, db,
-                       10 * log10(va / (32768.0 * 32768.0) + 1e-12), 10 * log10(vb / (32768.0 * 32768.0) + 1e-12),
-                       g > 0 ? 20 * log10(g) : 0.0, res, va > 0 && vb > 0 ? cab / sqrt(va * vb) : 0.0);
-                ma = mb = sa = sb = sab = 0;
-            }
-        }
+        printf("state @%.0fs: %d register words differ\n", en / (double)SOUND_RATE, nd);
     }
-    double t_all = secs() - t0;
-    {
-        uint32_t n = g_sndcap.n, nm = g_sndcap.nmarks;
-        sndcap_stop();
-        snprintf(path, sizeof path, "%s.json", out);
-        FILE *m = fopen(path, "w");
-        fprintf(m, "{\"source\":\"snd-lockstep-%s\",\"records\":%u,\"ram_base\":4096,\"ram_size\":16384,\"regs_words\":536,\"marks\":[",
-                mode == MDFN ? "mednafen" : "scsp", n);
-        for (uint32_t i = 0; i < nm; i++) fprintf(m, "%s[%u,%u,%u,%u]", i ? "," : "", marks[i][0], marks[i][1], marks[i][2], marks[i][3]);
-        fprintf(m, "]}\n");
-        fclose(m);
+    if (++en % (SOUND_RATE * 10) == 0) {
+        printf("efreg mean @%3.0fs:", en / (double)SOUND_RATE);
+        for (int i = 0; i < 16; i++) if (ea[i] || eb[i]) printf(" [%d] %.0f/%.0f", i, ea[i] / en, eb[i] / en);
+        printf("\n");
     }
-    fseek(wa, 0, SEEK_SET); wav_header(wa, (uint32_t)total); fclose(wa);
-    if (wb) { fseek(wb, 0, SEEK_SET); wav_header(wb, (uint32_t)total); fclose(wb); }
+}
+
+/* One sample of the board: a = the chip it runs on (scsp.h, or Mednafen's in
+ * mednafen mode), b = Mednafen's in lockstep (mirror mode) or 0. */
+static void board_sample(int16_t *al, int16_t *ar, int16_t *bl, int16_t *br, int state_probe) {
+    *al = 0; *ar = 0;
+    if (use_mdfn) {
+        run_sample_mdfn(bl, br);
+        *al = *bl; *ar = *br;
+        return;
+    }
+    uint32_t w0 = g_sound.out_w;
+    sound_run(1);
+    if (g_sound.out_w != w0) { *al = g_sound.out[w0 * 2]; *ar = g_sound.out[w0 * 2 + 1]; }
+    g_sound.out_r = g_sound.out_w;
+    if (mode == MIRROR) { midi_forward(); mdfn_scsp_sample(bl, br); } else *bl = *br = 0;
+    if (mode == MIRROR && state_probe) state_probe_sample();
+}
+
+/* Per window, per chip: the sum and the sum of squares (for the DC and
+ * the level without it) and the cross term. The board's output carries a
+ * DC offset (CLAUDE.md: ~5000, from the DSP path, in MAME's WAV too), so
+ * levels and the error are taken with each chip's own mean removed, and
+ * the error after the one gain that best maps scsp.h onto Mednafen. */
+typedef struct { double ma, mb, sa, sb, sab; } window_t;
+static void window_add(window_t *w, int16_t al, int16_t ar, int16_t bl, int16_t br) {
+    w->ma += (double)al + ar; w->mb += (double)bl + br;
+    w->sa += (double)al * al + (double)ar * ar; w->sb += (double)bl * bl + (double)br * br;
+    w->sab += (double)al * bl + (double)ar * br;
+}
+static void window_print(window_t *w, uint64_t smp, uint64_t win) {
+    double n = 2.0 * win, da = w->ma / n, db = w->mb / n;
+    double va = w->sa / n - da * da, vb = w->sb / n - db * db, cab = w->sab / n - da * db;
+    double g = va > 0 ? cab / va : 0.0;                          /* best gain, ours -> Mednafen */
+    double res = vb > 0 ? sqrt(fmax(0.0, vb - g * cab) / vb) : 0.0; /* what the gain leaves, of Mednafen */
+    printf("%8.0f %8.0f %8.0f %10.1f %10.1f %+8.1f %9.3f %9.4f\n", (double)(smp + 1) / SOUND_RATE, da, db,
+           10 * log10(va / (32768.0 * 32768.0) + 1e-12), 10 * log10(vb / (32768.0 * 32768.0) + 1e-12),
+           g > 0 ? 20 * log10(g) : 0.0, res, va > 0 && vb > 0 ? cab / sqrt(va * vb) : 0.0);
+    memset(w, 0, sizeof *w);
+}
+
+/* The capture's MIDI bytes due by this sample, into the board (and Mednafen's queue). */
+static size_t feed_midi(const midi_t *midi, size_t nmidi, size_t next, uint64_t smp) {
+    while (next < nmidi && (midi[next].t >> 8) <= smp) {
+        if (g_sndcap.active) sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
+        sound_uart_write(&g_sound, midi[next].b, midi[next].t);
+        if (mode != SCSP_ONLY) midi_q[midi_qw++ & 0xFFFF] = midi[next].b;
+        next++;
+    }
+    return next;
+}
+
+static void report(double t_all, uint64_t total, size_t next) {
     double audio = (double)total / SOUND_RATE;
     printf("time: %.2f s for %.1f s of audio, %.1fx real time\n", t_all, audio, audio / t_all);
     if (mode == MIRROR) {
@@ -333,6 +316,86 @@ int main(int argc, char **argv) {
     printf("68000: irqs L1 %llu L2 %llu L3 %llu L4 %llu L5 %llu; midi fed %zu\n",
            (unsigned long long)g_sound.irqs[1], (unsigned long long)g_sound.irqs[2], (unsigned long long)g_sound.irqs[3],
            (unsigned long long)g_sound.irqs[4], (unsigned long long)g_sound.irqs[5], next);
+}
+
+static const char *chip_name(void) {
+    return mode == MDFN ? "Mednafen's chip" : mode == SCSP_ONLY ? "scsp.h alone" : "scsp.h, Mednafen's chip in lockstep";
+}
+
+/* <out>.wav, and in mirror mode <out>.mednafen.wav, each with a header to fill in at the end. */
+static int open_wavs(const char *out, FILE **wa, FILE **wb) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s.wav", out); *wa = fopen(path, "wb");
+    *wb = NULL;
+    if (mode == MIRROR) { snprintf(path, sizeof path, "%s.mednafen.wav", out); *wb = fopen(path, "wb"); }
+    if (!*wa || (mode == MIRROR && !*wb)) { fprintf(stderr, "cannot write %s.*\n", out); return -1; }
+    wav_header(*wa, 0); if (*wb) wav_header(*wb, 0);
+    return 0;
+}
+
+static void parse_args(int argc, char **argv, const char **in, const char **out, double *seconds) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--chip") && i + 1 < argc) {
+            i++;
+            mode = !strcmp(argv[i], "mednafen") ? MDFN : !strcmp(argv[i], "scsp") ? SCSP_ONLY : MIRROR;
+        }
+        else if (!*in) *in = argv[i];
+        else if (!*out) *out = argv[i];
+        else *seconds = atof(argv[i]);
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *in = NULL, *out = NULL; double seconds = 0;
+    parse_args(argc, argv, &in, &out, &seconds);
+    if (!in || !out) { fprintf(stderr, "usage: snd_lockstep <capture-prefix> <out-prefix> [seconds] [--chip mirror|mednafen|scsp]\n"); return 2; }
+    const char *romdir = getenv("ROMDIR");
+    if (!romdir) romdir = "c:/Users/bigge/source/repos/ai/claude_mame/mame/roms";
+
+    size_t nmidi; uint64_t t_last;
+    midi_t *midi = read_capture(in, &nmidi, &t_last);
+    if (!midi) return 1;
+    uint64_t total = seconds > 0 ? (uint64_t)(seconds * SOUND_RATE) : (t_last >> 8) + 1;
+
+    static romset_t rs;
+    if (board_up(&rs, romdir) != 0) return 1;
+
+    printf("capture: %zu MIDI bytes, %.2f s; replaying %.2f s on %s\n", nmidi, (double)t_last / 11289600.0,
+           (double)total / SOUND_RATE, chip_name());
+
+    FILE *wa, *wb;
+    if (open_wavs(out, &wa, &wb) != 0) return 1;
+
+    const uint32_t frames_per_mark = SOUND_RATE * 1000u / 57524u;
+    uint32_t (*marks)[4] = open_sndcap(out, (uint32_t)(total / frames_per_mark) + 4);
+    if (!marks) return 1;
+    uint32_t mark = 0;
+
+    const uint64_t win = 5 * SOUND_RATE;
+    window_t w = {0};
+    size_t next = 0;
+    double t0 = secs();
+    const int state_probe = getenv("SND_LOCKSTEP_STATE") != NULL;
+    if (mode == MIRROR)
+        printf("%8s %8s %8s %10s %10s %8s %9s %9s\n", "seconds", "ours DC", "mdfn DC", "ours dBFS", "mdfn dBFS",
+               "gain dB", "residual", "corr");
+    for (uint64_t smp = 0; smp < total; smp++) {
+        if (smp % frames_per_mark == 0) sndcap_frame(mark++, 0);
+        next = feed_midi(midi, nmidi, next, smp);
+        int16_t al, ar, bl, br;
+        board_sample(&al, &ar, &bl, &br, state_probe);
+        int16_t pa[2] = {al, ar}, pb[2] = {bl, br};
+        fwrite(pa, 2, 2, wa);
+        if (!wb) continue;
+        fwrite(pb, 2, 2, wb);
+        window_add(&w, al, ar, bl, br);
+        if ((smp + 1) % win == 0) window_print(&w, smp, win);
+    }
+    double t_all = secs() - t0;
+    close_sndcap(out, marks);
+    fseek(wa, 0, SEEK_SET); wav_header(wa, (uint32_t)total); fclose(wa);
+    if (wb) { fseek(wb, 0, SEEK_SET); wav_header(wb, (uint32_t)total); fclose(wb); }
+    report(t_all, total, next);
     romset_free(&rs);
     return 0;
 }

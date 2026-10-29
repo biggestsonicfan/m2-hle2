@@ -115,6 +115,30 @@ const PREPARE = {
 /* grading one capture (run in a child process)                                */
 /* =========================================================================== */
 
+/* The model table by its entry's three pointers, and by its mesh alone. */
+function modelIndex(rom, readModelEntry) {
+    const byEntry = new Map(), byMesh = new Map();
+    for (let i = 0; i < rom.game.modelTable.count; i++) {
+        const e = readModelEntry(rom, i);
+        if (!e.meshPtr) continue;
+        const k = `${e.uvPtr}/${e.matPtr}/${e.meshPtr}`;
+        if (!byEntry.has(k)) byEntry.set(k, i);
+        if (!byMesh.has(e.meshPtr)) byMesh.set(e.meshPtr, { model: i, uvPtr: e.uvPtr, matPtr: e.matPtr });
+    }
+    return { byEntry, byMesh };
+}
+
+/* Every model a stage's display list can draw, over each animation's frames. */
+function stageModelSet(list, D) {
+    const stageModels = new Set();
+    for (const e of list) {
+        if (e.anim) for (let f = 0; f < 4096; f++) stageModels.add(D.frameModel(e.anim, f));
+        else stageModels.add(e.model);
+    }
+    stageModels.delete(0);     /* the empty table entry: an animation frame that draws nothing */
+    return stageModels;
+}
+
 async function gradeOne(dir, slot) {
     const scene = JSON.parse(fs.readFileSync(path.join(dir, 'fight-scene.json'), 'utf8'));
     const meta = JSON.parse(fs.readFileSync(path.join(dir, 'fight.json'), 'utf8'));
@@ -125,14 +149,7 @@ async function gradeOne(dir, slot) {
     const { readStageTable } = await nc('stages.js');
     const { readModelEntry } = await nc('romset.js');
 
-    const byEntry = new Map(), byMesh = new Map();
-    for (let i = 0; i < rom.game.modelTable.count; i++) {
-        const e = readModelEntry(rom, i);
-        if (!e.meshPtr) continue;
-        const k = `${e.uvPtr}/${e.matPtr}/${e.meshPtr}`;
-        if (!byEntry.has(k)) byEntry.set(k, i);
-        if (!byMesh.has(e.meshPtr)) byMesh.set(e.meshPtr, { model: i, uvPtr: e.uvPtr, matPtr: e.matPtr });
-    }
+    const { byEntry, byMesh } = modelIndex(rom, readModelEntry);
     const stage = readStageTable(rom)[slot];
     const frameTables = D.readFrameTables(rom);
     const list = D.buildStageDisplayList(stage, frameTables);
@@ -143,12 +160,7 @@ async function gradeOne(dir, slot) {
     const result = { slot, loaded: scene.loaded, ambiguous: scene.ambiguous, frames: marks.length - 1,
                      objects: scene.objects.map((o) => o.disp.toString(16)) };
 
-    const stageModels = new Set();
-    for (const e of list) {
-        if (e.anim) for (let f = 0; f < 4096; f++) stageModels.add(D.frameModel(e.anim, f));
-        else stageModels.add(e.model);
-    }
-    stageModels.delete(0);     /* the empty table entry: an animation frame that draws nothing */
+    const stageModels = stageModelSet(list, D);
 
     result.placement = placement();
     if ([FLYING_CARPET, CANYON_CRUISE, GIANT_WING].includes(slot) && scene.objects.length) result.flight = flight();
@@ -166,17 +178,22 @@ async function gradeOne(dir, slot) {
         const skyDrifts = (stage.flags >>> 0x1b) & 1;
         const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-        function partAt(e, f, om) {
-            const pro = moving ? (D.stageWorldFrame(stage, f, frameTables) ?? []) : [];
-            let ops = D.opsAt(e, f);
-            let world = pro.length > 0 && same(ops.slice(0, pro.length), pro);
-            let half = false;
-            if (!world && slot === CANYON_CRUISE && e.layer === 'sky' && pro.length) {
+        /* A part's ops at frame f with the stage frame's prologue taken off:
+         * world when it was all there, half when only its rotations were. */
+        function unframed(e, f, pro) {
+            const ops = D.opsAt(e, f);
+            if (pro.length > 0 && same(ops.slice(0, pro.length), pro)) return { ops: ops.slice(pro.length), world: true, half: false };
+            if (slot === CANYON_CRUISE && e.layer === 'sky' && pro.length) {
                 /* doom_cnt skips the prologue's translate on this stage. */
                 const rot = pro.filter((op) => op[0] !== 't');
-                if (same(ops.slice(0, rot.length), rot)) { half = true; ops = ops.slice(rot.length); }
+                if (same(ops.slice(0, rot.length), rot)) return { ops: ops.slice(rot.length), world: false, half: true };
             }
-            if (world) ops = ops.slice(pro.length);
+            return { ops, world: false, half: false };
+        }
+
+        function partAt(e, f, om) {
+            const pro = moving ? (D.stageWorldFrame(stage, f, frameTables) ?? []) : [];
+            let { ops, world, half } = unframed(e, f, pro);
             if (om) {
                 const fixed = om.fix(ops, ctx);
                 if (!fixed) return null;
@@ -214,7 +231,11 @@ async function gradeOne(dir, slot) {
         const worldErr = new Map();
         const out = { draws: 0, exact: 0, billboards: 0, aimed: 0, degenerate: 0, unmatched: [], aim: [] };
 
-        for (const [fi, draws] of frames.entries()) {
+        for (const [fi, draws] of frames.entries()) placeFrame(fi, draws);
+
+        /* One mark's draws: the view they share, every part's candidates at every
+         * clock, then each stage draw matched to one. */
+        function placeFrame(fi, draws) {
             const mark = marks[fi];
             ctx = {
                 cageShake: shakeIx[0] >= 0
@@ -228,7 +249,7 @@ async function gradeOne(dir, slot) {
             }
             let C = null, bestN = 0;
             for (const t of tally.values()) if (t.n > bestN) { bestN = t.n; C = t.m; }
-            if (!C || !inv(C)) { out.degenerate++; continue; }
+            if (!C || !inv(C)) { out.degenerate++; return; }
             const seen = new Set();
             const stageDraws = draws.filter((d) => {
                 if (d.model === 0 || matKey(d.base) !== matKey(C)) return false;
@@ -244,40 +265,11 @@ async function gradeOne(dir, slot) {
                 for (const r of [1, 2]) for (let d = -3; d <= 3; d++) clocks.push([`obj${j}/${r}${d >= 0 ? '+' : ''}${d}`, Math.floor(age / r) + d]);
             });
 
-            const cand = [];
-            for (const [pi, e] of list.entries()) {
-                const oms = [null, ...omissions.filter((o) => o.applies(e))];
-                for (const om of oms) {
-                    for (const [label, f] of clocks) {
-                        if (f < 0) continue;
-                        const p = partAt(e, f, om);
-                        if (p) cand.push({ pi, label: om ? `${label}*${om.id}` : label, f, ...p });
-                    }
-                }
-            }
+            const cand = candidates();
+
 
             let worldBase = C, halfBase = C;
-            if (moving) {
-                const votes = new Map();
-                for (const g of stageDraws) for (const c of cand) {
-                    if (!c.world || c.model !== g.model) continue;
-                    const vi = inv(list[c.pi].layer === 'sky' ? mul(rotY(skyTurn(c)), c.m) : c.m);
-                    if (!vi) continue;
-                    const w = mul(g.m, vi), k = matKey(w);
-                    const v = votes.get(k) ?? { m: w, n: 0 }; v.n++; votes.set(k, v);
-                }
-                let best = null;
-                for (const v of votes.values()) if (!best || v.n > best.n) best = v;
-                if (best) {
-                    worldBase = best.m;
-                    const P = mul(inv(C), worldBase);
-                    halfBase = mul(C, [P[0], P[1], P[2], 0, P[4], P[5], P[6], 0, P[8], P[9], P[10], 0, 0, 0, 0, 1]);
-                    for (const [label, f] of clocks) {
-                        const pro = D.stageWorldFrame(stage, f, frameTables);
-                        if (pro) worldErr.set(label, Math.max(worldErr.get(label) ?? 0, maxdiff(P, boardMatrix(pro))));
-                    }
-                }
-            }
+            if (moving) voteWorld();
             function skyTurn(c) { return (mark[ix.sky] - (skyDrifts ? 2 * c.f : 0)) * ANGLE_UNIT; }
             const Crot = [C[0], C[1], C[2], 0, C[4], C[5], C[6], 0, C[8], C[9], C[10], 0, 0, 0, 0, 1];
             const pre = (c) => {
@@ -301,32 +293,88 @@ async function gradeOne(dir, slot) {
                 const aboutY = unit && still && [Dm[1], Dm[4], Dm[6], Dm[9]].every((v) => Math.abs(v) < 1e-4);
                 return { Dm, rotation: unit && still, aboutY, yaw: Math.atan2(-Dm[2], Dm[0]) * 180 / Math.PI };
             };
-            for (const g of stageDraws) {
-                const pool = byModel.get(g.model) ?? [];
+            for (const g of stageDraws) matchDraw(g);
+
+            /* Every part at every clock, plain and with each omission that applies. */
+            function candidates() {
+                const cand = [];
+                for (const [pi, e] of list.entries()) {
+                    const oms = [null, ...omissions.filter((o) => o.applies(e))];
+                    for (const om of oms) {
+                        for (const [label, f] of clocks) {
+                            if (f < 0) continue;
+                            const p = partAt(e, f, om);
+                            if (p) cand.push({ pi, label: om ? `${label}*${om.id}` : label, f, ...p });
+                        }
+                    }
+                }
+                return cand;
+            }
+
+            /* The moving stage's world matrix, by the vote of the draws that match a
+             * part placed in it; and how far each clock's prologue is from it. */
+            function voteWorld() {
+                const votes = new Map();
+                for (const g of stageDraws) for (const c of cand) {
+                    if (!c.world || c.model !== g.model) continue;
+                    const vi = inv(list[c.pi].layer === 'sky' ? mul(rotY(skyTurn(c)), c.m) : c.m);
+                    if (!vi) continue;
+                    const w = mul(g.m, vi), k = matKey(w);
+                    const v = votes.get(k) ?? { m: w, n: 0 }; v.n++; votes.set(k, v);
+                }
+                let best = null;
+                for (const v of votes.values()) if (!best || v.n > best.n) best = v;
+                if (best) {
+                    worldBase = best.m;
+                    const P = mul(inv(C), worldBase);
+                    halfBase = mul(C, [P[0], P[1], P[2], 0, P[4], P[5], P[6], 0, P[8], P[9], P[10], 0, 0, 0, 0, 1]);
+                    for (const [label, f] of clocks) {
+                        const pro = D.stageWorldFrame(stage, f, frameTables);
+                        if (pro) worldErr.set(label, Math.max(worldErr.get(label) ?? 0, maxdiff(P, boardMatrix(pro))));
+                    }
+                }
+            }
+
+            /* The unclaimed candidate in pool closest to draw g, each one's err set. */
+            function closest(pool, g) {
                 let best = null;
                 for (const c of pool) {
                     if (claimed.has(c.pi)) continue;
                     c.err = maxdiff(g.m, c.pred);
                     if (!best || c.err < best.err) best = c;
                 }
-                if (!best) continue;
+                return best;
+            }
+
+            /* The first candidate, closest first, that one of the two freedoms
+             * explains at one of its clocks: the Sphynx head aimed, or a
+             * Flying Carpet pole turned to the camera. */
+            function freedom(pool, g) {
+                for (const c of pool.filter((c) => !claimed.has(c.pi) && !c.post).sort((a, b) => a.err - b.err)) {
+                    const r = residual(c, g);
+                    if (c.model === SPHYNX_HEAD && r.rotation) return { c, kind: 'aimed', r };
+                    if (slot === FLYING_CARPET && list[c.pi].layer === 'poles' && r.aboutY) {
+                        const cam = s16(mark[ix.camYaw]) * ANGLE_UNIT;
+                        if (Math.abs(((r.yaw - cam + 540) % 360) - 180) < 1e-3) return { c, kind: 'billboard', r };
+                    }
+                }
+                return null;
+            }
+
+            /* One stage draw: the closest unclaimed part, exact or by one of the two freedoms. */
+            function matchDraw(g) {
+                const pool = byModel.get(g.model) ?? [];
+                const best = closest(pool, g);
+                if (!best) return;
                 out.draws++;
                 const exact = pool.filter((c) => c.pi === best.pi && c.err <= EPS);
                 if (exact.length) {
                     claimed.add(best.pi); out.exact++; partDrawn[best.pi]++;
                     note(best.pi, exact);
-                    continue;
+                    return;
                 }
                 /* The two freedoms, each tried at every clock the part has. */
-                let freed = null;
-                for (const c of pool.filter((c) => !claimed.has(c.pi) && !c.post).sort((a, b) => a.err - b.err)) {
-                    const r = residual(c, g);
-                    if (c.model === SPHYNX_HEAD && r.rotation) { freed = { c, kind: 'aimed', r }; break; }
-                    if (slot === FLYING_CARPET && list[c.pi].layer === 'poles' && r.aboutY) {
-                        const cam = s16(mark[ix.camYaw]) * ANGLE_UNIT;
-                        if (Math.abs(((r.yaw - cam + 540) % 360) - 180) < 1e-3) { freed = { c, kind: 'billboard', r }; break; }
-                    }
-                }
+                const freed = freedom(pool, g);
                 if (freed) {
                     const fpi = freed.c.pi;
                     claimed.add(fpi); partDrawn[fpi]++;
@@ -334,7 +382,7 @@ async function gradeOne(dir, slot) {
                         const r = residual(c, g); return freed.kind === 'aimed' ? r.rotation : r.aboutY;
                     }));
                     if (freed.kind === 'aimed') { out.aimed++; out.aim.push(freed.r.yaw); } else out.billboards++;
-                    continue;
+                    return;
                 }
                 claimed.add(best.pi);
                 out.unmatched.push({ fi, pi: best.pi, model: g.model, layer: list[best.pi].layer, label: best.label,
@@ -462,64 +510,86 @@ async function gradeOne(dir, slot) {
             2: { what: "the aurora's texture points", at: 0x758fc, scroll: { axis: 'v', step: -4, shift: 0, mask: 0x7ff } },
             8: { what: "the Death Egg floor's texture points", at: 0x72fc4, scroll: { axis: 'u', step: 32, shift: 3, mask: 0x7ff } },
         };
-        if (TPD[slot]) {
-            const t = TPD[slot], pts = D.readTexturePoints(rom, t.at), walk = t.scroll.axis === 'v' ? 0 : 1;
-            const deltas = new Map(), users = new Map();
-            let found = 0, drawnFrom = 0;
-            for (const { fc, words } of geo) {
-                let off = null, at = -1;
-                for (let i = 0; i + pts.length <= words.length && off === null; i++) {
-                    let o = null, ok = true;
-                    for (let k = 0; k < pts.length && ok; k++) {
-                        const w = words[i + k] & 0xffff;
-                        if (k % 2 !== walk) { ok = w === pts[k]; continue; }
-                        const d = (w - pts[k]) & 0xffff;
-                        if (o === null) o = d; else ok = d === o;
-                    }
-                    if (ok) { off = o; at = i; }
-                }
-                if (off === null) continue;
-                found++;
-                const k = nearest((d) => (D.frameScroll(t.scroll, fc + d) * 8) & 0xffff, off);
-                deltas.set(k, (deltas.get(k) ?? 0) + 1);
-                /* The upload the block went out in: command 4's (address, count), the
-                 * address in geometrizer texture RAM (bit 23). An object that draws
-                 * the scroll names that address as its texture points. */
-                let addr = null;
-                for (let h = at - 2; h >= Math.max(0, at - 0x1000) && addr === null; h--) {
-                    if ((words[h] & 0xff800000) === 0x00800000 && at < h + 2 + words[h + 1]) addr = (words[h] + (at - h - 2)) >>> 0;
-                }
-                if (addr === null) continue;
-                let used = false;
-                for (let i = 0; i + 2 < words.length; i++) {
-                    if (i >= at - 2 && i < at + pts.length) continue;
-                    const hit = words[i] === addr ? byMesh.get(words[i + 2]) : null;
-                    if (hit && words[i + 1] === hit.matPtr) { used = true; users.set(hit.model, (users.get(hit.model) ?? 0) + 1); }
-                }
-                if (used) drawnFrom++;
-            }
-            rows.push({ what: t.what, frames: found, of: geo.length, deltas: [...deltas], drawnFrom,
-                        users: [...users].map(([m, n]) => `model ${m} (${n} draws)`) });
-        }
-        if ([0, 4, 13, 14].includes(slot)) {
-            /* transmap_change's quads: 0x40DA, the lumabase, 0x0A0C, 0x03C0. */
-            const SEA = { first: 7, count: 64, shift: 1 };
-            const deltas = new Map();
-            let found = 0, mixed = 0;
-            for (const { fc, words } of geo) {
-                const bands = new Set();
-                for (let i = 0; i + 4 <= words.length; i++) {
-                    if ((words[i] & 0xffff) === 0x40da && (words[i + 2] & 0xffff) === 0x0a0c && (words[i + 3] & 0xffff) === 0x03c0) bands.add(words[i + 1] & 0xffff);
-                }
-                if (!bands.size) continue;
-                found++;
-                if (bands.size > 1) { mixed++; continue; }
-                const k = nearest((d) => D.frameBand(SEA, fc + d), [...bands][0]);
-                deltas.set(k, (deltas.get(k) ?? 0) + 1);
-            }
-            rows.push({ what: 'the water\'s lumabase', frames: found, of: geo.length, deltas: [...deltas], mixed });
-        }
+        if (TPD[slot]) rows.push(scrollRow(geo, TPD[slot]));
+        if ([0, 4, 13, 14].includes(slot)) rows.push(lumaRow(geo));
         return rows;
+    }
+
+    /* A texture-point scroll: the frames its points went out in, how far the
+     * explorer's clock is from each, and which models draw from the upload. */
+    function scrollRow(geo, t) {
+        const pts = D.readTexturePoints(rom, t.at), walk = t.scroll.axis === 'v' ? 0 : 1;
+        const deltas = new Map(), users = new Map();
+        let found = 0, drawnFrom = 0;
+        for (const { fc, words } of geo) {
+            const { off, at } = findPoints(words, pts, walk);
+            if (off === null) continue;
+            found++;
+            const k = nearest((d) => (D.frameScroll(t.scroll, fc + d) * 8) & 0xffff, off);
+            deltas.set(k, (deltas.get(k) ?? 0) + 1);
+            const addr = uploadAddr(words, at);
+            if (addr === null) continue;
+            if (countUsers(words, addr, at, pts.length, users)) drawnFrom++;
+        }
+        return { what: t.what, frames: found, of: geo.length, deltas: [...deltas], drawnFrom,
+                 users: [...users].map(([m, n]) => `model ${m} (${n} draws)`) };
+    }
+
+    /* The points in one frame's words, the walked axis shifted by one offset:
+     * { off, at }, off null when they are not there. */
+    function findPoints(words, pts, walk) {
+        for (let i = 0; i + pts.length <= words.length; i++) {
+            let o = null, ok = true;
+            for (let k = 0; k < pts.length && ok; k++) {
+                const w = words[i + k] & 0xffff;
+                if (k % 2 !== walk) { ok = w === pts[k]; continue; }
+                const d = (w - pts[k]) & 0xffff;
+                if (o === null) o = d; else ok = d === o;
+            }
+            if (ok) return { off: o, at: i };
+        }
+        return { off: null, at: -1 };
+    }
+
+    /* The upload the block went out in: command 4's (address, count), the
+     * address in geometrizer texture RAM (bit 23). An object that draws
+     * the scroll names that address as its texture points. */
+    function uploadAddr(words, at) {
+        for (let h = at - 2; h >= Math.max(0, at - 0x1000); h--) {
+            if ((words[h] & 0xff800000) === 0x00800000 && at < h + 2 + words[h + 1]) return (words[h] + (at - h - 2)) >>> 0;
+        }
+        return null;
+    }
+
+    /* The objects outside the upload that name `addr`, counted into `users`; true if any. */
+    function countUsers(words, addr, at, n, users) {
+        let used = false;
+        for (let i = 0; i + 2 < words.length; i++) {
+            if (i >= at - 2 && i < at + n) continue;
+            const hit = words[i] === addr ? byMesh.get(words[i + 2]) : null;
+            if (hit && words[i + 1] === hit.matPtr) { used = true; users.set(hit.model, (users.get(hit.model) ?? 0) + 1); }
+        }
+        return used;
+    }
+
+    /* The water's luma band against the explorer's clock. */
+    function lumaRow(geo) {
+        /* transmap_change's quads: 0x40DA, the lumabase, 0x0A0C, 0x03C0. */
+        const SEA = { first: 7, count: 64, shift: 1 };
+        const deltas = new Map();
+        let found = 0, mixed = 0;
+        for (const { fc, words } of geo) {
+            const bands = new Set();
+            for (let i = 0; i + 4 <= words.length; i++) {
+                if ((words[i] & 0xffff) === 0x40da && (words[i + 2] & 0xffff) === 0x0a0c && (words[i + 3] & 0xffff) === 0x03c0) bands.add(words[i + 1] & 0xffff);
+            }
+            if (!bands.size) continue;
+            found++;
+            if (bands.size > 1) { mixed++; continue; }
+            const k = nearest((d) => D.frameBand(SEA, fc + d), [...bands][0]);
+            deltas.set(k, (deltas.get(k) ?? 0) + 1);
+        }
+        return { what: 'the water\'s lumabase', frames: found, of: geo.length, deltas: [...deltas], mixed };
     }
     function nearest(fn, want) {
         for (const d of [0, -1, 1, -2, 2, -3, 3, -4, 4]) if (fn(d) === want) return d;

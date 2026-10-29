@@ -323,6 +323,47 @@ export async function captureWindow(emu, {
     return { prefix, words: r.words, frames: r.frames };
 }
 
+/* reachRound's pad at frame fc: coin, start and the attack buttons on a loop. */
+function mashInput(fc) {
+    let want = 0;
+    if (fc > 300) {
+        if (fc % 600 < 8) want |= COIN1;
+        const m = fc % 60;
+        if (m < 6) want |= IN.START1;
+        if (m >= 20 && m < 26) want |= IN.P1_B1;
+        if (m >= 40 && m < 46) want |= IN.P1_B2;
+    }
+    return want;
+}
+
+/* The board did not run its frames: stopped at the stage pin, stage_num is
+ * written and it runs on (true); stopped anywhere else is an error; still
+ * running, nothing is done (false). */
+async function pinStage(emu, stage) {
+    const st = await emu.status();
+    if (!st.running && Number(st.ip) === ROUND_STAGE_PIN) {
+        await emu.writeMemory(STAGE_NUM, [stage]);
+        await emu.run();
+        return true;
+    }
+    if (!st.running) throw new Error(`the emulator stopped at ${st.ip}, not at the stage pin`);
+    return false;
+}
+
+/* The round reachRound waits for: on `stage`, both fighters in a motion, the
+ * loaded record the one asked for, the frame carrying model draws. The scene,
+ * or null while it is not there yet. */
+async function roundOn(emu, stage, out) {
+    if ((await emu.readMemory(STAGE_NUM, 1))[0] !== stage) return null;
+    if (!u16(await emu.readMemory(P1_ROB + ROB_MOTION, 2), 0) || !u16(await emu.readMemory(P2_ROB + ROB_MOTION, 2), 0)) return null;
+    const scene = await identifyScene(emu);
+    if (scene.stage !== stage && !(scene.ambiguous ?? []).includes(stage)) return null;
+    const probe = path.join(out, 'probe');
+    await captureDl(emu, probe, 2);
+    if (!loadDl(probe).words.includes(DRAW)) return null;
+    return scene;
+}
+
 /**
  * Play into a round on a chosen arena, for grade-stages.mjs and capture.mjs.
  *
@@ -337,43 +378,24 @@ export async function captureWindow(emu, {
  * one asked for and the frame carries model draws, with the breakpoint gone
  * and the pad released: { fc, scene }.
  */
-export async function reachRound(emu, stage, {
-    out = DEFAULT_DL_OUT, maxFrames = 12000, log = () => {},
-} = {}) {
+export async function reachRound(emu, stage, opts = {}) {
+    const { out = DEFAULT_DL_OUT, maxFrames = 12000, log = () => {} } = opts;
     fs.mkdirSync(out, { recursive: true });
     await emu.clearAllBreakpoints();
     await emu.setBreakpoint(ROUND_STAGE_PIN, 'stage-pin');
     let pins = 0, held = -1;
     try {
         for (let fc = 0; fc < maxFrames; fc += 2) {
-            let want = 0;
-            if (fc > 300) {
-                if (fc % 600 < 8) want |= COIN1;
-                const m = fc % 60;
-                if (m < 6) want |= IN.START1;
-                if (m >= 20 && m < 26) want |= IN.P1_B1;
-                if (m >= 40 && m < 46) want |= IN.P1_B2;
-            }
+            const want = mashInput(fc);
             if (want !== held) { await emu.setInput(want); held = want; }
             const w = await emu.waitFrames(2, 20000);
-            if (!w.reached) {
-                const st = await emu.status();
-                if (!st.running && Number(st.ip) === ROUND_STAGE_PIN) {
-                    await emu.writeMemory(STAGE_NUM, [stage]);
-                    if (!pins++) log(`stage_num pinned to ${stage} at ROUND_INIT (frame ~${fc})`);
-                    await emu.run();
-                    continue;
-                }
-                if (!st.running) throw new Error(`the emulator stopped at ${st.ip}, not at the stage pin`);
+            if (!w.reached && await pinStage(emu, stage)) {
+                if (!pins++) log(`stage_num pinned to ${stage} at ROUND_INIT (frame ~${fc})`);
+                continue;
             }
             if (!pins || fc % 60) continue;
-            if ((await emu.readMemory(STAGE_NUM, 1))[0] !== stage) continue;
-            if (!u16(await emu.readMemory(P1_ROB + ROB_MOTION, 2), 0) || !u16(await emu.readMemory(P2_ROB + ROB_MOTION, 2), 0)) continue;
-            const scene = await identifyScene(emu);
-            if (scene.stage !== stage && !(scene.ambiguous ?? []).includes(stage)) continue;
-            const probe = path.join(out, 'probe');
-            await captureDl(emu, probe, 2);
-            if (!loadDl(probe).words.includes(DRAW)) continue;
+            const scene = await roundOn(emu, stage, out);
+            if (!scene) continue;
             await emu.setInput(0);
             return { fc, scene };
         }
@@ -384,6 +406,20 @@ export async function reachRound(emu, stage, {
          * armed would stop the capture. */
         await emu.clearAllBreakpoints().catch(() => {});
     }
+}
+
+/* The live stage objects chained from fa_object0_ram, up to the first free
+ * or implausibly sized one. */
+async function stageObjects(emu) {
+    const objects = [];
+    for (let at = FA_OBJECT0_RAM, i = 0; i < 16; i++) {
+        const b = await emu.readMemory(at, 0x18);
+        const size = b.readUInt32LE(OBJ_SIZE);
+        if (!(b.readUInt32LE(0) >>> 31) || !size || size > 0x4000) break;
+        objects.push({ at, size, routine: b.readUInt32LE(OBJ_ROUTINE), disp: b.readUInt32LE(OBJ_DISP) });
+        at += size;
+    }
+    return objects;
 }
 
 /**
@@ -402,14 +438,7 @@ export async function captureStage(emu, stage, {
     const prepared = prepare ? await prepare(emu) : null;
     if (prepared) { log(prepared); await emu.waitFrames(2, 20000); }
 
-    const objects = [];
-    for (let at = FA_OBJECT0_RAM, i = 0; i < 16; i++) {
-        const b = await emu.readMemory(at, 0x18);
-        const size = b.readUInt32LE(OBJ_SIZE);
-        if (!(b.readUInt32LE(0) >>> 31) || !size || size > 0x4000) break;
-        objects.push({ at, size, routine: b.readUInt32LE(OBJ_ROUTINE), disp: b.readUInt32LE(OBJ_DISP) });
-        at += size;
-    }
+    const objects = await stageObjects(emu);
     const probes = [...SCENE_PROBES,
         ...objects.map((o, i) => [`obj${i}Age`, o.at + OBJ_AGE, 2]),
         ['stageX', STAGE_POS[0], 4], ['stageY', STAGE_POS[1], 4], ['stageZ', STAGE_POS[2], 4],

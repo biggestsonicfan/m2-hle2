@@ -100,46 +100,56 @@ def resolve(binary, addrs):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("report")
-    ap.add_argument("--sym", action="append", default=[], help="MODULE=PATH of an unstripped binary")
-    ap.add_argument("--zone", help="only this zone")
-    ap.add_argument("--thread", type=int, help="only this tid")
-    ap.add_argument("--top", type=int, default=25)
-    a = ap.parse_args()
+class Places:
+    """Where a PC is: its module and file offset (the report's maps), and its
+    vaddr in the local binary of that module when there is one."""
 
-    head, maps, raw, raw_lr = parse_report(a.report)
-    syms = {}
-    exe = head.get("exe", "")
-    if exe and os.path.exists(exe):
-        syms[os.path.basename(exe)] = exe
-    for s in a.sym:
-        k, _, v = s.partition("=")
-        syms[k] = v
+    def __init__(self, maps, syms):
+        self.maps, self.syms = maps, syms
+        # file offset -> vaddr per module with a local binary
+        self.loads = {m: elf_info(p)[1] for m, p in syms.items()}
 
-    def locate(pc):
-        for lo, hi, off, path in maps:
+    def locate(self, pc):
+        for lo, hi, off, path in self.maps:
             if lo <= pc < hi:
                 return os.path.basename(path), pc - lo + off
         return "[unknown]", pc
 
-    # file offset -> vaddr per module with a local binary
-    loads = {m: elf_info(p)[1] for m, p in syms.items()}
-
-    def vaddr(mod, off):
-        for p_off, p_va, sz in loads.get(mod, []):
+    def vaddr(self, mod, off):
+        for p_off, p_va, sz in self.loads.get(mod, []):
             if p_off <= off < p_off + sz:
                 return off - p_off + p_va
         return None
 
-    rows = [r for r in raw if (not a.zone or r[1] == a.zone) and (a.thread is None or r[0] == a.thread)]
-    total = sum(r[3] for r in rows) or 1
+
+def symbol_files(head, sym_args):
+    syms = {}
+    exe = head.get("exe", "")
+    if exe and os.path.exists(exe):
+        syms[os.path.basename(exe)] = exe
+    for s in sym_args:
+        k, _, v = s.partition("=")
+        syms[k] = v
+    return syms
+
+
+def sample_chain(chains, syms, mod, off, va):
+    """The inline chain one sample is charged to, innermost first."""
+    if va is not None and va in chains.get(mod, {}):
+        return chains[mod][va] or ["??"]
+    if mod not in syms:
+        return [mod]
+    return ["%s+0x%x" % (mod, off)]
+
+
+def tally(rows, places):
+    """Per zone: periods by leaf and by every function on the chain, and the zone's total."""
+    syms = places.syms
     want = collections.defaultdict(set)
     placed = []
     for tid, zone, pc, n in rows:
-        mod, off = locate(pc)
-        va = vaddr(mod, off) if mod in syms else None
+        mod, off = places.locate(pc)
+        va = places.vaddr(mod, off) if mod in syms else None
         if va is not None:
             want[mod].add(va)
         placed.append((tid, zone, mod, off, va, n))
@@ -150,53 +160,73 @@ def main():
     zone_tot = collections.Counter()
     for tid, zone, mod, off, va, n in placed:
         zone_tot[zone] += n
-        if va is not None and va in chains.get(mod, {}):
-            ch = chains[mod][va] or ["??"]
-        else:
-            ch = ["%s+0x%x" % (mod, off & ~0xFFF) if mod not in syms else "%s+0x%x" % (mod, off)]
-            if mod not in syms:
-                ch = [mod]
+        ch = sample_chain(chains, syms, mod, off, va)
         leaf[zone][ch[0]] += n
         for fn in set(ch):
             incl[zone][fn] += n
+    return leaf, incl, zone_tot
 
-    print("%s: %s samples (%s periods), %s s CPU over %s s wall, %s Hz" %
-          (a.report, head.get("samples"), head.get("periods"), head.get("cpu_s"), head.get("wall_s"), head.get("hz")))
+
+def print_zones(leaf, incl, zone_tot, total, top):
     for zone, zt in zone_tot.most_common():
         print("\n== %s: %d periods, %.1f%% of those shown" % (zone, zt, 100.0 * zt / total))
         print("   leaf%s inclusive" % (" " * 52))
-        L = leaf[zone].most_common(a.top)
-        I = incl[zone].most_common(a.top)
+        L = leaf[zone].most_common(top)
+        I = incl[zone].most_common(top)
         for i in range(max(len(L), len(I))):
             l = "%5.1f%% %-50s" % (100.0 * L[i][1] / total, L[i][0][:50]) if i < len(L) else " " * 57
             r = "%5.1f%% %s" % (100.0 * I[i][1] / total, I[i][0][:60]) if i < len(I) else ""
             print("   %s  %s" % (l, r))
 
-    # Who called into modules we cannot name (the GL driver, libc): their LR.
+
+def print_callers(raw_lr, places, zone_only, total, top):
+    """Who called into modules we cannot name (the GL driver, libc): their LR."""
     ext = collections.Counter()
     for tid, zone, lr, n in raw_lr:
-        if a.zone and zone != a.zone:
+        if zone_only and zone != zone_only:
             continue
-        mod, off = locate(lr)
-        if mod in syms:
-            va = vaddr(mod, off)
+        mod, off = places.locate(lr)
+        if mod in places.syms:
+            va = places.vaddr(mod, off)
             if va is not None:
                 ext[(mod, va)] += n
-    if ext:
-        ch = {}
-        by_mod = collections.defaultdict(set)
-        for m, va in ext:
-            by_mod[m].add(va)
-        for m, v in by_mod.items():
-            for va, c in resolve(syms[m], v).items():
-                ch[(m, va)] = c
-        agg = collections.Counter()
-        for k, n in ext.items():
-            c = ch.get(k) or ["??"]
-            agg[" < ".join(c[:3])] += n
-        print("\n== link register inside our code (the caller of a leaf; for driver/libc samples)")
-        for k, n in agg.most_common(a.top):
-            print("   %5.1f%% %s" % (100.0 * n / total, k[:110]))
+    if not ext:
+        return
+    ch = {}
+    by_mod = collections.defaultdict(set)
+    for m, va in ext:
+        by_mod[m].add(va)
+    for m, v in by_mod.items():
+        for va, c in resolve(places.syms[m], v).items():
+            ch[(m, va)] = c
+    agg = collections.Counter()
+    for k, n in ext.items():
+        c = ch.get(k) or ["??"]
+        agg[" < ".join(c[:3])] += n
+    print("\n== link register inside our code (the caller of a leaf; for driver/libc samples)")
+    for k, n in agg.most_common(top):
+        print("   %5.1f%% %s" % (100.0 * n / total, k[:110]))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("report")
+    ap.add_argument("--sym", action="append", default=[], help="MODULE=PATH of an unstripped binary")
+    ap.add_argument("--zone", help="only this zone")
+    ap.add_argument("--thread", type=int, help="only this tid")
+    ap.add_argument("--top", type=int, default=25)
+    a = ap.parse_args()
+
+    head, maps, raw, raw_lr = parse_report(a.report)
+    places = Places(maps, symbol_files(head, a.sym))
+    rows = [r for r in raw if (not a.zone or r[1] == a.zone) and (a.thread is None or r[0] == a.thread)]
+    total = sum(r[3] for r in rows) or 1
+    leaf, incl, zone_tot = tally(rows, places)
+
+    print("%s: %s samples (%s periods), %s s CPU over %s s wall, %s Hz" %
+          (a.report, head.get("samples"), head.get("periods"), head.get("cpu_s"), head.get("wall_s"), head.get("hz")))
+    print_zones(leaf, incl, zone_tot, total, a.top)
+    print_callers(raw_lr, places, a.zone, total, a.top)
 
 
 if __name__ == "__main__":

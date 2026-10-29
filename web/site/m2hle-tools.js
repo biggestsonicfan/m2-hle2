@@ -202,7 +202,7 @@ const m2hleTools = (() => {
    * m2hle.js), so it runs first, and can keep the event from sokol entirely. */
   for (const type of ['keydown', 'keyup', 'keypress']) {
     window.addEventListener(type, (e) => {
-      if (e.target instanceof Element && e.target.closest('#drawer, #online, #controls, input, textarea, select')) {
+      if (e.target instanceof Element && e.target.closest('#drawer, #online, #controls, #link-check, input, textarea, select')) {
         e.stopImmediatePropagation();
       }
     }, true);
@@ -333,6 +333,7 @@ const m2hleTools = (() => {
       'GPU        ' + (g.renderer || 'unknown') + (g.software ? '   (SOFTWARE RENDERER)' : ''),
       'Canvas     ' + c.width + 'x' + c.height + ' at devicePixelRatio ' + window.devicePixelRatio,
       'Cores      ' + (navigator.hardwareConcurrency || '?') + (navigator.deviceMemory ? ', ~' + navigator.deviceMemory + ' GB memory' : ''),
+      ...(typeof m2hleShader !== 'undefined' ? ['Picture    ' + m2hleShader.summary()] : []),
     ];
   }
 
@@ -764,8 +765,8 @@ const m2hleTools = (() => {
     if (scale) Module._web_set_render_scale(scale);
     $('render-scale').value = String(scale);
     /* Before the game is loaded, so the board boots with it. ?sounddriver=c|68000 for tests. */
-    let driver = 0;
-    try { driver = Number(localStorage.getItem('m2hle.soundDriver')) === 1 ? 1 : 0; } catch (e) { /* private mode */ }
+    let driver = 1;                                  /* the C driver, where the game's is one it knows */
+    try { driver = localStorage.getItem('m2hle.soundDriver') === '0' ? 0 : 1; } catch (e) { /* private mode */ }
     const askedDriver = new URLSearchParams(location.search).get('sounddriver');
     if (askedDriver !== null) driver = askedDriver === 'c' ? 1 : 0;
     Module._web_set_sound_driver(driver);

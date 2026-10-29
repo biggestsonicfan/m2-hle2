@@ -99,6 +99,51 @@ def functions():
                    file=r[6], fn=r[7], line=int(r[9]))
 
 
+def knotted(f, threshold):
+    return f['mccn'] > threshold and f['fn'] not in DISPATCH
+
+
+def print_shares(hand, gen, threshold):
+    """The headline: the share of lines in dispatchers and over each threshold."""
+    total = sum(f['nloc'] for f in hand)
+
+    def share(fs):
+        n = sum(f['nloc'] for f in fs)
+        return f'{len(fs):5d} functions {n:7d} lines {100 * n / total:5.1f}%'
+
+    print(f'{TREE}/ hand-written: {len(hand)} functions, {total} lines of code in functions '
+          f'(generated, left out: {sum(f["nloc"] for f in gen)} lines)')
+    print(f'dispatchers           {share([f for f in hand if f["fn"] in DISPATCH])}')
+    for th in sorted({15, 20, 30, 50, threshold}):
+        knots = [f for f in hand if knotted(f, th)]
+        print(f'modified CCN > {th:<3d}     {share(knots)}' + ('   <- the headline' if th == threshold else ''))
+
+
+def print_by_directory(hand, threshold):
+    print(f'\nby directory, share of lines in functions over {threshold} (dispatchers excluded):')
+    by = {}
+    for f in hand:
+        d = f['file'].split('/')[1] if f['file'].count('/') > 1 else 'main*.c'
+        t = by.setdefault(d, [0, 0])
+        t[0] += f['nloc']
+        t[1] += f['nloc'] if knotted(f, threshold) else 0
+    for d, (n, k) in sorted(by.items(), key=lambda x: -x[1][1] / x[1][0]):
+        print(f'  {d:10s} {n:6d} lines {100 * k / n:5.1f}%')
+
+
+def print_worst(hand, top):
+    print(f'\nworst {top} (modified CCN, lines, params):')
+    for f in sorted((f for f in hand if f['fn'] not in DISPATCH), key=lambda f: -f['mccn'])[:top]:
+        print(f'  {f["mccn"]:4d} {f["nloc"]:5d} {f["params"]:3d}  {f["file"]}:{f["line"]} {f["fn"]}')
+
+
+def print_params(hand, params):
+    long = sorted((f for f in hand if f['params'] >= params), key=lambda f: (-f['params'], f['file']))
+    print(f'\n{len(long)} functions take {params} or more parameters (params, file, function):')
+    for f in long:
+        print(f'  {f["params"]:3d}  {f["file"]}:{f["line"]} {f["fn"]}')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--threshold', type=int, default=20, help='modified CCN above which a function counts (20)')
@@ -113,39 +158,11 @@ def main():
     every = list(functions())
     gen = [f for f in every if f['file'].endswith(GENERATED)]
     hand = [f for f in every if not f['file'].endswith(GENERATED)]
-    disp = [f for f in hand if f['fn'] in DISPATCH]
-    total = sum(f['nloc'] for f in hand)
-
-    def share(fs):
-        n = sum(f['nloc'] for f in fs)
-        return f'{len(fs):5d} functions {n:7d} lines {100 * n / total:5.1f}%'
-
-    print(f'{TREE}/ hand-written: {len(hand)} functions, {total} lines of code in functions '
-          f'(generated, left out: {sum(f["nloc"] for f in gen)} lines)')
-    print(f'dispatchers           {share(disp)}')
-    for th in sorted({15, 20, 30, 50, a.threshold}):
-        knots = [f for f in hand if f['mccn'] > th and f['fn'] not in DISPATCH]
-        print(f'modified CCN > {th:<3d}     {share(knots)}' + ('   <- the headline' if th == a.threshold else ''))
-
-    print(f'\nby directory, share of lines in functions over {a.threshold} (dispatchers excluded):')
-    by = {}
-    for f in hand:
-        d = f['file'].split('/')[1] if f['file'].count('/') > 1 else 'main*.c'
-        t = by.setdefault(d, [0, 0])
-        t[0] += f['nloc']
-        t[1] += f['nloc'] if f['mccn'] > a.threshold and f['fn'] not in DISPATCH else 0
-    for d, (n, k) in sorted(by.items(), key=lambda x: -x[1][1] / x[1][0]):
-        print(f'  {d:10s} {n:6d} lines {100 * k / n:5.1f}%')
-
-    print(f'\nworst {a.top} (modified CCN, lines, params):')
-    for f in sorted((f for f in hand if f['fn'] not in DISPATCH), key=lambda f: -f['mccn'])[:a.top]:
-        print(f'  {f["mccn"]:4d} {f["nloc"]:5d} {f["params"]:3d}  {f["file"]}:{f["line"]} {f["fn"]}')
-
+    print_shares(hand, gen, a.threshold)
+    print_by_directory(hand, a.threshold)
+    print_worst(hand, a.top)
     if a.params:
-        long = sorted((f for f in hand if f['params'] >= a.params), key=lambda f: (-f['params'], f['file']))
-        print(f'\n{len(long)} functions take {a.params} or more parameters (params, file, function):')
-        for f in long:
-            print(f'  {f["params"]:3d}  {f["file"]}:{f["line"]} {f["fn"]}')
+        print_params(hand, a.params)
 
 
 if __name__ == '__main__':

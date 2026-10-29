@@ -107,6 +107,13 @@ The first start takes a few seconds while the game loads its textures.
 Controller port 1 is player 1 and port 2 is player 2. Remap buttons in
 **Quick Menu > Controls** as with any other core.
 
+**The House of the Dead** plays with a light gun: set the port's device to
+**Light gun** (**Quick Menu > Controls > Port 1 Controls > Device Type**), and
+RetroArch's mouse or gun aims it. Its trigger fires, its reload (or a shot off
+the picture) reloads, and its Start and Select are Start and Insert coin. On a
+RetroPad the d-pad walks the gun, Button 1 fires and Button 2 reloads. In an
+online match the gun follows the pad, so both players' boards see the same aim.
+
 To play, press **Select** to insert a coin, then **Start**.
 
 ### Core options

@@ -30,8 +30,8 @@
 #define EEPROM_WORDS      64
 #define EEPROM_ADDR_BITS  6
 
-/* Board time, 1/(IRQT_CPU_HZ * IRQT_VBLANK_HZ) s; MAME eeprom_base_device. */
-#define EEPROM_US(us)     ((int64_t)(us) * (IRQT_CPU_HZ / 1000000) * IRQT_VBLANK_HZ)
+/* Board time, 1/(IRQT_CPU_HZ * IRQT_UNIT) s; MAME eeprom_base_device. */
+#define EEPROM_US(us)     ((int64_t)(us) * (IRQT_CPU_HZ / 1000000) * IRQT_UNIT)
 #define EEPROM_T_WRITE    EEPROM_US(1750)
 #define EEPROM_T_ERASE    EEPROM_US(1000)
 #define EEPROM_T_ALL      EEPROM_US(8000)
@@ -59,9 +59,14 @@ static inline void eeprom_power_on(void) {
     g_eeprom.locked = 1;
 }
 
+/* A clock other than the CPU board's, while a CPU of the I/O board runs the
+ * chip (model1io.h: the Z80 runs behind the board's clock and catches up). */
+static int64_t (*g_eeprom_clock_fn)(void);
+
 static inline int64_t eeprom_now(void) {
+    if (g_eeprom_clock_fn) return g_eeprom_clock_fn();
     irqt_flush();
-    return (int64_t)g_irqt.vbl_count * IRQT_CPU_HZ + g_irqt.vbl_phase;
+    return (int64_t)g_irqt.vbl_count * IRQT_FRAME_UNITS + g_irqt.vbl_phase;
 }
 
 static inline int eeprom_ready(void) { return eeprom_now() >= g_eeprom.busy_until; }
@@ -152,6 +157,22 @@ static inline void eeprom_port_a(uint8_t v) {
         e->clk = clk;
         if (clk && e->state != EEP_RESET) eeprom_clock();
     }
+    if (cs != e->cs) {
+        e->cs = cs;
+        e->state = cs ? (e->state == EEP_RESET ? EEP_START : e->state) : EEP_RESET;
+    }
+}
+
+/* The pins set one by one, CLK first, DI, then CS, as MAME's model1io2
+ * io_pf_w does (the Advanced Model 1 I/O board's port F): a rising CLK
+ * clocks in the DI the pin held before this write. */
+static inline void eeprom_pins_clk_first(uint8_t clk, uint8_t di, uint8_t cs) {
+    eeprom_t *e = &g_eeprom;
+    if (clk != e->clk) {
+        e->clk = clk;
+        if (clk && e->state != EEP_RESET) eeprom_clock();
+    }
+    e->di = di;
     if (cs != e->cs) {
         e->cs = cs;
         e->state = cs ? (e->state == EEP_RESET ? EEP_START : e->state) : EEP_RESET;

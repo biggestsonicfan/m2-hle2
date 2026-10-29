@@ -51,6 +51,7 @@
 #include "../board/i960_exec.h"
 #include "../board/memory.h"
 #include "../board/cop.h"
+#include "../board/tgp.h"
 #include "hle_hooks.h"
 #include "log.h"
 
@@ -338,6 +339,7 @@ typedef struct {
     uint8_t        back[BACK_SIZE];
     sharc_state_t  sharc;
     cop_state_t    cop;
+    tgp_state_t    tgp;             /* a Model 2A board's coprocessor (ages.h's VF2) */
     uint32_t       geo_w, geo_r;    /* the GEO port's list pointers (memory.h) */
 } gems_snap_t;
 
@@ -362,6 +364,7 @@ static void gems_snap_save(gems_snap_t *s, const i960_cpu_t *cpu, const memory_b
     memcpy(s->back, bus->back,     sizeof s->back);
     s->sharc = g_sharc;
     s->cop   = g_cop;
+    s->tgp   = g_tgp;
     s->geo_w = g_geo.wstart;
     s->geo_r = g_geo.rstart;
 }
@@ -376,6 +379,7 @@ static void gems_snap_load(const gems_snap_t *s, i960_cpu_t *cpu, memory_bus_t *
     memcpy(bus->back,     s->back, sizeof s->back);
     g_sharc = s->sharc;
     g_cop   = s->cop;
+    g_tgp   = s->tgp;
     g_geo.wstart = s->geo_w;
     g_geo.rstart = s->geo_r;
 }
@@ -435,7 +439,7 @@ static bool gems_verify_i960_to(i960_cpu_t *cpu, memory_bus_t *bus, uint32_t sto
 }
 
 /* What the C's run left against the i960's: memory, by region, and registers. */
-enum { GEMS_RAM, GEMS_RAM2, GEMS_BUFF, GEMS_TILE, GEMS_PAL, GEMS_BACK, GEMS_DM, GEMS_REGIONS };
+enum { GEMS_RAM, GEMS_RAM2, GEMS_BUFF, GEMS_TILE, GEMS_PAL, GEMS_BACK, GEMS_DM, GEMS_TGP, GEMS_REGIONS };
 typedef struct {
     gems_diff_t d[GEMS_REGIONS];
     uint32_t    gmask;          /* bit 16 + i: g[i]; bit i: r[i] */
@@ -455,6 +459,11 @@ static void gems_compare(gems_cmp_t *c, const gems_snap_t *c_run, const i960_cpu
     gems_diff_mem(&c->d[GEMS_BACK], c_run->back, bus->back,     BACK_SIZE,      0x01D00000u, NULL, 0);
     gems_diff_mem(&c->d[GEMS_DM], (const uint8_t *)c_run->sharc.dm, (const uint8_t *)g_sharc.dm,
                   sizeof g_sharc.dm, GEMS_DM_BASE, NULL, 0);
+    /* The TGP's whole state (its RAM, FIFOs, PC): a 2A function talks to it
+     * over the bus, so a word sent or read differently shows here. Offsets
+     * into tgp_state_t; zero on a 2B board, where both runs leave it alone. */
+    gems_diff_mem(&c->d[GEMS_TGP], (const uint8_t *)&c_run->tgp, (const uint8_t *)&g_tgp,
+                  sizeof g_tgp, 0, NULL, 0);
     for (int i = 0; i < 16; i++) {
         if (c_run->cpu.globals.g[i] != cpu->globals.g[i]) c->gmask |= 1u << (16 + i);
         if (c_run->cpu.locals.r[i]  != cpu->locals.r[i])  c->gmask |= 1u << i;
@@ -477,10 +486,10 @@ static void gems_verify_log(const char *tag, const gems_trap_t *t, const gems_cm
                             const gems_snap_t *c_run, const i960_cpu_t *cpu) {
     const gems_diff_t *d = c->d;
     LOG_WARN("%s-verify: %s (0x%08X) differs: regs g%04X r%04X; words ram %d ram2 %d "
-             "buff %d tile %d pal %d back %d dm %d (+%d float-close)",
+             "buff %d tile %d pal %d back %d dm %d tgp %d (+%d float-close)",
              tag, t->name, t->site, c->gmask >> 16, c->gmask & 0xFFFF, d[GEMS_RAM].words, d[GEMS_RAM2].words,
              d[GEMS_BUFF].words, d[GEMS_TILE].words, d[GEMS_PAL].words, d[GEMS_BACK].words,
-             d[GEMS_DM].words, c->close);
+             d[GEMS_DM].words, d[GEMS_TGP].words, c->close);
     for (int k = 0; k < GEMS_REGIONS; k++)
         if (d[k].words)
             LOG_WARN("%s-verify:   first at 0x%08X: C 0x%08X, i960 0x%08X", tag, d[k].first, d[k].a, d[k].b);

@@ -94,10 +94,197 @@ static void random_voice(scsp_t *s, int sl) {
     slot_write(s, sl, 0, (uint16_t)(w0 | 0x0800 | 0x1000));           /* KYONB + KYONEX */
 }
 
+static uint8_t ram[0x80000];
+static int prog;   /* this scenario's DSP program: 0 the compiled one, 1 random, 2 none */
+
+/* A random DSP program of 1-128 steps, its TEMP addresses mostly in range. */
+static void scenario_random_program(scsp_t *s) {
+    int len = 1 + (int)(rnd() % 128);
+    for (int i = 0; i < 512; i++) {
+        uint16_t w = i < len * 4 ? (uint16_t)rnd() : 0;
+        if (i % 4 == 1 && ((w >> 6) & 0x3F) > 0x31 && rnd() % 16) w = (uint16_t)((w & ~0x0FC0u) | ((rnd() % 0x32) << 6));
+        scsp_write(s, 0x800 + i * 2, w, 2);
+    }
+}
+
+/* A DSP program: the compiled one, or random, or none; random coefficients
+ * and taps; started. */
+static void scenario_program(scsp_t *s) {
+    prog = (int)(rnd() % 3);
+    for (int i = 0; i < 64; i++) scsp_write(s, 0x700 + i * 2, (uint16_t)rnd(), 2);
+    for (int i = 0; i < 32; i++) scsp_write(s, 0x780 + i * 2, (uint16_t)rnd(), 2);
+    if (prog == 0 && have_known) {
+        for (int i = 0; i < 512; i++) scsp_write(s, 0x800 + i * 2, known_prog[i], 2);
+    } else if (prog == 1) {
+        scenario_random_program(s);
+    }
+    scsp_write(s, 0x800 + 0x3F0, (uint16_t)scsp_read(s, 0xBF0, 2), 2);   /* start it */
+}
+
+/* A scenario's chip: its seed, random sound RAM, a reset, the mixer, a DSP
+ * program and the interrupt registers. Its event spacing. */
+static uint32_t scenario_start(scsp_t *s, int sc, uint64_t *clock) {
+    rs = 0x9E3779B9u * (uint32_t)(sc + 1);
+    for (uint32_t i = 0; i < sizeof ram; i++) ram[i] = (uint8_t)rnd();
+    scsp_reset(s, ram, sizeof ram, clock);
+#ifdef SCSP_OWED_MAX
+    s->sink = sink;
+#endif
+    *clock = 0;
+    /* half the scenarios leave the chip alone for long stretches, so the
+     * lazy chip runs long blocks and slots far apart */
+    const uint32_t evmod = sc & 1 ? 64 : 1024;
+    tame = (sc & 2) != 0;
+    scsp_write(s, 0x400, 0x000F | (rnd() & 1 ? 0x0100 : 0), 2);   /* MVOL, DAC18B sometimes */
+    { uint16_t rb = (uint16_t)(rnd() & 0x1FF);                      /* RBL/RBP */
+      scsp_write(s, 0x402, tame ? (uint16_t)(0x30 | (rb & 0x80)) : rb, 2); }
+    scenario_program(s);
+    /* interrupt levels and enables */
+    scsp_write(s, 0x424, (uint16_t)rnd(), 2);
+    scsp_write(s, 0x426, (uint16_t)rnd(), 2);
+    scsp_write(s, 0x428, (uint16_t)rnd(), 2);
+    scsp_write(s, 0x41E, (uint16_t)(rnd() & 0x7FF), 2);
+    return evmod;
+}
+
+/* Event 1: a random word into a slot. */
+static void event_slot_word(scsp_t *s) {
+    int sl = (int)(rnd() & 31), wd = (int)(rnd() % 12);
+    uint16_t v = (uint16_t)rnd();
+    if (tame && wd == 7) v = 0;
+    if (tame && wd == 0) v &= (uint16_t)~0x018C;
+    if (tame && wd == 1 && (s->slot[sl].r[0] & 0xF) >= 4) v = 0;
+    if (!tame || wd >= 4) slot_write(s, sl, wd, v);   /* tame: the loop is left as keyed */
+}
+
+/* Events 0-11: the chip's registers. */
+static void event_regs(scsp_t *s, uint32_t ev) {
+    if (ev == 0) random_voice(s, (int)(rnd() & 31));
+    else if (ev == 1) event_slot_word(s);
+    else if (ev == 2) { int sl = (int)(rnd() & 31); slot_write(s, sl, 0, (uint16_t)((s->slot[sl].r[0] & ~0x0800u) | 0x1000)); } /* key off */
+    else if (ev == 3) { scsp_write(s, 0x408, (uint16_t)((rnd() & 31) << 11), 2); put(scsp_read(s, 0x408, 2)); }
+    else if (ev == 4) { uint32_t t = 0x418 + 2 * (rnd() % 3); scsp_write(s, t, (uint16_t)(rnd() & 0x7FF), 2); }
+    else if (ev == 5) { put(scsp_read(s, 0x420, 2)); scsp_write(s, 0x422, (uint16_t)rnd(), 2); }
+    else if (ev == 6) { scsp_midi_in(s, (uint8_t)rnd()); }
+    else if (ev == 7) { put(scsp_read(s, 0x404, 2)); }
+    else if (ev == 8 && rnd() % 16 == 0) {                        /* DMA */
+        scsp_write(s, 0x412, (uint16_t)rnd(), 2);
+        scsp_write(s, 0x414, (uint16_t)rnd(), 2);
+        scsp_write(s, 0x416, (uint16_t)((rnd() & 0x6FFE) | 0x1000 | (prog == 0 || tame ? 0x2000 : 0)), 2);
+    }
+    else if (ev == 9) { uint32_t a = 0x700 + (rnd() & 63) * 2; scsp_write(s, a, (uint16_t)rnd(), 2); }
+    else if (ev == 10) { uint32_t a = rnd() & 0xFFE; put(scsp_read(s, a, rnd() & 1 ? 2 : 1)); }
+    else if (ev == 11) {                                          /* byte writes to slots */
+        uint32_t a = rnd() & 0x3FF, v = rnd();
+        if (!tame || ((a & 0x1E) >= 8 && (a & 0x1E) != 0x0E)) scsp_write(s, a, v, 1);
+    }
+}
+
+/* Event 27: a loop shorter than a step: it creeps on. */
+static void event_short_loop(scsp_t *s) {
+    int sl = (int)(rnd() & 31);
+    uint32_t lsa = rnd() & 0xFFF, len = 1 + rnd() % 64, oct = 4 + rnd() % 4;
+    slot_write(s, sl, 1, (uint16_t)(rnd() & 0xFFFE));
+    slot_write(s, sl, 2, (uint16_t)lsa);
+    slot_write(s, sl, 3, (uint16_t)(lsa + len));
+    slot_write(s, sl, 7, 0);
+    slot_write(s, sl, 8, (uint16_t)(oct << 11 | (rnd() & 0x3FF)));
+    slot_write(s, sl, 9, 0);
+    slot_write(s, sl, 0, (uint16_t)(0x0020 | 0x0800 | 0x1000));   /* SA < 64 KB, forward loop, KYONB + KYONEX */
+}
+
+/* Events 23-26: sound RAM around where a slot's loop ends. */
+static void event_loop_end(scsp_t *s) {
+    const scsp_slot_t *q = &s->slot[rnd() & 31];
+    uint32_t top = q->r[3] > q->r[2] ? q->r[3] : q->r[2];
+    uint32_t a = (SCSP_SA(q) + (SCSP_PCM8B(q) ? top : top * 2) + (rnd() % 24) - 8) & 0x7FFFF;
+    uint8_t b = (uint8_t)rnd();
+    RAM_TOUCH(s, a, 1, 1);
+    ram[a] = b;
+}
+
+/* Events 12-27: sound RAM, the monitor, KYONB and MVOL. */
+static void event_ram(scsp_t *s, uint32_t ev) {
+    if (ev == 12) { uint32_t a = rnd() & 0x7FFFE; uint8_t b = (uint8_t)rnd(); RAM_TOUCH(s, a, 1, 1); ram[a] = b; } /* the 68000 writing sound RAM */
+    else if (ev == 13 || ev == 14) {                              /* ...inside what a slot plays */
+        const scsp_slot_t *q = &s->slot[rnd() & 31];
+        uint32_t span = (uint32_t)(q->r[3] > q->r[2] ? q->r[3] : q->r[2]) * 2u + 4u;
+        uint32_t a = (SCSP_SA(q) + rnd() % span) & 0x7FFFC;
+        uint32_t v = rnd32();
+        RAM_TOUCH(s, a, 4, 1);
+        ram[a] = (uint8_t)v; ram[a + 1] = (uint8_t)(v >> 8); ram[a + 2] = (uint8_t)(v >> 16); ram[a + 3] = (uint8_t)(v >> 24);
+    }
+    else if (ev == 15 || ev == 16) {                              /* ...and the DSP's delay line */
+        uint32_t a = (((uint32_t)(s->c[1] & 0x3F) << 13) + (rnd() & 0x1FFFE)) & 0x7FFFE;
+        if (ev == 15) { RAM_TOUCH(s, a, 2, 0); put((uint32_t)ram[a] << 8 | ram[a + 1]); }
+        else { uint8_t b = (uint8_t)rnd(); RAM_TOUCH(s, a, 1, 1); ram[a] = b; }
+    }
+    else if (ev == 17) { put(scsp_read(s, 0x408, 2)); }        /* the monitor, MSLC left alone */
+    else if (ev == 18) { scsp_write(s, 0x408, (uint16_t)((rnd() & 31) << 11), 2); }
+    else if (ev == 19) {                                          /* key off the watched slot, then look */
+        int sl = s->mslc;
+        slot_write(s, sl, 0, (uint16_t)((s->slot[sl].r[0] & ~0x0800u) | 0x1000));
+        put(scsp_read(s, 0x408, 2));
+    }
+    else if (ev == 20 || ev == 21) { put(scsp_read(s, (rnd() & 31) * 0x20, 2)); }   /* KYONB */
+    else if (ev == 22) {                                          /* MVOL / DAC18B mid-stream */
+        uint32_t v = rnd() & 0xF;
+        if (rnd() & 1) v |= 0x100;
+        scsp_write(s, 0x400, (uint16_t)v, 2);
+    }
+    else if (ev == 27 && prog == 2 && rnd() % 4 == 0) event_short_loop(s);
+    else if (ev >= 23 && ev <= 26) event_loop_end(s);
+}
+
+#ifndef SCSP_OWED_MAX
+/* What the slots and the DSP are doing this sample. */
+static void coverage(const scsp_t *s) {
+    for (int i = 0; i < 32; i++) { const scsp_slot_t *q = &s->slot[i]; if (!q->active) continue; cov[0]++;
+        if (SCSP_MDL(q) || SCSP_MDXSL(q) || SCSP_MDYSL(q)) cov[1]++; if (SCSP_SSCTL(q) == 1) cov[2]++; if (SCSP_PCM8B(q)) cov[3]++;
+        cov[4 + SCSP_LPCTL(q)]++; if (SCSP_PLFOS(q)) cov[8]++; if (SCSP_ALFOS(q)) cov[9]++; }
+    if (!s->dsp.stopped) cov[10]++;
+}
+#endif
+
+/* A sample's time: the timers, the interrupt level, and the sample. */
+static void sample_step(scsp_t *s, uint64_t *clock) {
+    *clock += 256;
+    scsp_timers(s, *clock);
+    put((uint32_t)scsp_irq_level(s));
+#ifndef SCSP_OWED_MAX
+    coverage(s);
+    int16_t l, r;
+    scsp_sample(s, &l, &r);
+#ifdef SCSP_DSP_COMPILED
+    if (s->dsp.known) cov[11]++;
+#endif
+    put_smp((uint32_t)(uint16_t)l | (uint32_t)(uint16_t)r << 16);
+#else
+    scsp_tick(s);
+    if (s->coupled) cov[1]++;
+#endif
+}
+
+/* A scenario's end: its samples, the slots, the DSP and sound RAM. */
+static void scenario_end(scsp_t *s) {
+#ifdef SCSP_OWED_MAX
+    scsp_sync(s);
+    cov[0] += s->syncs; cov[2] += s->catches;
+#endif
+    for (size_t i = 0; i < nsmp; i++) put(smp[i]);
+    nsmp = 0;
+    for (int i = 0; i < 32; i++) {
+        put(s->slot[i].cur); put((uint32_t)s->slot[i].vol); put(s->slot[i].active | s->slot[i].state << 8);
+    }
+    put(s->sous_ptr); put(s->dsp.dec);
+    for (uint32_t i = 0; i < sizeof ram; i += 4) put(*(uint32_t *)(ram + i));
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: scsp_fuzz <out-file> [scenarios] [samples] [mpro-dump]\n"); return 2; }
     out = fopen(argv[1], "wb");
     if (!out) { fprintf(stderr, "cannot write %s\n", argv[1]); return 1; }
+    if (getenv("SCSP_EXACT")) g_scsp_exact = atoi(getenv("SCSP_EXACT"));   /* the DSP every sample (scsp.h, "A quiet DSP") */
     int scenarios = argc > 2 ? atoi(argv[2]) : 200;
     int samples = argc > 3 ? atoi(argv[3]) : 20000;
     if (argc > 4) {
@@ -107,148 +294,17 @@ int main(int argc, char **argv) {
 #ifdef SCSP_DSP_COMPILED
     if (!have_known) { memcpy(known_prog, scsp_dsp_known[0].mpro, sizeof known_prog); have_known = 1; }
 #endif
-    static uint8_t ram[0x80000];
     static scsp_t s;
     uint64_t clock = 0;
     for (int sc = 0; sc < scenarios; sc++) {
-        rs = 0x9E3779B9u * (uint32_t)(sc + 1);
-        for (uint32_t i = 0; i < sizeof ram; i++) ram[i] = (uint8_t)rnd();
-        scsp_reset(&s, ram, sizeof ram, &clock);
-#ifdef SCSP_OWED_MAX
-        s.sink = sink;
-#endif
-        clock = 0;
-        /* half the scenarios leave the chip alone for long stretches, so the
-         * lazy chip runs long blocks and slots far apart */
-        const uint32_t evmod = sc & 1 ? 64 : 1024;
-        tame = (sc & 2) != 0;
-        scsp_write(&s, 0x400, 0x000F | (rnd() & 1 ? 0x0100 : 0), 2);   /* MVOL, DAC18B sometimes */
-        { uint16_t rb = (uint16_t)(rnd() & 0x1FF);                      /* RBL/RBP */
-          scsp_write(&s, 0x402, tame ? (uint16_t)(0x30 | (rb & 0x80)) : rb, 2); }
-        /* a DSP program: the compiled one, or random, or none */
-        int prog = (int)(rnd() % 3);
-        for (int i = 0; i < 64; i++) scsp_write(&s, 0x700 + i * 2, (uint16_t)rnd(), 2);
-        for (int i = 0; i < 32; i++) scsp_write(&s, 0x780 + i * 2, (uint16_t)rnd(), 2);
-        if (prog == 0 && have_known) {
-            for (int i = 0; i < 512; i++) scsp_write(&s, 0x800 + i * 2, known_prog[i], 2);
-        } else if (prog == 1) {
-            int len = 1 + (int)(rnd() % 128);
-            for (int i = 0; i < 512; i++) {
-                uint16_t w = i < len * 4 ? (uint16_t)rnd() : 0;
-                if (i % 4 == 1 && ((w >> 6) & 0x3F) > 0x31 && rnd() % 16) w = (uint16_t)((w & ~0x0FC0u) | ((rnd() % 0x32) << 6));
-                scsp_write(&s, 0x800 + i * 2, w, 2);
-            }
-        }
-        scsp_write(&s, 0x800 + 0x3F0, (uint16_t)scsp_read(&s, 0xBF0, 2), 2);   /* start it */
-        /* interrupt levels and enables */
-        scsp_write(&s, 0x424, (uint16_t)rnd(), 2);
-        scsp_write(&s, 0x426, (uint16_t)rnd(), 2);
-        scsp_write(&s, 0x428, (uint16_t)rnd(), 2);
-        scsp_write(&s, 0x41E, (uint16_t)(rnd() & 0x7FF), 2);
+        uint32_t evmod = scenario_start(&s, sc, &clock);
         for (int n = 0; n < samples; n++) {
             uint32_t ev = rnd() % evmod;
-            if (ev == 0) random_voice(&s, (int)(rnd() & 31));
-            else if (ev == 1) {
-                int sl = (int)(rnd() & 31), wd = (int)(rnd() % 12);
-                uint16_t v = (uint16_t)rnd();
-                if (tame && wd == 7) v = 0;
-                if (tame && wd == 0) v &= (uint16_t)~0x018C;
-                if (tame && wd == 1 && (s.slot[sl].r[0] & 0xF) >= 4) v = 0;
-                if (!tame || wd >= 4) slot_write(&s, sl, wd, v);   /* tame: the loop is left as keyed */
-            }
-            else if (ev == 2) { int sl = (int)(rnd() & 31); slot_write(&s, sl, 0, (uint16_t)((s.slot[sl].r[0] & ~0x0800u) | 0x1000)); } /* key off */
-            else if (ev == 3) { scsp_write(&s, 0x408, (uint16_t)((rnd() & 31) << 11), 2); put(scsp_read(&s, 0x408, 2)); }
-            else if (ev == 4) { uint32_t t = 0x418 + 2 * (rnd() % 3); scsp_write(&s, t, (uint16_t)(rnd() & 0x7FF), 2); }
-            else if (ev == 5) { put(scsp_read(&s, 0x420, 2)); scsp_write(&s, 0x422, (uint16_t)rnd(), 2); }
-            else if (ev == 6) { scsp_midi_in(&s, (uint8_t)rnd()); }
-            else if (ev == 7) { put(scsp_read(&s, 0x404, 2)); }
-            else if (ev == 8 && rnd() % 16 == 0) {                        /* DMA */
-                scsp_write(&s, 0x412, (uint16_t)rnd(), 2);
-                scsp_write(&s, 0x414, (uint16_t)rnd(), 2);
-                scsp_write(&s, 0x416, (uint16_t)((rnd() & 0x6FFE) | 0x1000 | (prog == 0 || tame ? 0x2000 : 0)), 2);
-            }
-            else if (ev == 9) { uint32_t a = 0x700 + (rnd() & 63) * 2; scsp_write(&s, a, (uint16_t)rnd(), 2); }
-            else if (ev == 10) { uint32_t a = rnd() & 0xFFE; put(scsp_read(&s, a, rnd() & 1 ? 2 : 1)); }
-            else if (ev == 11) {                                          /* byte writes to slots */
-                uint32_t a = rnd() & 0x3FF, v = rnd();
-                if (!tame || ((a & 0x1E) >= 8 && (a & 0x1E) != 0x0E)) scsp_write(&s, a, v, 1);
-            }
-            else if (ev == 12) { uint32_t a = rnd() & 0x7FFFE; uint8_t b = (uint8_t)rnd(); RAM_TOUCH(&s, a, 1, 1); ram[a] = b; } /* the 68000 writing sound RAM */
-            else if (ev == 13 || ev == 14) {                              /* ...inside what a slot plays */
-                const scsp_slot_t *q = &s.slot[rnd() & 31];
-                uint32_t span = (uint32_t)(q->r[3] > q->r[2] ? q->r[3] : q->r[2]) * 2u + 4u;
-                uint32_t a = (SCSP_SA(q) + rnd() % span) & 0x7FFFC;
-                uint32_t v = rnd32();
-                RAM_TOUCH(&s, a, 4, 1);
-                ram[a] = (uint8_t)v; ram[a + 1] = (uint8_t)(v >> 8); ram[a + 2] = (uint8_t)(v >> 16); ram[a + 3] = (uint8_t)(v >> 24);
-            }
-            else if (ev == 15 || ev == 16) {                              /* ...and the DSP's delay line */
-                uint32_t a = (((uint32_t)(s.c[1] & 0x3F) << 13) + (rnd() & 0x1FFFE)) & 0x7FFFE;
-                if (ev == 15) { RAM_TOUCH(&s, a, 2, 0); put((uint32_t)ram[a] << 8 | ram[a + 1]); }
-                else { uint8_t b = (uint8_t)rnd(); RAM_TOUCH(&s, a, 1, 1); ram[a] = b; }
-            }
-            else if (ev == 17) { put(scsp_read(&s, 0x408, 2)); }        /* the monitor, MSLC left alone */
-            else if (ev == 18) { scsp_write(&s, 0x408, (uint16_t)((rnd() & 31) << 11), 2); }
-            else if (ev == 19) {                                          /* key off the watched slot, then look */
-                int sl = s.mslc;
-                slot_write(&s, sl, 0, (uint16_t)((s.slot[sl].r[0] & ~0x0800u) | 0x1000));
-                put(scsp_read(&s, 0x408, 2));
-            }
-            else if (ev == 20 || ev == 21) { put(scsp_read(&s, (rnd() & 31) * 0x20, 2)); }   /* KYONB */
-            else if (ev == 22) {                                          /* MVOL / DAC18B mid-stream */
-                uint32_t v = rnd() & 0xF;
-                if (rnd() & 1) v |= 0x100;
-                scsp_write(&s, 0x400, (uint16_t)v, 2);
-            }
-            else if (ev == 27 && prog == 2 && rnd() % 4 == 0) {           /* a loop shorter than a step: it creeps on */
-                int sl = (int)(rnd() & 31);
-                uint32_t lsa = rnd() & 0xFFF, len = 1 + rnd() % 64, oct = 4 + rnd() % 4;
-                slot_write(&s, sl, 1, (uint16_t)(rnd() & 0xFFFE));
-                slot_write(&s, sl, 2, (uint16_t)lsa);
-                slot_write(&s, sl, 3, (uint16_t)(lsa + len));
-                slot_write(&s, sl, 7, 0);
-                slot_write(&s, sl, 8, (uint16_t)(oct << 11 | (rnd() & 0x3FF)));
-                slot_write(&s, sl, 9, 0);
-                slot_write(&s, sl, 0, (uint16_t)(0x0020 | 0x0800 | 0x1000));   /* SA < 64 KB, forward loop, KYONB + KYONEX */
-            }
-            else if (ev >= 23 && ev <= 26) {                              /* around where a slot's loop ends */
-                const scsp_slot_t *q = &s.slot[rnd() & 31];
-                uint32_t top = q->r[3] > q->r[2] ? q->r[3] : q->r[2];
-                uint32_t a = (SCSP_SA(q) + (SCSP_PCM8B(q) ? top : top * 2) + (rnd() % 24) - 8) & 0x7FFFF;
-                uint8_t b = (uint8_t)rnd();
-                RAM_TOUCH(&s, a, 1, 1);
-                ram[a] = b;
-            }
-            clock += 256;
-            scsp_timers(&s, clock);
-            put((uint32_t)scsp_irq_level(&s));
-#ifndef SCSP_OWED_MAX
-            for (int i = 0; i < 32; i++) { scsp_slot_t *q = &s.slot[i]; if (!q->active) continue; cov[0]++;
-                if (SCSP_MDL(q) || SCSP_MDXSL(q) || SCSP_MDYSL(q)) cov[1]++; if (SCSP_SSCTL(q) == 1) cov[2]++; if (SCSP_PCM8B(q)) cov[3]++;
-                cov[4 + SCSP_LPCTL(q)]++; if (SCSP_PLFOS(q)) cov[8]++; if (SCSP_ALFOS(q)) cov[9]++; }
-            if (!s.dsp.stopped) cov[10]++;
-            int16_t l, r;
-            scsp_sample(&s, &l, &r);
-#ifdef SCSP_DSP_COMPILED
-            if (s.dsp.known) cov[11]++;
-#endif
-            put_smp((uint32_t)(uint16_t)l | (uint32_t)(uint16_t)r << 16);
-#else
-            scsp_tick(&s);
-            if (s.coupled) cov[1]++;
-#endif
+            if (ev < 12) event_regs(&s, ev);
+            else         event_ram(&s, ev);
+            sample_step(&s, &clock);
         }
-#ifdef SCSP_OWED_MAX
-        scsp_sync(&s);
-        cov[0] += s.syncs; cov[2] += s.catches;
-#endif
-        for (size_t i = 0; i < nsmp; i++) put(smp[i]);
-        nsmp = 0;
-        for (int i = 0; i < 32; i++) {
-            put(s.slot[i].cur); put((uint32_t)s.slot[i].vol); put(s.slot[i].active | s.slot[i].state << 8);
-        }
-        put(s.sous_ptr); put(s.dsp.dec);
-        for (uint32_t i = 0; i < sizeof ram; i += 4) put(*(uint32_t *)(ram + i));
+        scenario_end(&s);
     }
     fwrite(buf, 4, nb, out);
     fclose(out);

@@ -6,6 +6,17 @@
  * from von.zip. ROM names and CRCs are MAME's; the chips are found by CRC as
  * well, so a set that labels them otherwise still loads.
  *
+ * von (Pinboard #1342) is the same game in English, the USA Revision B program
+ * (epr-18828b / 18829b, MAME's vonu; older MAME sets name them vo-prog0.usa /
+ * vo-prog1.usa and call the set von) on the same chips, so the English site
+ * loads von.zip alone. Its code is shifted against vonj's, but the backup
+ * block, its CRC table and every RAM word below are at the same addresses
+ * (found by the instructions that use them), so the profiles share everything
+ * but the program pair. Only the link words at 0x503A04..0x503A10 are in
+ * another order (vonj's 0x503A08 is von's 0x503A04) and the machine names'
+ * table is at ROM 0x18100. MAME's current von, the Export program (epr-18832 /
+ * 18833), is another build and not checked here.
+ *
  * Board: Model 2B CRX, the board STF and Fighting Vipers run on, so the
  * profile is the board's defaults, but for the COP, which runs the program
  * the game uploads (model2b_cop.h): interrupts through the program's own table
@@ -40,41 +51,52 @@
 #include "m2comm.h"
 #include "savestate_reg.h"
 
+#define VON_SHARED_PARTS \
+    ROM_PAIR32(ROM_MAINCPU,    0x0100000, "epr-18666.13",  0x66edb432, "epr-18667.14",  0xb593d31f), \
+    ROM_PAIR32(ROM_MAIN_DATA,  0x0000000, "mpr-18648.11",  0x2edbe489, "mpr-18649.12",  0xe68c5aa6), \
+    ROM_PAIR32(ROM_MAIN_DATA,  0x0800000, "mpr-18650.9",   0x89a855b9, "mpr-18651.10",  0xf4c23107), \
+    ROM_PAIR32(ROM_COPRO_DATA, 0x0000000, "mpr-18662.29",  0xa33d3335, "mpr-18663.30",  0xea74a641), \
+    ROM_PAIR32(ROM_POLYGONS,   0x0000000, "mpr-18654.17",  0x6a0caf29, "mpr-18655.21",  0xa4293e78), \
+    ROM_PAIR32(ROM_POLYGONS,   0x0800000, "mpr-18656.18",  0xb4f51e76, "mpr-18657.22",  0xa9be4674), \
+    ROM_PAIR32(ROM_TEXTURES,   0x0000000, "mpr-18660.27",  0xe53663e5, "mpr-18658.25",  0x3d0fcd01), \
+    ROM_PAIR32(ROM_TEXTURES,   0x0800000, "mpr-18661.28",  0x52b50410, "mpr-18659.26",  0x27aa8ae2), \
+    ROM_SWAP16(ROM_AUDIOCPU,   0x0000000, "epr-18670.31",  0x3e715f76), \
+    ROM_SWAP16(ROM_SAMPLES,    0x0000000, "mpr-18652.32",  0x037eee53), \
+    ROM_SWAP16(ROM_SAMPLES,    0x0400000, "mpr-18653.34",  0x9ec3e7bf)
+
 static const rom_part_t vonj_parts[] = {
     ROM_PAIR32(ROM_MAINCPU,    0x0000000, "epr-18664b.15", 0x27d0172c, "epr-18665b.16", 0x2f0142ee),
-    ROM_PAIR32(ROM_MAINCPU,    0x0100000, "epr-18666.13",  0x66edb432, "epr-18667.14",  0xb593d31f),
-    ROM_PAIR32(ROM_MAIN_DATA,  0x0000000, "mpr-18648.11",  0x2edbe489, "mpr-18649.12",  0xe68c5aa6),
-    ROM_PAIR32(ROM_MAIN_DATA,  0x0800000, "mpr-18650.9",   0x89a855b9, "mpr-18651.10",  0xf4c23107),
-    ROM_PAIR32(ROM_COPRO_DATA, 0x0000000, "mpr-18662.29",  0xa33d3335, "mpr-18663.30",  0xea74a641),
-    ROM_PAIR32(ROM_POLYGONS,   0x0000000, "mpr-18654.17",  0x6a0caf29, "mpr-18655.21",  0xa4293e78),
-    ROM_PAIR32(ROM_POLYGONS,   0x0800000, "mpr-18656.18",  0xb4f51e76, "mpr-18657.22",  0xa9be4674),
-    ROM_PAIR32(ROM_TEXTURES,   0x0000000, "mpr-18660.27",  0xe53663e5, "mpr-18658.25",  0x3d0fcd01),
-    ROM_PAIR32(ROM_TEXTURES,   0x0800000, "mpr-18661.28",  0x52b50410, "mpr-18659.26",  0x27aa8ae2),
-    ROM_SWAP16(ROM_AUDIOCPU,   0x0000000, "epr-18670.31",  0x3e715f76),
-    ROM_SWAP16(ROM_SAMPLES,    0x0000000, "mpr-18652.32",  0x037eee53),
-    ROM_SWAP16(ROM_SAMPLES,    0x0400000, "mpr-18653.34",  0x9ec3e7bf),
+    VON_SHARED_PARTS,
 };
 
-static const rom_recipe_t vonj_recipe = {
-    .set  = "vonj",
-    .size = { [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000,
-              [ROM_COPRO_DATA] = 0x800000,
-              [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x1000000,
-              [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000 },
-    .parts = vonj_parts, .count = sizeof vonj_parts / sizeof vonj_parts[0],
+static const rom_part_t von_parts[] = {
+    ROM_PAIR32(ROM_MAINCPU,    0x0000000, "epr-18828b.15", 0x6499cc59, "epr-18829b.16", 0x0053b10f),
+    VON_SHARED_PARTS,
 };
 
-static inline int vonj_load(romset_t *rs, const char *child, const char *parent) {
-    return rom_recipe_load(rs, child, parent, &vonj_recipe);
-}
+#define VON_RECIPE(name) \
+    static const rom_recipe_t name##_recipe = { \
+        .set  = #name, \
+        .size = { [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, \
+                  [ROM_COPRO_DATA] = 0x800000, \
+                  [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x1000000, \
+                  [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000 }, \
+        .parts = name##_parts, .count = sizeof name##_parts / sizeof name##_parts[0], \
+    }; \
+    static inline int name##_load(romset_t *rs, const char *child, const char *parent) { \
+        return rom_recipe_load(rs, child, parent, &name##_recipe); \
+    }
+VON_RECIPE(vonj)
+VON_RECIPE(von)
 
 static inline uint32_t vonj_read32(const uint8_t *buf, uint32_t off) {
     return (uint32_t)buf[off] | (uint32_t)buf[off + 1] << 8
          | (uint32_t)buf[off + 2] << 16 | (uint32_t)buf[off + 3] << 24;
 }
 
-static inline void vonj_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
-    if (!rs->loaded) { LOG_ERROR("vonj_install: romset not loaded"); return; }
+/* `id`: the profile's, which keys its savestate parts (savestate_extra). */
+static inline void von_install_as(const char *id, const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    if (!rs->loaded) { LOG_ERROR("%s_install: romset not loaded", id); return; }
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
@@ -82,12 +104,12 @@ static inline void vonj_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_
     /* The COP runs Virtual-On's own program, not STF's (model2b_cop.h), and
      * reads its sine/cosine tables straight out of copro_data. */
     model2b_cop_install(bus, rs->copro_data, rs->copro_data_size);
-    savestate_extra("vonj", "M2BCOP", &g_m2bc, sizeof g_m2bc);
-    savestate_extra("vonj", "SHARC", &g_shc, sizeof g_shc);
+    savestate_extra(id, "M2BCOP", &g_m2bc, sizeof g_m2bc);
+    savestate_extra(id, "SHARC", &g_shc, sizeof g_shc);
     /* A comm board with no other cabinet on the link: without one the
      * machine select waits for a link state forever (m2comm.h). */
     m2comm_install(bus, 0x1C0u);
-    savestate_extra("vonj", "M2COMM", &g_m2comm, sizeof g_m2comm);
+    savestate_extra(id, "M2COMM", &g_m2comm, sizeof g_m2comm);
 
     /* main_data at 0x02000000; the "extra" window at 0x06000000 is main_data
      * from 0x1000000 (MAME model2_base_mem), which Virtual-On leaves empty. */
@@ -112,7 +134,15 @@ static inline void vonj_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_
         uint32_t start_ip_ptr = vonj_read32(rs->maincpu, prcb + PRCB_START_IP);
         if (start_ip_ptr < rs->maincpu_size) cpu->sfr.ip = vonj_read32(rs->maincpu, start_ip_ptr);
     }
-    LOG_INFO("vonj_install: PRCB=0x%08X initial IP=0x%08X", prcb, cpu->sfr.ip);
+    LOG_INFO("%s_install: PRCB=0x%08X initial IP=0x%08X", id, prcb, cpu->sfr.ip);
+}
+
+static inline void vonj_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    von_install_as("vonj", rs, cpu, bus);
+}
+
+static inline void von_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    von_install_as("von", rs, cpu, bus);
 }
 
 /* The PS3 shell's ARCADE rows written into the cabinet's GAME ASSIGNMENTS:
@@ -205,7 +235,7 @@ static inline bool vonj_link_role(memory_bus_t *bus, game_link_role_t role) {
     return any;
 }
 
-/* IN0 is the cabinet's: COIN1 0x01, COIN2 0x02, SERVICE 0x04, START 0x10
+/* IN0 is the cabinet's: COIN1 0x01, COIN2 0x02, TEST 0x04, SERVICE 0x08, START 0x10
  * (MAME INPUT_PORTS_START(model2crx)). IN1 (byte 1) the left lever, IN2
  * (byte 2) the right: shot 0x01, dash 0x02, down 0x10, up 0x20, right 0x40,
  * left 0x80 (INPUT_PORTS_START(von)). */
@@ -215,12 +245,12 @@ static inline bool vonj_link_role(memory_bus_t *bus, game_link_role_t role) {
 #define VONJ_R_DASH 0x00020000u
 
 /* The game's state, for replays (core/replay.h). Names are the PS3 build's
- * symbol table (rokuYAMP docs/von-rom-symbols.md). MainMode indexes
- * __mainloop__'s table at ROM 0x18680: 1 Advertize (attract), 3 InitGameMain,
+ * symbol table (rokuYAMP docs/von-rom-symbols.md), and von's are the same
+ * words. MainMode indexes __mainloop__'s table at ROM 0x18680 (vonj): 1 Advertize (attract), 3 InitGameMain,
  * 4 GameMain (select, the rounds, continue), 5 test. SubMode 10 is a round on
  * (Pinboard #995, watched over the bridge). machine_P / machine_E are the
  * player's machine and the other side's, in the order of the name table at ROM
- * 0x181F0. NumOfSets is MATCH COUNT, rounds to win - 1. */
+ * 0x181F0 (von 0x18100). NumOfSets is MATCH COUNT, rounds to win - 1. */
 #define VONJ_MAIN_MODE   0x005039F4u
 #define VONJ_SUB_MODE    0x00503A00u
 #define VONJ_SET_WIN     0x00503A6Cu
@@ -261,48 +291,64 @@ static inline void vonj_match_info(memory_bus_t *bus, game_match_info_t *out) {
     out->rounds_to_win   = (int)mem_read32(bus, VONJ_NUM_OF_SETS) + 1;
 }
 
+/* Everything but the name and the program is the same game's. */
+#define VON_PROFILE_COMMON \
+    .link_role       = vonj_link_role, \
+    .link_twin       = true, \
+    .link_setting    = "GAME ASSIGNMENTS, NETWORK LINK ATTRIBUTE: NOLINK", \
+    .match_info      = vonj_match_info, \
+    .in_play         = vonj_in_play, \
+    .input = { \
+        .bits = { \
+            [GAME_INPUT_P1_COIN]  = 0x00000001, \
+            [GAME_INPUT_P2_COIN]  = 0x00000002, \
+            [GAME_INPUT_TEST]     = 0x00000004, \
+            [GAME_INPUT_SERVICE]  = 0x00000008, \
+            [GAME_INPUT_P1_START] = 0x00000010, \
+            [GAME_INPUT_P1_DOWN]  = 0x00001000, \
+            [GAME_INPUT_P1_UP]    = 0x00002000, \
+            [GAME_INPUT_P1_RIGHT] = 0x00004000, \
+            [GAME_INPUT_P1_LEFT]  = 0x00008000, \
+            [GAME_INPUT_P1_B1]    = VONJ_L_SHOT, \
+            [GAME_INPUT_P1_B2]    = VONJ_L_DASH, \
+            [GAME_INPUT_P1_B3]    = VONJ_L_SHOT | VONJ_R_SHOT, \
+            [GAME_INPUT_P1_B4]    = VONJ_L_DASH | VONJ_R_DASH, \
+            [GAME_INPUT_P2_DOWN]  = 0x00100000, \
+            [GAME_INPUT_P2_UP]    = 0x00200000, \
+            [GAME_INPUT_P2_RIGHT] = 0x00400000, \
+            [GAME_INPUT_P2_LEFT]  = 0x00800000, \
+            [GAME_INPUT_P2_B1]    = VONJ_R_SHOT, \
+            [GAME_INPUT_P2_B2]    = VONJ_R_DASH, \
+        }, \
+    }, \
+    .board = BOARD_MODEL2B_CRX, \
+    .hook_count = 0, \
+    .quirks = { \
+        .enable_68k_sound = true, \
+        .irq_vectors      = true, \
+        .board_vblank     = true, \
+        /* Neither program has a country setting: vonj is Japan's, von the \
+         * USA's (MAME's von, vonu: other program ROMs, not a setting). */ \
+        .region           = { .kind = REGION_PROGRAM_ROM, \
+                              .why  = "the program ROM is one country's (vonj Japan, von USA)" }, \
+    }
+
 static const game_profile_t vonj_profile = {
     .id              = "vonj",
     .display_name    = "Cyber Troopers Virtual-On (Japan, Rev B)",
     .parent_zip_name = "von.zip",
-    .board           = BOARD_MODEL2B_CRX,
     .load_fn         = vonj_load,
     .install_fn      = vonj_install,
-    .hook_count      = 0,
-    .link_role       = vonj_link_role,
-    .match_info      = vonj_match_info,
-    .in_play         = vonj_in_play,
-    .input = {
-        .bits = {
-            [GAME_INPUT_P1_COIN]  = 0x00000001,
-            [GAME_INPUT_P2_COIN]  = 0x00000002,
-            [GAME_INPUT_SERVICE]  = 0x00000004,
-            [GAME_INPUT_P1_START] = 0x00000010,
-            [GAME_INPUT_P1_DOWN]  = 0x00001000,
-            [GAME_INPUT_P1_UP]    = 0x00002000,
-            [GAME_INPUT_P1_RIGHT] = 0x00004000,
-            [GAME_INPUT_P1_LEFT]  = 0x00008000,
-            [GAME_INPUT_P1_B1]    = VONJ_L_SHOT,
-            [GAME_INPUT_P1_B2]    = VONJ_L_DASH,
-            [GAME_INPUT_P1_B3]    = VONJ_L_SHOT | VONJ_R_SHOT,
-            [GAME_INPUT_P1_B4]    = VONJ_L_DASH | VONJ_R_DASH,
-            [GAME_INPUT_P2_DOWN]  = 0x00100000,
-            [GAME_INPUT_P2_UP]    = 0x00200000,
-            [GAME_INPUT_P2_RIGHT] = 0x00400000,
-            [GAME_INPUT_P2_LEFT]  = 0x00800000,
-            [GAME_INPUT_P2_B1]    = VONJ_R_SHOT,
-            [GAME_INPUT_P2_B2]    = VONJ_R_DASH,
-        },
-    },
-    .quirks = {
-        .enable_68k_sound = true,
-        .irq_vectors      = true,
-        .board_vblank     = true,
-        /* vonj is the Japanese program: its test menu has no country, and
-         * MAME's von and vonu (the other countries) are other program ROMs, not a setting. */
-        .region           = { .kind = REGION_PROGRAM_ROM,
-                              .why  = "the program ROM is Japan's (von, vonu are other sets)" },
-    },
+    VON_PROFILE_COMMON,
+};
+
+/* The English game, von.zip alone (Pinboard #1342). */
+static const game_profile_t von_profile = {
+    .id              = "von",
+    .display_name    = "Cyber Troopers Virtual-On (USA, Rev B)",
+    .load_fn         = von_load,
+    .install_fn      = von_install,
+    VON_PROFILE_COMMON,
 };
 
 #endif /* PROFILES_VONJ_H */

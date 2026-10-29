@@ -45,6 +45,7 @@
 
 #include "log.h"
 #include "scsp.h"
+#include "sound_synth.h"
 
 /* ---- where things are ---------------------------------------------------- */
 
@@ -85,15 +86,68 @@ static inline void shle_reset(void) {}
 #define SHLE_P_PAUSE_OFF  0x608076u
 #define SHLE_P_HOLDVAL    0x60807Bu
 #define SHLE_P_SFXVOICES  0x60807Cu
-#define SHLE_T_RELRATE    0x602106u
-#define SHLE_T_PAN        0x602D9Eu
-#define SHLE_T_EFPAN      0x603CFAu
-#define SHLE_T_FREQPITCH  0x604B04u
-#define SHLE_T_BEND       0x604FB4u
-#define SHLE_T_OCTNOTE    0x605BE4u
-#define SHLE_T_FREQVALS   0x605CA4u
-#define SHLE_T_SPEED      0x605E24u
-#define SHLE_T_NEGSMP     0x601100u
+
+/* The driver's own tables, inside its code: where they sit is the build's
+ * (shle_drv_t). Every game on this driver keeps its data behind the header's
+ * pointers at 0x608000, so a build is its code. */
+typedef struct {
+    const char *name;        /* the first game it was found in */
+    uint32_t    hash;        /* FNV-1a over 0x1000-0x4FFF of the program ROM */
+    uint32_t    relrate, pan, efpan, freqpitch, bend, octnote, freqvals, speed, negsmp;
+    uint8_t     bank;        /* what it ORs into every write of the sound control register */
+    /* The later builds (Dead or Alive's) double the event queue: 512 events,
+     * the count a word, and the three places that stop at a full queue
+     * (MIDI in, timer B, timer C) test it against their own values, for
+     * equality, as before. */
+    uint16_t    qmask, qfull_midi, qfull_b, qfull_c;
+    bool        qwide;
+    /* From Virtua Cop 2 on, the restart (MIDI 0xFF) keeps the sound RAM and
+     * the DSP program and goes straight to the init routines; Dead or Alive's
+     * "everything stops" also empties the queue. */
+    bool        quick_restart, stop_flushes;
+    /* Manx TT's engine (A?7x): 0x12-byte records with a volume cut at +0x10
+     * (A?76), sends re-evaluated after A?72..76, DISDL 0xC0, the effect scan
+     * capped at byte_60807C; a stray MIDI data byte is dropped, A{C,D,E} are
+     * no-ops. */
+    bool        eng_manx;
+    /* CRX_drv: another driver altogether, sound_hle_crx.h (its builds,
+     * k_crx_builds: 1 Ver3.2.8, 2 Ver3.4.9); the fields above are STF's. */
+    uint8_t     crx;
+} shle_drv_t;
+
+#define SHLE_TABLES_STF   0x602106u, 0x602D9Eu, 0x603CFAu, 0x604B04u, 0x604FB4u, 0x605BE4u, 0x605CA4u, 0x605E24u, 0x601100u
+#define SHLE_TABLES_VCOP2 0x6021CEu, 0x602E66u, 0x603DC2u, 0x604BCCu, 0x60507Cu, 0x605CACu, 0x605D6Cu, 0x605EECu, 0x601100u
+#define SHLE_TABLES_DOA   0x6021CEu, 0x602E66u, 0x603DD0u, 0x604BDAu, 0x60508Au, 0x605CBAu, 0x605D7Au, 0x605EFAu, 0x601100u
+#define SHLE_TABLES_MANX  0x6021F4u, 0x602E8Cu, 0x603E1Cu, 0x604C8Au, 0x60513Au, 0x605D6Au, 0x605E2Au, 0x605FAAu, 0x601100u
+#define SHLE_QUEUE_256    0x3FF, 0xFF, 0xFF, 0xFF, false
+#define SHLE_QUEUE_512    0x7FF, 0x1FF, 0x1F0, 0x1E0, true
+
+static const shle_drv_t k_shle_drvs[] = {
+    /* epr-19021.31 (Sonic the Fighters); Fighting Vipers' epr-18628.31 is the same code */
+    { "sfight",   0x94FDE5EFu, SHLE_TABLES_STF,   0x00, SHLE_QUEUE_256, false, false, false },
+    { "skytargt", 0xF5B8276Fu, SHLE_TABLES_STF,   0x00, SHLE_QUEUE_256, false, false, false },
+    { "von",      0x3DD8516Fu, SHLE_TABLES_STF,   0x20, SHLE_QUEUE_256, false, false, false }, /* the banks' bit set */
+    { "gunblade", 0xAC5207B4u, SHLE_TABLES_STF,   0x20, SHLE_QUEUE_256, false, false, false },
+    { "vcop2",    0x4BE525BAu, SHLE_TABLES_VCOP2, 0x00, SHLE_QUEUE_256, true,  false, false },
+    { "doa",      0xAA442AC5u, SHLE_TABLES_DOA,   0x00, SHLE_QUEUE_512, true,  true,  false },
+    { "airwlkrs", 0x2D6DBD45u, SHLE_TABLES_DOA,   0x00, SHLE_QUEUE_512, true,  true,  false }, /* and Behind Enemy Lines */
+    { "manxtt",   0xDC12ACD9u, SHLE_TABLES_MANX,  0x00, SHLE_QUEUE_512, true,  true,  true  },
+    /* epr-19113 (Dynamite Cop): CRX_drv Ver3.2.8 */
+    { "dynamcop", 0xBCFE5C9Bu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 1 },
+    /* epr-21276 (Pilot Kids, both sets): CRX_drv Ver3.4.9 */
+    { "pltkids",  0xE728311Au, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 2 },
+};
+static const shle_drv_t *g_shle_drv = &k_shle_drvs[0];
+
+#define SHLE_T_RELRATE    (g_shle_drv->relrate)
+#define SHLE_T_PAN        (g_shle_drv->pan)
+#define SHLE_T_EFPAN      (g_shle_drv->efpan)
+#define SHLE_T_FREQPITCH  (g_shle_drv->freqpitch)
+#define SHLE_T_BEND       (g_shle_drv->bend)
+#define SHLE_T_OCTNOTE    (g_shle_drv->octnote)
+#define SHLE_T_FREQVALS   (g_shle_drv->freqvals)
+#define SHLE_T_SPEED      (g_shle_drv->speed)
+#define SHLE_T_NEGSMP     (g_shle_drv->negsmp)
 
 /* Board time, in 1/16 of a 68000 clock period. The driver reloads a timer in
  * its handler, so a period is (255 - reload) samples plus the time from the
@@ -120,12 +174,17 @@ static inline void shle_reset(void) {}
 #define SHLE_DUR_EVENT    650u         /* each event a sequencer queues */
 #define SHLE_DUR_MIDI     535u         /* Int3_MidiIn, one byte */
 #define SHLE_DUR_A        4000u        /* Interrupt1, timer A */
+#define SHLE_ACK_A        225u         /* Interrupt1 entered -> a timer B or C it hid entered */
 #define SHLE_CHUNK_CYCLES 2752u        /* a refill: 16 x (movem.l in, movem.l out with its wait states, adda) */
 #define SHLE_REFILL_WAIT  24u          /* extra wait for an interrupt landing in one: 37 - 13 */
-/* The driver clears its RAM, runs a 2.3 s delay loop and only then takes an
- * interrupt: the first one on the board is at this clock period after reset.
+/* The driver clears its RAM, copies the game's tables and preloaded samples
+ * (sub_6015DC, CopyInsTable: SHLE_COST_BYTE each), runs a 2.3 s delay loop
+ * and only then takes an interrupt: the first one on the board is at this
+ * clock period after reset, plus the copies. STF's come to 3231822 (its first
+ * interrupt at 33193169), Fighting Vipers' smaller preload to 609362, and its
+ * board takes the interrupt 2.62M periods sooner (the model is 0.3 ms off).
  * The i960's bytes wait in the SCSP's MIDI buffer until then. */
-#define SHLE_BOOT_CYCLES  33193169ull
+#define SHLE_BOOT_CYCLES  29961347ull
 /* ...and it writes the SCSP (InitSCSP, which cuts every voice) this long
  * after reset: until then whatever was playing plays on. The same after a
  * restart (MIDI byte 0xFF), measured on the board from the byte. */
@@ -135,6 +194,13 @@ static inline void shle_reset(void) {}
  * The voices' windows go to zero as it passes them, so what was playing falls
  * silent well before InitSCSP. */
 #define SHLE_CLEAR_DELAY  311808ull
+/* The quick restart (Dead or Alive's driver): the init routines start this
+ * long after the 0xFF, and interrupts come back on this long after them plus
+ * the copies (the driver's RAM clear and its 0x1000-byte table, then the
+ * game's). DOA's board: the routines at +4063, interrupts at +3463936, of
+ * which 3250866 are the copies. */
+#define SHLE_QUICK_INIT   4063ull
+#define SHLE_QUICK_BOOT   209007ull
 #define SHLE_CLEAR_BYTE   8u
 
 /* The main loop's pass over the 32 slots, where each streaming slot gets its
@@ -155,6 +221,7 @@ static inline void shle_reset(void) {}
 typedef struct {
     bool     on;             /* the HLE runs the sound board */
     bool     booted;         /* past the driver's boot delay */
+    bool     quick;          /* the restart under way is the quick one (shle_drv_t) */
     uint64_t restart_at;     /* a restart's InitSCSP is due (0 = none) */
     uint64_t clear_at;       /* ...and its RAM clear begins here */
     uint32_t cleared;        /* bytes of sound RAM the clear has reached */
@@ -165,17 +232,30 @@ typedef struct {
     uint64_t stall_until;    /* the main loop is inside a long copy: no streaming till then */
     uint64_t busy_until;     /* clock period the main loop is free to take the next event */
     uint64_t l2_free;        /* clock period no level 2 or 3 handler is running any more */
+    uint64_t a_ack;          /* clock period Interrupt1 acknowledges timer A, which hides B and C until then */
+    uint64_t a_busy_until;   /* CRX: a timer A handler that queued events, at SR 0x2000, runs till then */
+    uint64_t amask_from, amask_until;   /* the main loop has timer A masked: a MIDI event's tracks */
+    uint64_t amask_win[20][2];   /* CRX: the windows a MIDI event's tracks mask levels 1-2 */
+    uint32_t amask_n;
+    uint32_t amask_soft;     /* CRX 3.4.9: the windows (bits) that only set $C3E bit 4, not SR */
+    uint64_t b_busy_until;   /* CRX 3.4.9: timer B's handler, $C3E bit 1 set, runs till then */
+    uint64_t refill_at;      /* CRX: a pass's refills began here, chunk by chunk... */
+    uint32_t refill_n;       /* ...this many */
     uint32_t enq;            /* events queued (the handlers' length) */
     uint32_t chunks;         /* refill chunks copied in the current pass */
+    uint32_t pass_rem;       /* clock periods of refills not yet added to pass_left */
     uint32_t refill_frac;    /* the main loop's share of time in refills, 16.16, averaged over passes */
     uint32_t cost;           /* clock periods the event being dispatched keeps it busy */
     uint64_t events, keyons, unknown, chunks_total;
-    bool     warned_fm, warned_a7x;
+    bool     warned_fm;
 } shle_t;
 
 static shle_t g_shle;
-/* A host's switch: take the HLE when the driver is one it knows. */
-static int g_sound_hle_want;
+/* A host's switch: take the HLE when the driver is one it knows (on unless the host
+ * asks for the 68000: --sound-68k, M2HLE_SOUND_HLE=0). A program ROM it does not
+ * know runs on the 68000 whatever this says. The test tools that hold the port
+ * to the board (det_digest, snd_replay, snd_bench) start with it off. */
+static int g_sound_hle_want = 1;
 
 /* ---- memory ------------------------------------------------------------------ */
 
@@ -209,13 +289,18 @@ static inline void shle_mww(uint32_t a, uint32_t v) { shle_mwb(a, v >> 8); shle_
  * sees it. */
 static inline void shle_sw(uint32_t off, uint32_t v, int sz) {
     if (sndcap_on()) sndcap_scsp(1, off, v, sz);
-    scsp_write(&g_sound.scsp, off, v, sz);
+    if (g_ssyn.on) {                                    /* the voices in C (sound_synth.h) */
+        if ((off & 0xFFFFu) < 0x400) { ssyn_write(off, v, sz); return; }
+        ssyn_chip_write(off, v, sz);
+    } else {
+        scsp_write(&g_sound.scsp, off, v, sz);
+    }
     if (g_sound.scsp.dsp_moved) sound_map_pages(&g_sound);
 }
 static inline void shle_sw8(uint32_t off, uint32_t v)  { shle_sw(off, v & 0xFF, 1); }
 static inline void shle_sw16(uint32_t off, uint32_t v) { shle_sw(off, v & 0xFFFF, 2); }
 static inline void shle_sw32(uint32_t off, uint32_t v) { shle_sw(off, v, 4); }
-static inline uint16_t shle_sr16(uint32_t off) { return scsp_peek16(&g_sound.scsp, off & ~1u); }
+static inline uint16_t shle_sr16(uint32_t off) { return ssyn_scsp_peek16(off & ~1u); }
 static inline uint8_t shle_sr8(uint32_t off) {
     uint16_t w = shle_sr16(off);
     return (uint8_t)((off & 1) ? w : w >> 8);
@@ -225,6 +310,7 @@ static inline uint8_t shle_sr8(uint32_t off) {
  * monitor (btst #7,$409): which 4 KB half of its window the chip is in. */
 static inline bool shle_ca_upper(unsigned i) {
     scsp_t *s = &g_sound.scsp;
+    if (g_ssyn.on) return ssyn_ca_upper(i);
     if (s->owed && s->done[i] < s->owed) { scsp_slot_run(s, i, s->owed); s->catches++; }
     return (s->slot[i].cur >> (SCSP_SHIFT + 12)) & 1;
 }
@@ -233,7 +319,8 @@ static inline bool shle_ca_upper(unsigned i) {
  * reading: what it owes out of there is made first */
 static void shle_copy(uint32_t dst, uint32_t src, uint32_t n) {
     dst &= 0x7FFFFu;
-    scsp_ram_touch(&g_sound.scsp, dst, n, 1);
+    if (g_ssyn.on) ssyn_ram_touch(dst, n);
+    else           scsp_ram_touch(&g_sound.scsp, dst, n, 1);
     uint8_t *d = g_sound.ram + dst;
     src &= 0xFFFFFFu;
     if (src >= 0x800000u && g_sound.samples) {          /* the sample ROM, as one run where it is one */
@@ -247,16 +334,23 @@ static void shle_copy(uint32_t dst, uint32_t src, uint32_t n) {
 
 /* ---- the command queue --------------------------------------------------------- */
 
+/* the events waiting: a byte, or a word in the builds with the longer queue */
+static inline uint32_t shle_qcount(void) { return g_shle_drv->qwide ? G16(0x1406) : G8(0x1406); }
+static inline void shle_qcount_set(uint32_t n) {
+    if (g_shle_drv->qwide) SG16(0x1406, n); else SG8(0x1406, n);
+}
+static inline uint32_t shle_qslot(uint32_t ptr) { return SHLE_QUEUE + (G16(ptr) & g_shle_drv->qmask); }
+
 static inline void shle_enqueue(uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3) {
     g_shle.enq++;
-    uint32_t a = SHLE_QUEUE + (G16(0x1404) & 0x3FFu);
+    uint32_t a = shle_qslot(0x1404);
     shle_wb(a, b0); shle_wb(a + 1, b1); shle_wb(a + 2, b2); shle_wb(a + 3, b3);
-    SG16(0x1404, (G16(0x1404) + 4) & 0x3FF);
-    SG8(0x1406, G8(0x1406) + 1);
+    SG16(0x1404, (G16(0x1404) + 4) & g_shle_drv->qmask);
+    shle_qcount_set(shle_qcount() + 1);
 }
 /* enqueue three bytes, leaving the fourth as it was (the sequencer's writes) */
 static inline void shle_enqueue3(uint8_t b0, uint8_t b1, uint8_t b2) {
-    uint32_t a = SHLE_QUEUE + (G16(0x1404) & 0x3FFu);
+    uint32_t a = shle_qslot(0x1404);
     shle_enqueue(b0, b1, b2, shle_rb(a + 3));
 }
 
@@ -292,16 +386,9 @@ static void shle_sfx_order_close(uint8_t d2) {
         if ((shle_rb(v + 2) & 0x08) && shle_rb(v + 5) > d2) shle_wb(v + 5, shle_rb(v + 5) - 1);
 }
 
-/* loc_6025FC / loc_60263E: a free voice round-robin, or the oldest music voice
- * (a released one first). 0 = none to be had. */
-static uint32_t shle_alloc_music(void) {
-    uint32_t a1 = G32(0x141A);
-    for (int n = 0; n < 32; n++) {
-        if (a1 == SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }
-        if (a1 < SHLE_VOICES || a1 > SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }  /* not in the driver: a corrupt pointer */
-        if (shle_rb(a1 + 2) == 0) { SG32(0x141A, a1 + 16); return a1; }
-        a1 += 16;
-    }
+/* loc_60263E: no voice free, so the oldest music voice is taken (a released
+ * one first), cut and its stream cleared. 0 = none to be had. */
+static uint32_t shle_steal_music(void) {
     uint8_t d6 = 0xFF; uint32_t pick = 0;
     for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
         uint8_t f = shle_rb(v + 2);
@@ -324,13 +411,34 @@ static uint32_t shle_alloc_music(void) {
     return pick;
 }
 
+/* loc_6025FC / loc_60263E: a free voice round-robin, or the oldest music voice
+ * (a released one first). 0 = none to be had. */
+static uint32_t shle_alloc_music(void) {
+    uint32_t a1 = G32(0x141A);
+    for (int n = 0; n < 32; n++) {
+        if (a1 == SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }
+        if (a1 < SHLE_VOICES || a1 > SHLE_VOICES_END) { a1 = SHLE_VOICES; SG32(0x141A, a1); }  /* not in the driver: a corrupt pointer */
+        if (shle_rb(a1 + 2) == 0) { SG32(0x141A, a1 + 16); return a1; }
+        a1 += 16;
+    }
+    return shle_steal_music();
+}
+
 /* loc_601C7A: an effect voice. Under byte_60807C of them, any free voice;
  * otherwise the effect voice with the highest priority number (the oldest of
  * equals) if the new note's is not higher. */
+static uint32_t shle_alloc_sfx_scan(uint8_t d6);
 static uint32_t shle_alloc_sfx(void) {
     uint8_t cap = shle_mb(SHLE_P_SFXVOICES);
     if ((int8_t)cap > (int8_t)G8(0x142E)) return shle_alloc_music();
-    uint8_t d0 = 0xFF, d1 = G8(0x140C), d6 = cap;
+    return shle_alloc_sfx_scan(cap);
+}
+
+/* loc_601C88: the scan, which gives up after `d6` effect voices (the engine
+ * comes in here with its own d6) */
+static uint32_t shle_alloc_sfx_scan(uint8_t d6) {
+    uint8_t cap = shle_mb(SHLE_P_SFXVOICES);
+    uint8_t d0 = 0xFF, d1 = G8(0x140C);
     uint32_t a1 = 0;
     for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
         uint8_t f = shle_rb(v + 2);
@@ -397,6 +505,13 @@ static uint16_t shle_send_pitched(uint32_t t, uint32_t v, uint32_t slot, int16_t
 static inline void shle_first_chunk(uint32_t slot, uint32_t ring, uint32_t src) {
     shle_copy(ring, src, 0x200);
     shle_sw8(slot, shle_sr8(slot) | 0x18);
+}
+
+/* a refill's chunk: the main loop's movem.l block, which the pass's length counts */
+static inline void shle_chunk_copy(uint32_t dst, uint32_t src) {
+    g_shle.chunks++;
+    g_shle.chunks_total++;
+    shle_copy(dst, src, 0x200);
 }
 
 static void shle_key_on(uint32_t t, uint32_t v, uint32_t slot, uint32_t e, uint16_t speed) {
@@ -542,7 +657,7 @@ static void shle_stream_loop_end(const shle_chunk_t *c) {
     shle_ww(rec + 0x1C, c->d0 & 0x7FFF);
     shle_wl(rec + 2, d4);
     shle_wl(rec + 0xA, (uint32_t)d3);
-    shle_copy(c->a2, c->a1, 0x200);                     /* the tail, and the bytes after it, which repeat the loop's start */
+    shle_chunk_copy(c->a2, c->a1);                      /* the tail, and the bytes after it, which repeat the loop's start */
     shle_wl(rec + 6, c->a2 + 0x200);
     if (!(c->f & 0x02)) return;
     if ((int32_t)shle_rl(lr) < 0) {
@@ -560,7 +675,7 @@ static void shle_stream_loop_end(const shle_chunk_t *c) {
 /* loc_6045D8: the last chunk */
 static void shle_stream_last(const shle_chunk_t *c) {
     shle_ww(c->rec + 0x1E, (uint16_t)((c->a2 - shle_rl(c->rec + 0xE)) + c->d5));
-    shle_copy(c->a2, c->a1, 0x200);
+    shle_chunk_copy(c->a2, c->a1);
     if (!(c->d2 & 0x80)) {
         shle_wb(c->rec, shle_rb(c->rec) | 0x08);
         shle_wb(c->rec + 1, c->d2 + 0x10);
@@ -581,13 +696,11 @@ static void shle_stream_step(unsigned i) {
     if (!shle_stream_dest(&c)) return;
     c.a1 = shle_rl(c.rec + 2);
     c.d5 = shle_rl(c.rec + 0xA);
-    g_shle.chunks++;
-    g_shle.chunks_total++;
     if (c.d5 > 0x200) {                                 /* a whole chunk */
         shle_wl(c.rec + 0xA, c.d5 - 0x200);
         shle_wb(c.rec + 1, c.d2 + 0x10);
         shle_ww(c.rec + 0x1C, c.d0 & 0x7FFF);
-        shle_copy(c.a2, c.a1, 0x200);
+        shle_chunk_copy(c.a2, c.a1);
         shle_wl(c.rec + 2, c.a1 + 0x200);
         shle_wl(c.rec + 6, c.a2 + 0x200);
         return;
@@ -628,6 +741,8 @@ static void shle_voice_lfo(uint32_t t, uint32_t slot, bool mask_mod) {
     uint32_t b = G8(0x3240 + ch) & 7u;
     shle_sw8(slot + 0x13, shle_sr8(slot + 0x13) | ((d6 * b / 7) & 7));
 }
+
+static void shle_voice_start(uint32_t t, uint32_t v, uint32_t slot, uint16_t speed);
 
 /* loc_601EAE onwards: the voice takes the note */
 static void shle_voice_setup(uint32_t t, uint32_t v) {
@@ -676,7 +791,11 @@ static void shle_voice_setup(uint32_t t, uint32_t v) {
         shle_sw8(slot + 0x15, shle_rb(t + 0xC));
         shle_sw8(slot + 0x16, G8(0x1411));
     }
-    /* loc_6020B0 */
+    shle_voice_start(t, v, slot, speed);
+}
+
+/* loc_6020B0: the sample, the envelope and the release rate, and the key-on */
+static void shle_voice_start(uint32_t t, uint32_t v, uint32_t slot, uint16_t speed) {
     uint32_t ch = G8(0x140E) & 0xFu;
     uint16_t id = shle_rw(v + 6);
     uint32_t e;
@@ -813,6 +932,21 @@ static void shle_release(uint32_t v, uint8_t ch) {
     }
 }
 
+/* Every voice playing the note in 0x1415 / 0x1416 on the current channel lets
+ * go of it; one with flag 0x02 (held for the pedal) or 0x10 set is left alone. */
+static void shle_release_note(void) {
+    uint8_t ch = G8(0x140E) & 0xF;
+    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
+        if (shle_rb(v + 3) != G8(0x1415) || shle_rb(v + 4) != ch || shle_rw(v + 6) != G16(0x1416)) continue;
+        uint8_t f = shle_rb(v + 2);
+        if (f & 0x12) continue;
+        f &= 0x7F;
+        shle_wb(v + 2, f);
+        if (!f) continue;
+        shle_release(v, ch);
+    }
+}
+
 static void shle_note_off_voices(uint32_t t, uint8_t d4, uint8_t d2) {
     uint32_t d3 = shle_rb(t + 2) & 0x7Fu;
     uint32_t a2 = shle_ml(SHLE_P_INSDATA);
@@ -834,16 +968,7 @@ static void shle_note_off_voices(uint32_t t, uint8_t d4, uint8_t d2) {
         d4 = (uint8_t)((d4 + shle_mb(a2 + 3)) & 0x7F);
         SG8(0x1415, shle_mb(SHLE_T_OCTNOTE + d4));
     }
-    uint8_t ch = G8(0x140E) & 0xF;
-    for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
-        if (shle_rb(v + 3) != G8(0x1415) || shle_rb(v + 4) != ch || shle_rw(v + 6) != G16(0x1416)) continue;
-        uint8_t f = shle_rb(v + 2);
-        if (f & 0x12) continue;
-        f &= 0x7F;
-        shle_wb(v + 2, f);
-        if (!f) continue;
-        shle_release(v, ch);
-    }
+    shle_release_note();
 }
 
 static void shle_note_off(uint32_t t, uint32_t p) {
@@ -1211,10 +1336,12 @@ static void shle_cut_voices(bool sfx) {
     }
 }
 
+static void shle_eng_clear(void);
+
 /* everything stops */
 static void shle_stop_all(void) {
     for (uint32_t a = SHLE_SEQS; a < SHLE_SEQS + 0x80; a++) shle_wb(a, 0);
-    for (uint32_t a = SHLE_A6(0x1600); a < SHLE_A6(0x1700); a++) shle_wb(a, 0);
+    shle_eng_clear();
     for (uint32_t v = SHLE_VOICES; v < SHLE_VOICES_END; v += 16) {
         if (!shle_rb(v + 2)) continue;
         uint32_t slot = shle_rw(v);
@@ -1223,6 +1350,9 @@ static void shle_stop_all(void) {
     }
     SG8(0x141E, 0); SG8(0x142E, 0);
     for (int c = 0; c < 16; c++) { SG8(0x3220 + c, 0); SG8(0x3240 + c, 0); SG16(0x3200 + c * 2, 0); }
+    if (g_shle_drv->stop_flushes) {                     /* the dispatch then steps the read side to 4 too */
+        SG16(0x1404, 4); SG16(0x1408, 0); shle_qcount_set(0);
+    }
 }
 
 /* pause: every slot's source to silence, and back */
@@ -1259,7 +1389,7 @@ static void shle_cmd00(uint8_t d0) {
         return;
     }
     case 0x03:                                          /* the effects stop */
-        for (uint32_t a = SHLE_A6(0x1600); a < SHLE_A6(0x1700); a++) shle_wb(a, 0);
+        shle_eng_clear();
         for (uint32_t a = SHLE_SEQS + 0x10; a < SHLE_SEQS + 0x80; a++) shle_wb(a, 0);
         shle_cut_voices(true);
         SG8(0x142E, 0);
@@ -1322,15 +1452,197 @@ static void shle_start_sfx(uint8_t d0, uint32_t a2) {
     shle_wb(a4 + 0xF, id);
 }
 
+/* ---- the engine (A?7x, loc_604766) ----------------------------------------------
+ * A channel's record at 0x1600 (16 bytes, Manx TT's 0x12): [0] its layers'
+ * voice bits, [1] program, [2] pan, [3] send, [4] priority, [5] volume,
+ * [7] position, [8..15] each layer's voice, Manx TT's [0x10] volume cut. A
+ * program (A7XTBL) is a word of layers - 1, its send and priority bytes, then
+ * 16 bytes a layer: sample id, lowest and highest position, a TL table and a
+ * pitch table by position, the envelope. A position keys the layers whose
+ * range holds it, retunes those already on and keys the rest off. */
+
+static inline uint32_t shle_eng_stride(void) { return g_shle_drv->eng_manx ? 0x12u : 16u; }
+static inline uint8_t shle_eng_disdl(void) { return g_shle_drv->eng_manx ? 0xC0 : 0x60; }
+static inline uint32_t shle_eng_slot(uint32_t r, uint32_t l) {
+    return shle_rw(SHLE_VOICES + (shle_rb(r + 8 + l) & 0x1Fu) * 16u);
+}
+
+/* sub_601696: each channel's record from the program list in front of A7XTBL */
+static void shle_eng_init(void) {
+    uint32_t a0 = shle_ml(SHLE_P_A7XTBL);
+    for (uint32_t k = 0; k < 16; k++) {
+        uint8_t d2 = shle_mb(a0 - 0x10 + k);
+        uint32_t a3 = a0 + shle_mw(a0 + 2 + d2 * 2u);
+        uint32_t r = SHLE_A6(0x1600) + k * shle_eng_stride();
+        shle_wb(r + 1, d2);
+        shle_wb(r + 3, shle_mb(a3 + 2));
+        shle_wb(r + 4, shle_mb(a3 + 3));
+    }
+}
+
+/* the records cleared (with the effects); Manx TT sets them up again */
+static void shle_eng_clear(void) {
+    uint32_t n = 16u * shle_eng_stride();
+    for (uint32_t a = SHLE_A6(0x1600); a < SHLE_A6(0x1600) + n; a++) shle_wb(a, 0);
+    if (g_shle_drv->eng_manx) shle_eng_init();
+}
+
+/* a layer's voice keyed off (it releases) and its bit cleared */
+static void shle_eng_layer_off(uint32_t r, uint32_t l) {
+    if (!(shle_rb(r) & (1u << (l & 7)))) return;
+    uint32_t idx = shle_rb(r + 8 + l) & 0x1Fu;
+    shle_sw8(idx << 5, 0x10);
+    uint32_t v = SHLE_VOICES + idx * 16u;
+    shle_wb(v + 2, shle_rb(v + 2) | 1);
+    shle_wb(r, shle_rb(r) & ~(1u << (l & 7)));
+}
+
+/* a layer's TL and pitch at position `d0` (a word: its high byte rides along
+ * from the program number, as in the driver); returns the streaming speed */
+static uint16_t shle_eng_tune(uint32_t lay, uint32_t r, uint32_t slot, uint16_t d0) {
+    uint8_t d3 = (uint8_t)((shle_mb(shle_ml(lay + 4) + d0) + shle_rb(r + 5)) & 0x7F);
+    if (g_shle_drv->eng_manx) {
+        d3 = (uint8_t)(d3 - shle_rb(r + 0x10));
+        if (d3 & 0x80) d3 = 0;
+    }
+    shle_sw8(slot + 0xD, (uint8_t)~(d3 & 0x7F) & 0x7F);
+    uint16_t pt = shle_mw(shle_ml(lay + 8) + d0 * 2u) & 0x7BFF;
+    shle_sw16(slot + 0x10, pt);
+    uint32_t s = shle_ml(SHLE_T_SPEED + ((pt & 0x7800u) >> 9));
+    return shle_mw(s + ((pt & 0x3FFu) / 5u) * 2u);
+}
+
+/* loc_604896: a voice for a layer; the effect scan gives up after d6 voices,
+ * which is the layer loop's leftover count (Manx TT: byte_60807C) */
+static uint32_t shle_eng_alloc(uint32_t r, uint8_t d7) {
+    uint8_t cap = shle_mb(SHLE_P_SFXVOICES);
+    if (cap > G8(0x142E)) return shle_alloc_music();
+    SG8(0x140C, shle_rb(r + 4));
+    return shle_alloc_sfx_scan(g_shle_drv->eng_manx ? cap : d7);
+}
+
+/* loc_6048BA: the layer's sample keyed on in voice `v` */
+static void shle_eng_voice(uint32_t r, uint32_t lay, uint32_t l, uint32_t v, uint16_t d0) {
+    shle_wb(v + 2, 0x48);
+    uint32_t slot = shle_rw(v);
+    shle_sw8(slot, 0x10);
+    shle_wb(r + 8 + l, slot >> 5);
+    shle_wb(r, shle_rb(r) | (1u << (l & 7)));
+    shle_ww(v + 6, shle_mw(lay));
+    shle_wb(v + 3, d0);
+    shle_wb(v + 8, 0);
+    shle_wb(v + 0xC, shle_rb(r + 4));
+    shle_wb(v + 4, 0xFF);
+    shle_wb(v + 9, 0xFF);
+    shle_wb(v + 0xA, (r & 0xFF) | l);
+    shle_wb(v + 5, G8(0x142E));
+    SG8(0x142E, G8(0x142E) + 1);
+    uint16_t speed = shle_eng_tune(lay, r, slot, d0);
+    shle_sw32(slot + 4, 0x1FFF);
+    shle_sw8(slot + 0xC, 0);
+    shle_sw16(slot + 0xE, 0);
+    shle_sw16(slot + 0x12, 0);
+    SG32(0x143A, shle_ml(lay + 0xC));
+    shle_sw8(slot + 0x15, shle_rb(r + 3));
+    shle_sw8(slot + 0x16, (shle_rb(r + 2) & 0x1F) | shle_eng_disdl());
+    shle_voice_start(r, v, slot, speed);
+}
+
+/* one layer at position d0: off outside its range, retuned or keyed inside */
+static void shle_eng_layer(uint32_t r, uint32_t lay, uint32_t l, uint16_t d0, uint16_t left) {
+    uint8_t pos = (uint8_t)d0;
+    if (pos < shle_mb(lay + 2) || (int8_t)pos > (int8_t)shle_mb(lay + 3)) { shle_eng_layer_off(r, l); return; }
+    if (shle_rb(r) & (1u << (l & 7))) {
+        uint32_t slot = shle_eng_slot(r, l);
+        shle_ww(SHLE_A6(0x1000) + slot + 0x1A, shle_eng_tune(lay, r, slot, d0));
+        return;
+    }
+    uint32_t v = shle_eng_alloc(r, (uint8_t)left);
+    if (v) shle_eng_voice(r, lay, l, v, d0);
+}
+
+/* the layer walk of program `prog` (a word) at position `pos`; 0 keys all off */
+static void shle_eng_walk(uint32_t r, uint32_t a2, uint16_t prog, uint8_t pos) {
+    uint16_t n = shle_mw(a2), d0 = (uint16_t)(((prog << 1) & 0xFF00u) | pos);
+    a2 += 4;
+    for (uint32_t l = 0; l <= n; l++, a2 += 16) {
+        if (!pos) shle_eng_layer_off(r, l);
+        else shle_eng_layer(r, a2, l, d0, (uint16_t)(n - l));
+    }
+}
+
+/* the program's entry, or 0 if `prog` is past the table */
+static uint32_t shle_eng_program(uint16_t prog) {
+    uint32_t a2 = shle_ml(SHLE_P_A7XTBL);
+    if ((int16_t)prog > (int16_t)shle_mw(a2)) return 0;
+    return a2 + shle_mw(a2 + 2 + prog * 2u);
+}
+
+/* A?70: a new position; Manx TT's A?72..76 walk again at the one it has */
+static void shle_eng_position(uint32_t r, uint16_t hi, int pos, bool again) {
+    SG8(0x1422, G8(0x1422) + 1);
+    uint16_t prog = (uint16_t)(hi | shle_rb(r + 1));
+    uint32_t a2 = shle_eng_program(prog);
+    if (a2) {
+        if (again) pos = shle_rb(r + 7);
+        if (pos != shle_rb(r + 7) || (again && pos)) {
+            shle_wb(r + 7, pos);
+            shle_eng_walk(r, a2, prog, (uint8_t)pos);
+        }
+    }
+    SG8(0x1422, 0);
+}
+
+/* A?71..73: pan or send to every keyed layer */
+static void shle_eng_sends(uint32_t r, uint32_t off, uint8_t v) {
+    for (uint32_t l = 0; l < 8; l++)
+        if (shle_rb(r) & (1u << l)) shle_sw8(shle_eng_slot(r, l) + off, v);
+}
+
+/* A?74: a program, if no layer is keyed; returns the high byte d0 is left with */
+static uint16_t shle_eng_select(uint32_t r, uint8_t d0) {
+    uint32_t a2 = shle_eng_program(d0);
+    if (!a2) return 0;
+    shle_wb(r + 1, d0);
+    shle_wb(r + 2, 0);
+    shle_wb(r + 3, shle_mb(a2 + 2));
+    shle_wb(r + 4, shle_mb(a2 + 3));
+    return (uint16_t)((d0 << 1) & 0xFF00u);
+}
+
+static void shle_engine(uint8_t op, uint32_t p) {
+    uint32_t ch = G8(0x140E) & 0xFu, r = SHLE_A6(0x1600) + ch * shle_eng_stride();
+    uint16_t hi = (uint16_t)((ch * shle_eng_stride()) & 0xFF00u);
+    uint8_t d0 = shle_rb(p);
+    bool manx = g_shle_drv->eng_manx;
+    switch (op) {
+    case 0: shle_eng_position(r, hi, d0, false); return;
+    case 1: {
+        uint8_t d1 = shle_mb(SHLE_T_PAN + (hi | d0)) & 0x1F;
+        shle_wb(r + 2, d1);
+        shle_eng_sends(r, 0x16, d1 | shle_eng_disdl());
+        return;
+    }
+    case 2: shle_wb(r + 3, (shle_rb(r + 3) & 0x78) | (d0 < 8 ? d0 : 7)); break;
+    case 3: shle_wb(r + 3, (shle_rb(r + 3) & 7) | (uint8_t)((d0 & 0xF) << 3)); break;
+    case 4:
+        if (shle_rb(r)) return;
+        hi = shle_eng_select(r, d0);
+        if (manx) shle_eng_position(r, hi, 0, true);
+        return;
+    case 5: shle_wb(r + 5, d0); break;
+    case 6: if (!manx) return; shle_wb(r + 0x10, d0); break;
+    default: return;
+    }
+    if (op <= 3) shle_eng_sends(r, 0x15, shle_rb(r + 3));
+    if (manx) shle_eng_position(r, hi, 0, true);
+}
+
 static void shle_sound_cmd(uint32_t p) {
     uint8_t d0 = shle_rb(p) & 0x7F;
     uint8_t d2 = d0;
     p++;
-    if (d0 >= 0x70) {
-        if (!g_shle.warned_a7x) { LOG_WARN("sound HLE: engine command A? %02X not modelled", d0); g_shle.warned_a7x = true; }
-        g_shle.unknown++;
-        return;
-    }
+    if (d0 >= 0x70) { shle_engine(d0 & 7, p); return; }
     if (d0 >= 0x10) {
         uint32_t a4 = shle_ml(SHLE_P_MUSIC), a2 = a4;
         uint16_t g = (uint16_t)(d0 - 0x10);
@@ -1560,12 +1872,13 @@ static bool shle_midi_byte(uint8_t d0) {
     } else {
         d1 = G8(0x1403);
         if (!d1) d1 = G8(0x1402);
+        if (!d1 && g_shle_drv->eng_manx) return true;  /* a data byte with no status before it */
         d1--;
         if (d1) SG8(0x1401, d0);
-        else if (G8(0x1406) != 0xFF) {
+        else if (shle_qcount() != g_shle_drv->qfull_midi) {
             if ((uint8_t)(G8(0x1402) - 1)) shle_enqueue3(G8(0x1400), G8(0x1401), d0);
             else {
-                uint32_t a = SHLE_QUEUE + (G16(0x1404) & 0x3FFu);
+                uint32_t a = shle_qslot(0x1404);
                 shle_enqueue(G8(0x1400), d0, shle_rb(a + 2), shle_rb(a + 3));
             }
             shle_led();
@@ -1606,53 +1919,57 @@ static void shle_timer_a(void) {
 
 /* The driver's main loop, less the streaming: every queued event to the
  * tracks listening on its channel (loc_601A20). */
+/* a queued event: a sound command (A?), or a channel message to each of its tracks */
+static void shle_event(uint8_t st, uint32_t p) {
+    if ((st & 0xF0) == 0xA0) {
+        if (!g_shle_drv->eng_manx || st < 0xAC || st > 0xAE) shle_sound_cmd(p);
+        return;
+    }
+    uint8_t ch = st & 0xF;
+    for (uint32_t t = SHLE_TRACKS; t < SHLE_TRACKS + SHLE_NTRACKS * 16; t += 16) {
+        if (shle_rb(t + 1) != ch || !(shle_rb(t) & 0x80)) continue;
+        switch (st >> 4) {
+        case 0x8: shle_note_off(t, p); break;
+        case 0x9: shle_note_on(t, p); break;
+        case 0xB: shle_ctrl(t, p); break;
+        case 0xC: shle_program(t, p); break;
+        case 0xE: shle_pitch_bend(t, p); break;
+        default: break;
+        }
+    }
+}
+
 static void shle_dispatch(uint64_t now) {
     int guard = 0;
-    while (G8(0x1406) && now >= g_shle.busy_until && guard++ < 512) {
-        SG8(0x1406, G8(0x1406) - 1);
-        uint32_t p = SHLE_QUEUE + (G16(0x1408) & 0x3FFu);
+    while (shle_qcount() && now >= g_shle.busy_until && guard++ < 512) {
+        shle_qcount_set(shle_qcount() - 1);
+        uint32_t p = shle_qslot(0x1408);
         uint8_t st = shle_rb(p);
         SG8(0x140E, st);
         g_shle.events++;
         g_shle.cost = SHLE_COST_EVENT;
         g_shle.stall = false;
-        if ((st & 0xF0) == 0xA0) shle_sound_cmd(p + 1);
-        else {
-            uint8_t ch = st & 0xF;
-            for (uint32_t t = SHLE_TRACKS; t < SHLE_TRACKS + SHLE_NTRACKS * 16; t += 16) {
-                if (shle_rb(t + 1) != ch || !(shle_rb(t) & 0x80)) continue;
-                switch (st >> 4) {
-                case 0x8: shle_note_off(t, p + 1); break;
-                case 0x9: shle_note_on(t, p + 1); break;
-                case 0xB: shle_ctrl(t, p + 1); break;
-                case 0xC: shle_program(t, p + 1); break;
-                case 0xE: shle_pitch_bend(t, p + 1); break;
-                default: break;
-                }
-            }
-        }
-        SG16(0x1408, (G16(0x1408) + 4) & 0x3FF);
-        g_shle.busy_until = (g_shle.busy_until > now ? g_shle.busy_until : now) + g_shle.cost;
+        shle_event(st, p + 1);
+        SG16(0x1408, (G16(0x1408) + 4) & g_shle_drv->qmask);
+        uint64_t from = g_shle.busy_until > now ? g_shle.busy_until : now;
+        g_shle.busy_until = from + g_shle.cost;
+        if ((st & 0xF0) != 0xA0) { g_shle.amask_from = from; g_shle.amask_until = g_shle.busy_until; }
         if (g_shle.stall) g_shle.stall_until = g_shle.busy_until;
     }
 }
 
 /* ---- boot (EntryPoint) --------------------------------------------------------------- */
 
-static void shle_boot(void) {
+/* InitSCSP, the voices and the delay line; the quick restart's copy of it
+ * leaves the DSP program as it is. */
+static void shle_init_scsp(bool dsp_too) {
     scsp_t *s = &g_sound.scsp;
-    memset(g_sound.ram, 0, SOUND_RAM_SIZE);
-    g_shle.booted = false;
-    g_shle.restart_at = 0;
-    g_shle.busy_until = g_shle.stall_until = 0;
-    g_shle.l2_free = 0;
-    g_shle.pass_left = SHLE_PASS_SAMPLES;
-    g_shle.boot_at = g_sound.m68k.cpu.cycles + SHLE_BOOT_CYCLES;
-    shle_sw8(0x400, 0x03);                              /* 18-bit DAC */
-    shle_sw8(0x401, 0x00);                              /* InitSCSP: master volume 0 while it sets up */
-    uint32_t dsp = shle_ml(0x608018u);                  /* DSP program 0 */
-    dsp += shle_mw(dsp + 2);
-    for (uint32_t k = 0; k < 0x500; k += 2) shle_sw16(0x700 + k, shle_mw(dsp + k));
+    shle_sw8(0x401, 0x00);                              /* master volume 0 while it sets up */
+    if (dsp_too) {
+        uint32_t dsp = shle_ml(0x608018u);              /* DSP program 0 */
+        dsp += shle_mw(dsp + 2);
+        for (uint32_t k = 0; k < 0x500; k += 2) shle_sw16(0x700 + k, shle_mw(dsp + k));
+    }
     shle_sw16(0x402, 0x138);                            /* the delay line: 0x70000, 64 KB */
     for (int k = 0; k < 4; k++)                         /* four reads of MIBUF: what waits in the FIFO is lost */
         if (s->mi_r != s->mi_w) { s->mi_r = (uint8_t)((s->mi_r + 1) & 31); s->mi_taken++; }
@@ -1661,6 +1978,10 @@ static void shle_boot(void) {
         shle_sw8(k * 0x20u + 0xD, 0xFF);
         shle_sw8(k * 0x20u + 0x0, 0x10);
     }
+}
+
+/* sub_60141E's last word to sub_601696: the driver's tables from the game's */
+static void shle_boot_tables(void) {
     SG8(0x1426, 0xEF);                                  /* sub_60141E */
     /* sub_601434: instrument library entry 0, its commands queued */
     uint32_t a1 = shle_ml(SHLE_P_INSLIB);
@@ -1687,36 +2008,57 @@ static void shle_boot(void) {
     uint32_t ins = shle_ml(SHLE_P_INSDATA);             /* CopyInsTable */
     uint32_t nins = (shle_ml(SHLE_P_MUSIC) - ins) & 0x7FFF;
     for (uint32_t k = 0; k < nins; k++) shle_wb(SHLE_INSTBL + k, shle_mb(ins + k));
+    g_shle.cost += nins * SHLE_COST_BYTE;
     for (uint32_t k = 0; k < 0x1000; k++) shle_wb(0x100 + k, shle_mb(0x600100u + k));   /* sub_601680 */
-    uint32_t a0 = shle_ml(SHLE_P_A7XTBL);               /* sub_601696 */
-    for (uint32_t k = 0; k < 16; k++) {
-        uint8_t d2 = shle_mb(a0 - 0x10 + k);
-        uint32_t a3 = a0 + shle_mw(a0 + 2 + d2 * 2u);
-        uint32_t r = SHLE_A6(0x1600) + k * 16u;
-        shle_wb(r + 1, d2);
-        shle_wb(r + 3, shle_mb(a3 + 2));
-        shle_wb(r + 4, shle_mb(a3 + 3));
-    }
+    shle_eng_init();
     SG8(0x1440, 0xCE);
     SG8(0x1441, 0xCE);
+}
+
+/* The driver from its entry point (reset, or the MIDI byte 0xFF), whose init
+ * routines are under way at clock period `at`; or the quick restart's. */
+static void shle_boot(uint64_t at, bool quick) {
+    if (quick) memset(g_sound.ram + SHLE_A6(0), 0, 0x3F00);   /* sub_60141E: the driver's own RAM */
+    else       memset(g_sound.ram, 0, SOUND_RAM_SIZE);
+    g_shle.booted = false;
+    g_shle.restart_at = 0;
+    g_shle.busy_until = g_shle.stall_until = 0;
+    g_shle.l2_free = 0;
+    g_shle.a_ack = g_shle.amask_from = g_shle.amask_until = 0;
+    g_shle.pass_left = SHLE_PASS_SAMPLES;
+    g_shle.pass_rem = 0;
+    g_shle.cost = 0;                                    /* the copies below that the game's data sizes */
+    if (!quick) shle_sw8(0x400, 0x03);                  /* 18-bit DAC */
+    shle_init_scsp(!quick);
+    shle_boot_tables();
+    sound_ctrl_w(&g_sound, 0x1Fu | g_shle_drv->bank);
+    g_shle.boot_at = at + g_shle.cost + (quick ? SHLE_QUICK_BOOT : SHLE_BOOT_CYCLES - SHLE_INIT_CYCLES);
 }
 
 /* Is this a driver the HLE knows? STF's program ROM, byte for byte where it
  * matters: the tables' pointer block and the three routines it would stand in
  * for. */
-static bool shle_driver_known(void) {
-    if (!g_sound.rom_loaded) return false;
-    static const uint8_t sig[] = { 0x00, 0x60, 0xA3, 0xFC, 0x00, 0x60, 0xC9, 0xE4, 0x00, 0x60, 0xA1, 0x94 };
-    if (memcmp(g_sound.rom + 0x8000, sig, sizeof sig) != 0) return false;
+static uint32_t shle_code_hash(void) {
     uint32_t h = 2166136261u;                            /* FNV-1a over the code */
     for (uint32_t a = 0x1000; a < 0x5000; a++) h = (h ^ g_sound.rom[a]) * 16777619u;
-    return h == 0x94FDE5EFu;
+    return h;
 }
 
-static uint32_t shle_code_hash(void) {
-    uint32_t h = 2166136261u;
-    for (uint32_t a = 0x1000; a < 0x5000; a++) h = (h ^ g_sound.rom[a]) * 16777619u;
-    return h;
+/* A build of the driver this port knows, picked by its code (and then
+ * g_shle_drv is it). The data is the game's own: everything the port reads
+ * of it goes through the header's pointers, which must point into the ROM. */
+static bool shle_driver_known(void) {
+    if (!g_sound.rom_loaded) return false;
+    uint32_t h = shle_code_hash();
+    for (size_t i = 0; i < sizeof k_shle_drvs / sizeof k_shle_drvs[0]; i++) {
+        if (k_shle_drvs[i].hash != h) continue;
+        if (k_shle_drvs[i].crx) { g_shle_drv = &k_shle_drvs[i]; return true; }
+        for (uint32_t p = SHLE_P_SMPTBL; p <= SHLE_P_VELOCITY; p += 4)
+            if ((shle_ml(p) >> 19) != (0x600000u >> 19)) return false;
+        g_shle_drv = &k_shle_drvs[i];
+        return true;
+    }
+    return false;
 }
 
 /* ---- the run ------------------------------------------------------------------------ */
@@ -1732,18 +2074,34 @@ static inline void shle_suspend(uint64_t at, uint32_t dur) {
 }
 
 /* When the timer due at d (1/16 periods) gets its handler: after the
- * interrupt latency, and not while a level 2 or 3 handler runs. */
+ * interrupt latency, and not while a level 2 or 3 handler runs. The SCSP
+ * shows the CPU one interrupt, the first pending of timer A, B, C, MIDI:
+ * a B or C that comes while A waits for its handler's acknowledge waits too. */
 static inline uint64_t shle_entry(uint64_t d) {
     uint64_t e = d / SHLE_T16 + SHLE_IRQ_LAT + ((SHLE_REFILL_WAIT * (uint64_t)g_shle.refill_frac) >> 16);
-    return e > g_shle.l2_free ? e : g_shle.l2_free;
+    if (e < g_shle.l2_free) e = g_shle.l2_free;
+    return e < g_shle.a_ack ? g_shle.a_ack : e;
 }
+
+/* Timer A's: the main loop runs a MIDI event's tracks with level 1 masked
+ * (loc_601A78, SR 0x2100), and an A that comes then waits for the end. */
+static inline uint64_t shle_entry_a(void) {
+    uint64_t e = shle_entry(g_shle.due_a);
+    return e >= g_shle.amask_from && e < g_shle.amask_until ? g_shle.amask_until : e;
+}
+
+/* B or C's entry e, behind an A that is pending by then (fa) but not taken
+ * till ea: the chip shows A first, so they go after it. */
+static inline uint64_t shle_behind_a(uint64_t e, uint64_t fa, uint64_t ea) {
+    return fa <= e && ea > e ? ea : e;
+}
+
+#include "sound_hle_crx.h"
 
 /* The driver's boot, at clock period `now`: false until it has come. */
 static bool shle_events_boot(uint64_t now) {
     if (g_shle.restart_at && now >= g_shle.restart_at) {
-        uint64_t boot_at = g_shle.boot_at;
-        shle_boot();
-        g_shle.boot_at = boot_at;
+        shle_boot(g_shle.restart_at, g_shle.quick);
     }
     if (now < g_shle.boot_at) return false;
     g_shle.booted = true;
@@ -1768,10 +2126,11 @@ static bool shle_events_midi(uint64_t now) {
         shle_suspend(now, SHLE_DUR_MIDI);
         if (!shle_midi_byte(b)) {                       /* 0xFF: the driver starts over */
             g_shle.booted = false;
-            g_shle.restart_at = now + SHLE_INIT_CYCLES;
-            g_shle.clear_at = now + SHLE_CLEAR_DELAY;
+            g_shle.quick = g_shle_drv->quick_restart;
+            g_shle.restart_at = now + (g_shle.quick ? SHLE_QUICK_INIT : SHLE_INIT_CYCLES);
+            g_shle.clear_at = g_shle.quick ? UINT64_MAX : now + SHLE_CLEAR_DELAY;   /* the quick one keeps the RAM */
             g_shle.cleared = 0;
-            g_shle.boot_at = now + SHLE_BOOT_CYCLES;
+            g_shle.boot_at = now + SHLE_BOOT_CYCLES;      /* until the routines know */
             return false;
         }
     }
@@ -1789,14 +2148,14 @@ static void shle_timer_done(uint64_t e, uint32_t base_dur) {
 /* Int2_Timer, timer B: the music. */
 static void shle_timer_b(uint64_t e) {
     g_shle.due_b = (e + SHLE_RELOAD_AT + shle_period(G8(0x1440), 0)) * SHLE_T16;
-    if (G8(0x1406) != 0xFF) { shle_fade(); shle_seq(SHLE_SEQS); }
+    if (shle_qcount() != g_shle_drv->qfull_b) { shle_fade(); shle_seq(SHLE_SEQS); }
     shle_timer_done(e, SHLE_DUR_B);
 }
 
 /* Timer C: the effects. */
 static void shle_timer_c(uint64_t e) {
     g_shle.due_c = (e + SHLE_RELOAD_AT + shle_period(G8(0x1441), 0)) * SHLE_T16;
-    if (G8(0x1406) != 0xFF)
+    if (shle_qcount() != g_shle_drv->qfull_c)
         for (uint32_t k = 1; k < 8; k++) shle_seq(SHLE_SEQS + k * 16u);
     shle_timer_done(e, SHLE_DUR_C);
 }
@@ -1804,17 +2163,19 @@ static void shle_timer_c(uint64_t e) {
 /* The timer handler whose turn has come by `now`, then the main loop's
  * dispatch: false when none has. */
 static bool shle_events_timer(uint64_t now) {
-    uint64_t eb = shle_entry(g_shle.due_b), ec = shle_entry(g_shle.due_c), ea = shle_entry(g_shle.due_a);
+    uint64_t fa = shle_entry(g_shle.due_a), ea = shle_entry_a();
+    uint64_t eb = shle_behind_a(shle_entry(g_shle.due_b), fa, ea), ec = shle_behind_a(shle_entry(g_shle.due_c), fa, ea);
     uint64_t e = eb;
     int which = 1;                                  /* B's bit is tested first */
     if (ec < e) { e = ec; which = 2; }
-    if (ea < e) { e = ea; which = 0; }
+    if (ea <= e) { e = ea; which = 0; }             /* ...but the chip shows A first */
     if (e > now) return false;
     g_shle.enq = 0;
     if (which == 1) shle_timer_b(e);
     else if (which == 2) shle_timer_c(e);
     else {                                          /* Interrupt1, timer A: releases */
         g_shle.due_a = (e + SHLE_RELOAD_AT_A + shle_period(0xC0, 3)) * SHLE_T16;
+        g_shle.a_ack = e + SHLE_ACK_A;
         shle_timer_a();
         shle_suspend(e, SHLE_DUR_A);
     }
@@ -1825,6 +2186,7 @@ static bool shle_events_timer(uint64_t now) {
 /* The board at clock period `now`: MIDI bytes, then any timer handler whose
  * turn has come, then the main loop's dispatch. */
 static void shle_events(uint64_t now) {
+    if (g_shle_drv->crx) { crx_events(now); return; }
     if (!g_shle.booted && !shle_events_boot(now)) return;
     if (!shle_events_midi(now)) return;
     for (int guard = 0; guard < 16 && shle_events_timer(now); guard++) {}
@@ -1832,11 +2194,12 @@ static void shle_events(uint64_t now) {
 }
 
 static inline uint64_t shle_next_due(void) {
+    if (g_shle_drv->crx) return crx_next_due();
     if (!g_shle.booted) return g_shle.restart_at && g_shle.restart_at < g_shle.boot_at ? g_shle.restart_at : g_shle.boot_at;
-    uint64_t d = shle_entry(g_shle.due_b), x = shle_entry(g_shle.due_c), y = shle_entry(g_shle.due_a);
+    uint64_t d = shle_entry(g_shle.due_b), x = shle_entry(g_shle.due_c), y = shle_entry_a();
     if (x < d) d = x;
     if (y < d) d = y;
-    if (G8(0x1406) && g_shle.busy_until < d) d = g_shle.busy_until;
+    if (shle_qcount() && g_shle.busy_until < d) d = g_shle.busy_until;
     return d;
 }
 
@@ -1846,23 +2209,31 @@ static void shle_clear_step(scsp_t *s, uint64_t now) {
     uint64_t to = (now - g_shle.clear_at) / SHLE_CLEAR_BYTE;
     if (to > SOUND_RAM_SIZE) to = SOUND_RAM_SIZE;
     if (to <= g_shle.cleared) return;
-    scsp_ram_touch(s, g_shle.cleared, (uint32_t)to - g_shle.cleared, 1);
+    if (g_ssyn.on) ssyn_ram_touch(g_shle.cleared, (uint32_t)to - g_shle.cleared);
+    else           scsp_ram_touch(s, g_shle.cleared, (uint32_t)to - g_shle.cleared, 1);
     memset(g_sound.ram + g_shle.cleared, 0, (uint32_t)to - g_shle.cleared);
     g_shle.cleared = (uint32_t)to;
 }
 
-/* The main loop's stream refills over the 32 slots, and their share of it. */
+/* The main loop's stream refills over the 32 slots, and their share of it.
+ * The refills make the pass longer: each chunk's copy adds its clock periods
+ * to the next pass (Dead or Alive's board, streaming 1125 chunks a second,
+ * passes every 61 samples, not 43). */
 static void shle_refill_pass(void) {
     g_shle.chunks = 0;
     for (unsigned k = 0; k < 32; k++) shle_stream_step(k);
+    uint32_t rc = g_shle.chunks * SHLE_CHUNK_CYCLES;
+    g_shle.pass_rem += rc;
+    g_shle.pass_left += g_shle.pass_rem / SOUND_CYCLES_PER_SAMPLE;
+    g_shle.pass_rem %= SOUND_CYCLES_PER_SAMPLE;
     /* this pass's share of the main loop in refills, into a running average */
-    uint64_t f = ((uint64_t)g_shle.chunks * SHLE_CHUNK_CYCLES << 16) / (SHLE_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE);
-    if (f > 0x10000u) f = 0x10000u;
+    uint64_t f = ((uint64_t)rc << 16) / (SHLE_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE + rc);
     g_shle.refill_frac = (uint32_t)((g_shle.refill_frac * 15u + f) / 16u);
 }
 
 /* The main loop's pass over the slots, every SHLE_PASS_SAMPLES samples. */
 static void shle_pass(scsp_t *s, uint64_t now) {
+    if (g_shle_drv->crx) { crx_pass(s, now); return; }
     g_shle.pass_left = SHLE_PASS_SAMPLES;
     shle_clear_step(s, now);
     if (g_shle.booted && now >= g_shle.stall_until) shle_refill_pass();
@@ -1883,20 +2254,24 @@ static void shle_run(uint32_t n) {
             next = shle_next_due();
         }
         if (--g_shle.pass_left == 0) shle_pass(s, now);
-        scsp_tick(s);
+        if (g_ssyn.on) ssyn_tick();
+        else           scsp_tick(s);
     }
-    scsp_sync(s);
+    if (g_ssyn.on) ssyn_flush();
+    else           scsp_sync(s);
 }
 
 /* Take the HLE for this board, or leave it: at a reset (sound_reset). */
 static inline void shle_reset(void) {
-    g_shle.on = g_sound_hle_want && shle_driver_known();
+    g_shle.on = (g_sound_hle_want || g_sound_synth_want) && shle_driver_known();
+    ssyn_reset(g_shle.on && g_sound_synth_want);
     g_shle.events = g_shle.keyons = g_shle.unknown = 0;
-    g_shle.warned_fm = g_shle.warned_a7x = false;
+    g_shle.warned_fm = false;
     /* The driver's init comes 0.4 s after reset (SHLE_INIT_CYCLES), as on the
      * board -- by then the host has also handed over the sample ROMs, which
      * the boot's preload copies from. */
-    g_shle.booted = false;
+    g_shle.booted = g_shle.quick = false;
+    if (g_shle.on && g_shle_drv->crx) { crx_restart(g_sound.m68k.cpu.cycles); return; }
     g_shle.restart_at = g_sound.m68k.cpu.cycles + SHLE_INIT_CYCLES;
     g_shle.clear_at = g_sound.m68k.cpu.cycles + SHLE_CLEAR_DELAY;
     g_shle.cleared = 0;

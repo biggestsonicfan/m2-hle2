@@ -64,18 +64,32 @@ press(in1, "P1 Kick", 8)
 after(1, function() say("picked at frame %d", frame); return 1 end)
 
 local last_sub, last_am, done, full = -1, -1, false, nil
-local function watch()
-    local sub = sp:read_u8(SUB)
-    if sp:read_u8(MODE) == 7 and sub <= 7 then sp:write_u8(STAGE_ID, 8) end
-    -- P1 keeps full energy, P2 is left 1, and the round clock is cut to a
-    -- second: the round goes to P1 on time, through the game's own judging
-    -- (an energy of 0 alone is not a KO; only a hit sets the down flag).
+-- P1 keeps full energy, P2 is left 1, and the round clock is cut to a
+-- second: the round goes to P1 on time, through the game's own judging
+-- (an energy of 0 alone is not a KO; only a hit sets the down flag).
+local function rig_round(sub)
     if sub == 8 then full = sp:read_u16(sp:read_u32(FA_ROB0) + ENERGY) end
     if sub == 9 and full then
         sp:write_u16(sp:read_u32(FA_ROB0) + ENERGY, full)
         sp:write_u16(sp:read_u32(FA_ROB1) + ENERGY, 1)
         if sp:read_i16(GAME_TIMER) > 60 then sp:write_u16(GAME_TIMER, 60) end
     end
+end
+
+-- In the cutscene (sub 33): a snapshot each time am_cntr reaches a multiple of EVERY.
+local function snap_cutscene()
+    local am = sp:read_u16(AM_CNTR)
+    if am ~= last_am and am % EVERY == 0 then
+        manager.machine.video:snapshot()
+        say("  snapshot am %d frame %d frame_counter %d random %08X", am, frame, sp:read_u32(FRAME), sp:read_u32(RANDOM))
+    end
+    last_am = am
+end
+
+local function watch()
+    local sub = sp:read_u8(SUB)
+    if sp:read_u8(MODE) == 7 and sub <= 7 then sp:write_u8(STAGE_ID, 8) end
+    rig_round(sub)
     if FIXRAND and sub >= 30 and sub <= 32 then sp:write_u32(RANDOM, RANDOM_SEED) end
     if sub ~= last_sub then
         say("sub %d at frame %d (frame_counter %d, mode %d, stage_num %d, am_cntr %d)", sub, frame,
@@ -83,14 +97,7 @@ local function watch()
         if last_sub == 33 then done = true end
         last_sub = sub
     end
-    if sub == 33 then
-        local am = sp:read_u16(AM_CNTR)
-        if am ~= last_am and am % EVERY == 0 then
-            manager.machine.video:snapshot()
-            say("  snapshot am %d frame %d frame_counter %d random %08X", am, frame, sp:read_u32(FRAME), sp:read_u32(RANDOM))
-        end
-        last_am = am
-    end
+    if sub == 33 then snap_cutscene() end
     if done then say("done"); log:close(); manager.machine:exit() end
 end
 

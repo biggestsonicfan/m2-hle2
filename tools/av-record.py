@@ -27,7 +27,7 @@ import argparse, os, socket, struct, subprocess, sys, time
 FPS = 60                      # the output grid; the board's nominal rate
 
 
-def main():
+def parse_args():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("output", help="the mp4 to write")
@@ -39,11 +39,11 @@ def main():
     ap.add_argument("--preset", default="veryfast")
     ap.add_argument("--keep-dc", action="store_true",
                     help="keep the board's DC offset instead of high-passing it out")
-    args = ap.parse_args()
+    return ap.parse_args()
 
-    s = socket.create_connection((args.host, args.port), timeout=15)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
-    s.settimeout(15)
+
+def reader(s):
+    """A function reading exactly n bytes off s into one reused buffer."""
     buf = bytearray(64 << 20)
     view = memoryview(buf)
 
@@ -55,7 +55,11 @@ def main():
                 raise EOFError("the emulator closed the stream")
             got += k
         return view[:n]
+    return rd
 
+
+def read_header(rd):
+    """The stream's 32-byte header: (width, height, nv12, rate)."""
     h = bytes(rd(32))
     if h[0:4] != b"M2AV":
         sys.exit("not an M2AV stream (got %r)" % h[0:4])
@@ -67,32 +71,19 @@ def main():
     if pixfmt not in (b"BGRA", b"NV12") or bits != 16 or channels != 2:
         sys.exit("unexpected format: pixfmt=%r %dch %dbit" % (pixfmt, channels, bits))
     print("m2av v%d: %dx%d %s, %d Hz 16-bit stereo" % (version, w, height, pixfmt.decode(), rate))
-    nv12 = pixfmt == b"NV12"
-    # NV12 is already BT.709 limited range, so it is tagged and passed through;
-    # BGRA is converted by ffmpeg below.
-    vbytes = w * height * 3 // 2 if nv12 else w * height * 4
-    colour = (["-color_primaries", "bt709", "-color_trc", "bt709",
-               "-colorspace", "bt709", "-color_range", "tv"] if nv12 else [])
+    return w, height, pixfmt == b"NV12", rate
 
-    tmp_v = args.output + ".video.mp4"
-    tmp_a = args.output + ".audio.raw"
-    vproc = subprocess.Popen(
-        [args.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-         "-f", "rawvideo", "-pix_fmt", "nv12" if nv12 else "bgra", *colour,
-         "-s", "%dx%d" % (w, height),
-         "-r", str(FPS), "-i", "pipe:0",
-         "-an", "-c:v", "libx264", "-preset", args.preset, "-crf", args.crf,
-         "-pix_fmt", "yuv420p", tmp_v],
-        stdin=subprocess.PIPE)
-    af = open(tmp_a, "wb")
 
+def pump(rd, vproc, af, seconds, rate):
+    """Copy the stream to the encoder and the audio file for `seconds`;
+    (pictures, dropped, frames emitted)."""
     origin = None       # the sample this recording starts at
     emitted = 0         # constant-rate frames written out
     held = None         # newest picture received
     pictures = dropped = 0
     t0 = time.time()
     try:
-        while time.time() - t0 < args.seconds:
+        while time.time() - t0 < seconds:
             typ, flags, _r, size, frame, sample = struct.unpack("<BBHIQQ", bytes(rd(24)))
             payload = bytes(rd(size))
             if origin is None:
@@ -115,6 +106,51 @@ def main():
         if held is not None and emitted == 0:
             vproc.stdin.write(held)
             emitted += 1
+    return pictures, dropped, emitted
+
+
+def mux(args, tmp_v, tmp_a, rate):
+    """The video and the raw audio into args.output."""
+    # The board's output carries a DC offset (~5000/32768 in STF, from the DSP
+    # path; MAME's WAV has the same one). A real cabinet's amplifier is
+    # AC-coupled, so take it out here rather than in the emulator, which keeps
+    # its samples exactly as the board made them. See CLAUDE.md, "Sound board".
+    cmd = [args.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+           "-i", tmp_v,
+           "-f", "s16le", "-ar", str(rate), "-ac", "2", "-i", tmp_a]
+    if not args.keep_dc:
+        cmd += ["-af", "highpass=f=5"]
+    cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", args.output]
+    subprocess.check_call(cmd)
+
+
+def main():
+    args = parse_args()
+    s = socket.create_connection((args.host, args.port), timeout=15)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+    s.settimeout(15)
+    rd = reader(s)
+    w, height, nv12, rate = read_header(rd)
+    # NV12 is already BT.709 limited range, so it is tagged and passed through;
+    # BGRA is converted by ffmpeg below.
+    vbytes = w * height * 3 // 2 if nv12 else w * height * 4
+    colour = (["-color_primaries", "bt709", "-color_trc", "bt709",
+               "-colorspace", "bt709", "-color_range", "tv"] if nv12 else [])
+
+    tmp_v = args.output + ".video.mp4"
+    tmp_a = args.output + ".audio.raw"
+    vproc = subprocess.Popen(
+        [args.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "rawvideo", "-pix_fmt", "nv12" if nv12 else "bgra", *colour,
+         "-s", "%dx%d" % (w, height),
+         "-r", str(FPS), "-i", "pipe:0",
+         "-an", "-c:v", "libx264", "-preset", args.preset, "-crf", args.crf,
+         "-pix_fmt", "yuv420p", tmp_v],
+        stdin=subprocess.PIPE)
+    af = open(tmp_a, "wb")
+    try:
+        pictures, dropped, emitted = pump(rd, vproc, af, args.seconds, rate)
+    finally:
         vproc.stdin.close()
         vproc.wait()
         af.close()
@@ -126,17 +162,7 @@ def main():
           % (pictures, dropped, emitted, FPS, emitted / float(FPS),
              samples, samples / float(rate)))
 
-    # The board's output carries a DC offset (~5000/32768 in STF, from the DSP
-    # path; MAME's WAV has the same one). A real cabinet's amplifier is
-    # AC-coupled, so take it out here rather than in the emulator, which keeps
-    # its samples exactly as the board made them. See CLAUDE.md, "Sound board".
-    mux = [args.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-           "-i", tmp_v,
-           "-f", "s16le", "-ar", str(rate), "-ac", "2", "-i", tmp_a]
-    if not args.keep_dc:
-        mux += ["-af", "highpass=f=5"]
-    mux += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", args.output]
-    subprocess.check_call(mux)
+    mux(args, tmp_v, tmp_a, rate)
     os.remove(tmp_v)
     os.remove(tmp_a)
     print("wrote", args.output)

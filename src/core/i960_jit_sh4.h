@@ -457,8 +457,7 @@ static int32_t ibj_slow(uint32_t ea, uint32_t i) {
     ibj_catch_up(i);
 #define IB_SYNC() do { cpu->sfr.ip = o->ip; bus->cpu_ip = o->ip; s_ibj.bus_idx = (int)i; cpu->sfr.ac = ac; \
         cpu->cycles = base + (c - (o->cyc & 0x7FFu));                                            \
-        g_irqt.pending += (irqt_count_t)(uint32_t)(cpu->cycles - s_timer_cycles_seen);           \
-        s_timer_cycles_seen = cpu->cycles; cpu->cycles = base + c; slow = true; } while (0)
+        g_irqt_seen = cpu->cycles; irqt_sync(); cpu->cycles = base + c; slow = true; } while (0)
 #define IB_RD(sz)  (M2_UNLIKELY(!MEM_PAGE(bus->rd_page, ea) || (ea & 0xFFFFu) > 0x10000u - (sz)))
 #define IB_WR(sz)  (M2_UNLIKELY(!MEM_PAGE(bus->wr_page, ea) || (ea & 0xFFFFu) > 0x10000u - (sz)))
 #define IB_STORED(ls) do { bus->cpu_ip = o->ip; s_ibj.bus_idx = s_ibj.mw_idx = (int)i;            \

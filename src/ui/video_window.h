@@ -30,10 +30,12 @@
 
 #include "sokol_gfx.h"
 
+#include "cabinet_picture.h"   /* the Picture menu's cabinet: its colour tables */
 #include "constants.h"
 #include "game_render.h"   /* game_render_glsl */
 #include "memory.h"
 #include "tile_renderer.h"
+#include "fbvram.h"
 
 /* Tile RAM words the compositor reads, one R16UI texel each: the four tilemaps
  * (words 0x0000-0x3FFF), their per-line H scroll tables (0x4000 + 0x200*t, 384
@@ -98,6 +100,14 @@ typedef struct {
     uint16_t      tile_words[VIDEO_TILE_WORDS];
     bool          targets_valid;
     uint64_t      partial_composes, composed_blocks;
+
+    /* The frame buffer in test mode (board/fbvram.h), drawn in the 3D layer's
+     * place; fb_gen / fb_lut are what fb_image shows. */
+    sg_image      fb_image;
+    sg_view       fb_view;
+    uint8_t       fb_pixels[VIDEO_WIDTH * VIDEO_HEIGHT * VIDEO_BPP];
+    bool          fb_valid;
+    uint32_t      fb_gen, fb_lut, fb_sync;
 } video_state_t;
 
 /* ---- GPU compositor shaders ------------------------------------------------ */
@@ -286,6 +296,10 @@ static inline void video_init(video_state_t *vid) {
         .texture.image = vid->bg_image, .label = "game-bg-view" });
     vid->fg_view = sg_make_view(&(sg_view_desc){
         .texture.image = vid->fg_image, .label = "game-fg-view" });
+    vid->fb_image = video__make_img("game-fb");
+    vid->fb_view = sg_make_view(&(sg_view_desc){
+        .texture.image = vid->fb_image, .label = "game-fb-view" });
+    vid->fb_valid = false;
 
     /* 1×1 solid back-back colour texture, stretched over the view by the quad. */
     memset(vid->back_pixel, 0, sizeof(vid->back_pixel));
@@ -328,6 +342,8 @@ static inline void video_shutdown(video_state_t *vid) {
     sg_destroy_view(vid->bg_view);
     sg_destroy_view(vid->fg_view);
     sg_destroy_view(vid->back_view);
+    sg_destroy_view(vid->fb_view);
+    sg_destroy_image(vid->fb_image);
     sg_destroy_sampler(vid->sampler);
     sg_destroy_image(vid->bg_image);
     sg_destroy_image(vid->fg_image);
@@ -474,17 +490,53 @@ static inline void video__compose_gpu(video_state_t *vid, memory_bus_t *bus,
     vid->targets_valid = true;
     vid->gpu_composes++;
 }
+
+/* The CPU's compose: the layers drawn into bg_pixels / fg_pixels and uploaded. */
+static inline void video__compose_cpu(video_state_t *vid, memory_bus_t *bus,
+                                      bool tile_changed, bool gfx_changed, bool pens_changed) {
+    /* Only what changed is drawn again, and a frame that changes no
+     * pixel uploads nothing (tile_compose_cpu). */
+    if (tile_compose_cpu(&vid->cpu, bus, (const uint8_t (*)[32])vid->pen_chan, gfx_changed,
+                         tile_changed, pens_changed, vid->bg_pixels, vid->fg_pixels)) {
+        sg_update_image(vid->bg_image, &(sg_image_data){
+            .mip_levels[0] = { .ptr = vid->bg_pixels, .size = sizeof(vid->bg_pixels) },
+        });
+        sg_update_image(vid->fg_image, &(sg_image_data){
+            .mip_levels[0] = { .ptr = vid->fg_pixels, .size = sizeof(vid->fg_pixels) },
+        });
+    }
+}
 /*
  * Bring the back colour, BG and FG layer textures up to date with the bus.
  * Call once per frame before the swapchain pass.
  */
+/* The frame buffer layer, while the screen shows it: composed again when the
+ * buffer, the colour tables or the CRTC offsets changed. */
+static inline void video__update_fb(video_state_t *vid, memory_bus_t *bus) {
+    if (!fbvram_shown(bus)) return;
+    uint32_t gen = g_fbvram_gen, lut = bus->gen_lut + cabinet_picture_gen();
+    uint32_t sync = mem_read16(bus, H_SYNC_BASE) | mem_read16(bus, V_SYNC_BASE) << 16;
+    if (vid->fb_valid && gen == vid->fb_gen && lut == vid->fb_lut && sync == vid->fb_sync) return;
+    uint8_t chan[3][32];
+    video_pen_channels_xlat(cabinet_picture_xlat(bus), chan);
+    fbvram_compose(bus, (const uint8_t (*)[32])chan, vid->fb_pixels);
+    sg_update_image(vid->fb_image, &(sg_image_data){
+        .mip_levels[0] = { .ptr = vid->fb_pixels, .size = sizeof(vid->fb_pixels) } });
+    vid->fb_valid = true;
+    vid->fb_gen = gen;
+    vid->fb_lut = lut;
+    vid->fb_sync = sync;
+}
+
 static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
     if (!vid->initialized) return;
+    video__update_fb(vid, bus);
 
     /* Nothing 2D changed since the last compose: the layers and the uploaded
      * textures already show it. Sample the generations before composing, so a
      * write that lands mid-compose makes the next frame compose again. */
-    uint32_t tile = bus->gen_tile, gfx = bus->gen_gfx, pal = bus->gen_pal, lut = bus->gen_lut;
+    uint32_t tile = bus->gen_tile, gfx = bus->gen_gfx, pal = bus->gen_pal,
+             lut = bus->gen_lut + cabinet_picture_gen();
     bool first = !vid->composed;
     if (!first && tile == vid->composed_tile && gfx == vid->composed_gfx &&
             pal == vid->composed_pal && lut == vid->composed_lut)
@@ -497,22 +549,12 @@ static inline void video_update(video_state_t *vid, memory_bus_t *bus) {
     vid->composed_gfx  = gfx;
     vid->composed_pal  = pal;
     vid->composed_lut  = lut;
-    if (pens_changed) video_pen_channels(bus, vid->pen_chan);
+    if (pens_changed) video_pen_channels_xlat(cabinet_picture_xlat(bus), vid->pen_chan);
 
     if (vid->gpu) {
         video__compose_gpu(vid, bus, tile_changed, gfx_changed, pens_changed);
     } else {
-        /* Only what changed is drawn again, and a frame that changes no
-         * pixel uploads nothing (tile_compose_cpu). */
-        if (tile_compose_cpu(&vid->cpu, bus, (const uint8_t (*)[32])vid->pen_chan, gfx_changed,
-                             tile_changed, pens_changed, vid->bg_pixels, vid->fg_pixels)) {
-            sg_update_image(vid->bg_image, &(sg_image_data){
-                .mip_levels[0] = { .ptr = vid->bg_pixels, .size = sizeof(vid->bg_pixels) },
-            });
-            sg_update_image(vid->fg_image, &(sg_image_data){
-                .mip_levels[0] = { .ptr = vid->fg_pixels, .size = sizeof(vid->fg_pixels) },
-            });
-        }
+        video__compose_cpu(vid, bus, tile_changed, gfx_changed, pens_changed);
     }
 
     /* 1×1 solid back-back colour (palette[0] through the pen tables); only the

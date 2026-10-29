@@ -74,40 +74,46 @@ static void print_range(uint32_t at, uint32_t n) {
     printf("\n");
 }
 
-int main(int argc, char **argv) {
-    if (!mem_init(&bus, NULL, 0)) { printf("mem_init failed\n"); return 1; }
+/* --crc: make_crc of a block. */
+static int cmd_crc(const char *hex) {
+    uint8_t blk[0x20];
+    if (!hexbytes(hex, blk, sizeof blk)) { fprintf(stderr, "bad hex\n"); return 2; }
+    printf("%04X\n", sfight_make_crc(blk, sizeof blk));
+    return 0;
+}
 
-    if (argc == 3 && strcmp(argv[1], "--crc") == 0) {
-        uint8_t blk[0x20];
-        if (!hexbytes(argv[2], blk, sizeof blk)) { fprintf(stderr, "bad hex\n"); return 2; }
-        printf("%04X\n", sfight_make_crc(blk, sizeof blk));
-        return 0;
+/* --apply: the function on a bus holding a block, and every write it made. */
+static int cmd_apply(char **argv) {
+    uint8_t blk[SFIGHT_SETTINGS_LEN], s[8];
+    if (!hexbytes(argv[2], blk, sizeof blk) || !hexbytes(argv[3], s, 8)) {
+        fprintf(stderr, "bad hex\n"); return 2;
     }
-    if (argc == 5 && strcmp(argv[1], "--apply") == 0) {
-        uint8_t blk[SFIGHT_SETTINGS_LEN], s[8];
-        if (!hexbytes(argv[2], blk, sizeof blk) || !hexbytes(argv[3], s, 8)) {
-            fprintf(stderr, "bad hex\n"); return 2;
-        }
-        load_block(blk);
-        sfight_apply_menu_settings(&bus, s, atoi(argv[4]));
-        print_range(SFIGHT_SETTINGS_BACKUP, SFIGHT_SETTINGS_LEN);
-        print_range(SFIGHT_SETTINGS_WORK, SFIGHT_SETTINGS_LEN);
-        print_range(SFIGHT_SETTINGS_CRC, 2);
-        print_range(SFIGHT_BARRIER_DEFAULT, 4);
-        print_range(SFIGHT_ROUND_TIME, 1);
-        return 0;
-    }
+    load_block(blk);
+    sfight_apply_menu_settings(&bus, s, atoi(argv[4]));
+    print_range(SFIGHT_SETTINGS_BACKUP, SFIGHT_SETTINGS_LEN);
+    print_range(SFIGHT_SETTINGS_WORK, SFIGHT_SETTINGS_LEN);
+    print_range(SFIGHT_SETTINGS_CRC, 2);
+    print_range(SFIGHT_BARRIER_DEFAULT, 4);
+    print_range(SFIGHT_ROUND_TIME, 1);
+    return 0;
+}
 
-    uint8_t f[SFIGHT_SETTINGS_LEN], w[SFIGHT_SETTINGS_LEN], k[SFIGHT_SETTINGS_LEN];
-    factory_block(f);
+/* The factory block, and the work and backup copies read back. */
+static uint8_t f[SFIGHT_SETTINGS_LEN], w[SFIGHT_SETTINGS_LEN], k[SFIGHT_SETTINGS_LEN];
 
-    /* CRC-16/XMODEM check value, and the ROM's own: after a cold USA boot the
-     * board holds 0x1D03302 = the CRC of the factory block's first 0x20 bytes
-     * (0x4842, read off a running board over the MCP bridge). */
+/* The non-default arcade set, the Extra test's too. */
+static const uint8_t hard[8] = { 3, 1, 0, 0, 3, 4, 0, 3 };
+
+/* CRC-16/XMODEM check value, and the ROM's own: after a cold USA boot the
+ * board holds 0x1D03302 = the CRC of the factory block's first 0x20 bytes
+ * (0x4842, read off a running board over the MCP bridge). */
+static void test_crc(void) {
     CHECK(sfight_make_crc((const uint8_t *)"123456789", 9) == 0x31C3, "make_crc is CRC-16/XMODEM");
     CHECK(sfight_make_crc(f, 0x20) == 0x4842, "make_crc of the factory block = the ROM's crc_value_bk 0x4842");
+}
 
-    /* Arcade defaults: the factory block but for AUTOMATIC (b4) turned on. */
+/* Arcade defaults: the factory block but for AUTOMATIC (b4) turned on. */
+static void test_arcade_defaults(void) {
     load_block(f);
     sfight_apply_menu_settings(&bus, (const uint8_t *)&SFIGHT_MENU_DEFAULT_ARCADE, 0);
     read_block(SFIGHT_SETTINGS_WORK, w);
@@ -120,9 +126,10 @@ int main(int argc, char **argv) {
     CHECK(mem_read32(&bus, SFIGHT_BARRIER_DEFAULT) == 5 && mem_read8(&bus, SFIGHT_ROUND_TIME) == 30,
           "barrier_default_num 5, time 30");
     CHECK(mem_read16(&bus, SFIGHT_SETTINGS_CRC) == sfight_make_crc(w, 0x20), "crc_value_bk matches block");
+}
 
-    /* Non-default arcade: Hardest, 5 rounds, 10 s, +3, 1 barrier, type D. */
-    const uint8_t hard[8] = { 3, 1, 0, 0, 3, 4, 0, 3 };
+/* Non-default arcade: Hardest, 5 rounds, 10 s, +3, 1 barrier, type D. */
+static void test_arcade_hard(void) {
     load_block(f);
     sfight_apply_menu_settings(&bus, hard, 0);
     read_block(SFIGHT_SETTINGS_WORK, w);
@@ -132,8 +139,10 @@ int main(int argc, char **argv) {
     CHECK(w[0x13] == (0x80 | 0x40 | 0x10 | 0x08), "arcade: flags REAL damage, hyper off, auto, barrier reset (0x%02X)", w[0x13]);
     CHECK(w[0x18] == 1 && mem_read32(&bus, SFIGHT_BARRIER_DEFAULT) == 1, "arcade: 1 barrier");
     CHECK(mem_read8(&bus, SFIGHT_ROUND_TIME) == 10, "arcade: time 10");
+}
 
-    /* Versus leaves 1P rounds, rank and 1P energy as they were. */
+/* Versus leaves 1P rounds, rank and 1P energy as they were. */
+static void test_versus(void) {
     const uint8_t vs[8] = { 3, 1, 0, 3, 2, 0, 9, 1 };
     load_block(f);
     sfight_apply_menu_settings(&bus, vs, 1);
@@ -142,8 +151,10 @@ int main(int argc, char **argv) {
     CHECK(w[0x01] == 4 && w[0x04] == 0 && w[0x11] == 9 && w[0x18] == 10, "versus: VS rounds 4, energy 0, 99 s, 10 barriers");
     CHECK(w[0x13] == (0x40 | 0x10), "versus: type B flags 0x50");
     CHECK(mem_read8(&bus, SFIGHT_ROUND_TIME) == 99, "versus: time 99");
+}
 
-    /* Extra 1 / 2: the cabinet keeps Hard, the AI table is ours. */
+/* Extra 1 / 2: the cabinet keeps Hard, the AI table is ours. */
+static void test_extra(void) {
     const uint8_t extra[8] = { 5, 1, 0, 1, 0, 1, 4, 0 };
     load_block(f);
     sfight_apply_menu_settings(&bus, extra, 0);
@@ -152,14 +163,32 @@ int main(int argc, char **argv) {
     load_block(f);
     sfight_apply_menu_settings(&bus, hard, 0);
     CHECK(g_enemy_rank == -1, "arcade: Hardest gives the table back to the cabinet");
+}
 
-    /* Out of range falls back to index 0, as on the PS3. */
+/* Out of range falls back to index 0, as on the PS3. */
+static void test_junk(void) {
     const uint8_t junk[8] = { 9, 0, 0, 7, 7, 7, 77, 7 };
     load_block(f);
     sfight_apply_menu_settings(&bus, junk, 0);
     read_block(SFIGHT_SETTINGS_WORK, w);
     CHECK(w[0x00] == 2 && w[0x02] == 1 && w[0x04] == 0 && w[0x11] == 0 && w[0x18] == 1 && w[0x13] == 0x10,
           "out-of-range indices fall back");
+}
+
+int main(int argc, char **argv) {
+    if (!mem_init(&bus, NULL, 0)) { printf("mem_init failed\n"); return 1; }
+
+    if (argc == 3 && strcmp(argv[1], "--crc") == 0) return cmd_crc(argv[2]);
+    if (argc == 5 && strcmp(argv[1], "--apply") == 0) return cmd_apply(argv);
+
+    factory_block(f);
+
+    test_crc();
+    test_arcade_defaults();
+    test_arcade_hard();
+    test_versus();
+    test_extra();
+    test_junk();
 
     printf(g_fail ? "%d FAILED\n" : "all passed\n", g_fail);
     return g_fail ? 1 : 0;

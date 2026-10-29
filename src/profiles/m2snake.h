@@ -121,7 +121,8 @@ static const game_profile_t m2snake_profile = {
             [GAME_INPUT_P1_B3]    = 0x00000400,
             [GAME_INPUT_P1_START] = 0x00000010,
             [GAME_INPUT_P2_START] = 0x00000020,
-            [GAME_INPUT_SERVICE]  = 0x00000004,
+            [GAME_INPUT_TEST]     = 0x00000004,   /* the test switch, as MAME's IN0 */
+            [GAME_INPUT_SERVICE]  = 0x00000008,
             [GAME_INPUT_P1_COIN]  = 0x00000001,
             [GAME_INPUT_P2_COIN]  = 0x00000002,
         },

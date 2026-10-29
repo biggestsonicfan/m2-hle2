@@ -380,57 +380,94 @@ def cmd_fix(src, dst):
     print(f'{dst}: tempo {TIMER_B / RATE * 1e3:.4f} ms a tick, MIDI channel {DRUM_SWAP[0] + 1} -> {DRUM_SWAP[1] + 1}')
 
 
+def note_levels(pairs):
+    """(channel, program, board - MIDI dB) per paired note. The driver's TL is
+    0.375 dB a step; the decoder wrote velocity and volume on a 40 log10 curve,
+    so the MIDI says the same attenuation in dB."""
+    return [(n['ch'], n['prog'], e['tl'] * 0.375 - 40 * math.log10(127 / n['vel'])
+             - 40 * math.log10(127 / max(n['vol'], 1)) - 40 * math.log10(127 / max(n['expr'], 1)))
+            for n, e in pairs]
+
+
+def note_lengths(pairs, r):
+    """(channel, held within 20 ms of the MIDI length) per paired note that has both."""
+    return [(n['ch'], abs(e['held'] - n['dur'] * r) < 0.02) for n, e in pairs
+            if math.isfinite(n['dur']) and math.isfinite(e['held'])]
+
+
+def print_audio(s, board_dir, wav_dir, t0, r, off, span):
+    rw = os.path.join(wav_dir, f'SONG_{s:02X}.wav')
+    if os.path.exists(rw):
+        band, env, chroma, rms = audio(os.path.join(board_dir, f'song{s:02X}.wav'), rw, t0, r, off, span)
+        print(f'  | {env:.3f} {chroma:.3f}  ' + ' '.join(f'{v:+5.1f}' for v in band), end='')
+
+
+def notes_in_span(mn, on, r, off, span):
+    """How many MIDI notes (on the board's clock) and board key-ons fall
+    before span."""
+    nm = sum(1 for n in mn if n['t'] * r + off < span)
+    nb = sum(1 for e in on if e['t'] < span)
+    return nm, nb
+
+
+def grade_song(s, mid_dir, board_dir, wav_dir, secs):
+    """One song's row. Returns its (song, channel, length ok) and (song, channel,
+    program, dB) lists, or None when either side has no notes."""
+    mn = midi_notes(os.path.join(mid_dir, f'SONG_{s:02X}.MID'))
+    on, t0 = board_capture(os.path.join(board_dir, f'song{s:02X}'), s)
+    if not mn or not on:
+        return None
+    r, off, sc, med = fit(onsets([n['t'] for n in mn]), onsets([e['t'] for e in on]))
+    # M2MidiDec plays a song's loop twice (-l); the board loops for ever
+    span = min(secs, on[-1]['t'] + 0.5, mn[-1]['t'] * r + off + 0.5)
+    nm, nb = notes_in_span(mn, on, r, off, span)
+    p = pitch_agreement(mn, on, r, off, span)
+    pairs = clean_pairs(mn, on, r, off, span)
+    lens = [(s, ch, ok) for ch, ok in note_lengths(pairs, r)]
+    lok = np.mean([ok for *_, ok in lens]) if lens else float('nan')
+    lv = note_levels(pairs)
+    sd = np.std([v[2] for v in lv]) if lv else float('nan')
+    print(f'{s:02X}  {nm:6d} {nb:6d}  {r:.4f}  {sc * 100:5.1f}%  {med * 1000:5.2f}  {p * 100:5.1f}%  '
+          f'{lok * 100:5.1f}%  {len(lv):5d}  {sd:4.1f}', end='')
+    if wav_dir:
+        print_audio(s, board_dir, wav_dir, t0, r, off, span)
+    print(flush=True)
+    return lens, [(s,) + v for v in lv]
+
+
+def print_lengths(lens_all):
+    bad = collections.Counter((s, ch) for s, ch, ok in lens_all if not ok)
+    print(f'\nnote lengths within 20 ms: {np.mean([ok for *_, ok in lens_all]) * 100:.1f}% of '
+          f'{len(lens_all)} lone notes; the misses by (song, MIDI channel 1-16): '
+          + ', '.join(f'{s:02X}/{ch + 1}: {n}' for (s, ch), n in bad.most_common(8)))
+
+
+def print_levels(lvl_all):
+    med = np.median([v[3] for v in lvl_all])
+    g = collections.defaultdict(list)
+    for s, ch, prog, d in lvl_all:
+        g[(s, ch, prog)].append(d - med)
+    rows = sorted(((np.median(v), k, len(v)) for k, v in g.items() if len(v) >= 5), key=lambda x: -abs(x[0]))
+    print(f'levels: board TL = MIDI + {med:.1f} dB (median over {len(lvl_all)} lone notes); '
+          f'{sum(1 for x in rows if abs(x[0]) < 1)} of {len(rows)} (song, channel, program) groups within 1 dB. '
+          'Furthest: ' + ', '.join(f'{k[0]:02X}/{k[1] + 1}/{k[2]} {v:+.1f}' for v, k, n in rows[:6]))
+
+
 def cmd_grade(mid_dir, board_dir, wav_dir, secs, songs):
     print('song  notes midi/board  rate    onsets  err ms  pitch   lengths  levels  sd dB', end='')
     if wav_dir:
         print('  | env   chroma  band dB board-render ' + ' '.join(f'{a}-{b}' for a, b in BANDS), end='')
     print()
-    tot_len = tot_lvl = None
     lens_all, lvl_all = [], []
     for s in songs:
-        mn = midi_notes(os.path.join(mid_dir, f'SONG_{s:02X}.MID'))
-        on, t0 = board_capture(os.path.join(board_dir, f'song{s:02X}'), s)
-        if not mn or not on:
-            continue
-        r, off, sc, med = fit(onsets([n['t'] for n in mn]), onsets([e['t'] for e in on]))
-        # M2MidiDec plays a song's loop twice (-l); the board loops for ever
-        span = min(secs, on[-1]['t'] + 0.5, mn[-1]['t'] * r + off + 0.5)
-        nm = sum(1 for n in mn if n['t'] * r + off < span)
-        nb = sum(1 for e in on if e['t'] < span)
-        p = pitch_agreement(mn, on, r, off, span)
-        pairs = clean_pairs(mn, on, r, off, span)
-        ln = [(n, e) for n, e in pairs if math.isfinite(n['dur']) and math.isfinite(e['held'])]
-        lok = np.mean([abs(e['held'] - n['dur'] * r) < 0.02 for n, e in ln]) if ln else float('nan')
-        lens_all += [(s, n['ch'], abs(e['held'] - n['dur'] * r) < 0.02) for n, e in ln]
-        # levels: the driver's TL is 0.375 dB a step; the decoder wrote velocity and
-        # volume on a 40 log10 curve, so the MIDI says the same attenuation in dB
-        lv = [(n['ch'], n['prog'], e['tl'] * 0.375 - 40 * math.log10(127 / n['vel'])
-               - 40 * math.log10(127 / max(n['vol'], 1)) - 40 * math.log10(127 / max(n['expr'], 1)))
-              for n, e in pairs]
-        lvl_all += [(s,) + v for v in lv]
-        sd = np.std([v[2] for v in lv]) if lv else float('nan')
-        print(f'{s:02X}  {nm:6d} {nb:6d}  {r:.4f}  {sc * 100:5.1f}%  {med * 1000:5.2f}  {p * 100:5.1f}%  '
-              f'{lok * 100:5.1f}%  {len(lv):5d}  {sd:4.1f}', end='')
-        if wav_dir:
-            rw = os.path.join(wav_dir, f'SONG_{s:02X}.wav')
-            if os.path.exists(rw):
-                band, env, chroma, rms = audio(os.path.join(board_dir, f'song{s:02X}.wav'), rw, t0, r, off, span)
-                print(f'  | {env:.3f} {chroma:.3f}  ' + ' '.join(f'{v:+5.1f}' for v in band), end='')
-        print(flush=True)
+        got = grade_song(s, mid_dir, board_dir, wav_dir, secs)
+        if got:
+            lens_all += got[0]
+            lvl_all += got[1]
     if lens_all:
-        bad = collections.Counter((s, ch) for s, ch, ok in lens_all if not ok)
-        print(f'\nnote lengths within 20 ms: {np.mean([ok for *_, ok in lens_all]) * 100:.1f}% of '
-              f'{len(lens_all)} lone notes; the misses by (song, MIDI channel 1-16): '
-              + ', '.join(f'{s:02X}/{ch + 1}: {n}' for (s, ch), n in bad.most_common(8)))
+        print_lengths(lens_all)
     if lvl_all:
-        med = np.median([v[3] for v in lvl_all])
-        g = collections.defaultdict(list)
-        for s, ch, prog, d in lvl_all:
-            g[(s, ch, prog)].append(d - med)
-        rows = sorted(((np.median(v), k, len(v)) for k, v in g.items() if len(v) >= 5), key=lambda x: -abs(x[0]))
-        print(f'levels: board TL = MIDI + {med:.1f} dB (median over {len(lvl_all)} lone notes); '
-              f'{sum(1 for x in rows if abs(x[0]) < 1)} of {len(rows)} (song, channel, program) groups within 1 dB. '
-              'Furthest: ' + ', '.join(f'{k[0]:02X}/{k[1] + 1}/{k[2]} {v:+.1f}' for v, k, n in rows[:6]))
+        print_levels(lvl_all)
 
 
 def pitch_rows(mn, on, r, off, span, roots):

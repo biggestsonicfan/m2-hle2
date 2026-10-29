@@ -9,6 +9,8 @@
  *   1 makes it sync every sample, the old lockstep cost)
  *   $ROMDIR (else $ROMS_DIR): directory with sfight.zip and schamp.zip
  *   $SND_HLE=1: the sound driver in C instead of on the 68000 (sound_hle.h)
+ *   $SND_SYNTH=1: the driver in C and its voices in C, no SCSP slots (sound_synth.h)
+ *   $SCSP_EXACT=1: the DSP every sample instead of skipped while quiet (scsp.h, "A quiet DSP")
  */
 #define NDEBUG 1
 #include "test_rom_dir.h"
@@ -32,16 +34,11 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 
 typedef struct { uint64_t t; uint8_t b; } midi_t;
 
-int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: snd_bench <mame-capture-prefix> [seconds] [dsp_iters]\n"); return 2; }
-    double seconds = argc > 2 ? atof(argv[2]) : 30.0;
-    long dsp_iters = argc > 3 ? atol(argv[3]) : 400000;
-    uint64_t run = argc > 4 ? strtoull(argv[4], NULL, 10) : 735;
-    if (!run) run = 1;
-    const char *romdir = test_rom_dir();
-
+/* The MIDI bytes of the capture PREFIX.bin (its writes to the UART's data
+ * port), in *MIDI and *NMIDI; 1 if it cannot be read. */
+static int load_midi(const char *prefix, midi_t **midi_out, size_t *nmidi_out) {
     char path[1024];
-    snprintf(path, sizeof path, "%s.bin", argv[1]);
+    snprintf(path, sizeof path, "%s.bin", prefix);
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
     fseek(f, 0, SEEK_END); long nbytes = ftell(f); fseek(f, 0, SEEK_SET);
@@ -56,18 +53,13 @@ int main(int argc, char **argv) {
         if ((r[0] >> 24) == 1 && (r[0] & 0xFFFFFF) == 0x9C0000) { midi[nmidi].t = r[2]; midi[nmidi].b = (uint8_t)r[1]; nmidi++; }
     }
     free(rec);
+    *midi_out = midi;
+    *nmidi_out = nmidi;
+    return 0;
+}
 
-    static romset_t rs;
-    char child[1024], parent[1024];
-    snprintf(child, sizeof child, "%s/sfight.zip", romdir);
-    snprintf(parent, sizeof parent, "%s/schamp.zip", romdir);
-    if (sfight_load(&rs, child, parent) != 0 || !rs.audiocpu || !rs.samples) { fprintf(stderr, "ROM load failed (%s)\n", romdir); return 1; }
-    if (getenv("SND_HLE")) g_sound_hle_want = atoi(getenv("SND_HLE"));   /* the driver in C (sound_hle.h) */
-    sound_reset();
-    sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
-    sound_load_samples(rs.samples, (uint32_t)rs.samples_size);
-
-    /* 1. The whole board, as the emulator runs it. */
+/* 1. The whole board, as the emulator runs it. */
+static void bench_board(const midi_t *midi, size_t nmidi, double seconds, uint64_t run) {
     uint64_t total = (uint64_t)(seconds * SOUND_RATE), h_out = FNV0;
     size_t next = 0;
     double t0 = now_s();
@@ -87,13 +79,18 @@ int main(int argc, char **argv) {
     uint64_t h_ram = fnv(FNV0, s->ram, s->ram_size);
     printf("board: %.2f s of sound in %.3f s  = %.2fx real time\n", seconds, t_board, seconds / t_board);
     printf("hash out %016llx  ram %016llx  dsp steps %d\n", (unsigned long long)h_out, (unsigned long long)h_ram, s->dsp.last_step);
+    printf("quiet DSP: %llu of %llu samples skipped%s\n", (unsigned long long)g_scsp_dsp_skipped,
+           (unsigned long long)s->samples, g_scsp_exact ? " (SCSP_EXACT)" : "");
     printf("lazy chip: %llu full syncs, %llu slots run ahead alone, delay line [%05X, %05X)\n",
            (unsigned long long)s->syncs, (unsigned long long)s->catches, s->dsp_lo, s->dsp_hi);
+}
 
-    /* 2. The DSP alone, from the state the board reached. Its delay line is in
-     * sound RAM, so this runs on the live state; nothing below is run again. */
+/* 2. The DSP alone, from the state the board reached. Its delay line is in
+ * sound RAM, so this runs on the live state; nothing below is run again. */
+static void bench_dsp(long dsp_iters) {
+    scsp_t *s = &g_sound.scsp;
     uint64_t h_ef = FNV0;
-    t0 = now_s();
+    double t0 = now_s();
     for (long i = 0; i < dsp_iters; i++) {
         s->dsp.mixs[i & 15] = (int32_t)((i * 2654435761u) >> 12) & 0xFFFFF;   /* something to mix */
         scsp_dsp_step(s);
@@ -104,6 +101,35 @@ int main(int argc, char **argv) {
     printf("dsp:   %ld steps-of-program in %.3f s = %.1f ns each (%.1f ns per microcode step)\n",
            dsp_iters, t_dsp, t_dsp * 1e9 / dsp_iters, t_dsp * 1e9 / dsp_iters / (s->dsp.last_step ? s->dsp.last_step : 1));
     printf("hash efreg %016llx  dsp-state %016llx\n", (unsigned long long)h_ef, (unsigned long long)h_dsp);
+}
+
+int main(int argc, char **argv) {
+    g_sound_hle_want = 0;   /* the board unless SND_HLE=1 */
+    if (argc < 2) { fprintf(stderr, "usage: snd_bench <mame-capture-prefix> [seconds] [dsp_iters]\n"); return 2; }
+    double seconds = argc > 2 ? atof(argv[2]) : 30.0;
+    long dsp_iters = argc > 3 ? atol(argv[3]) : 400000;
+    uint64_t run = argc > 4 ? strtoull(argv[4], NULL, 10) : 735;
+    if (!run) run = 1;
+    const char *romdir = test_rom_dir();
+
+    midi_t *midi;
+    size_t nmidi;
+    if (load_midi(argv[1], &midi, &nmidi)) return 1;
+
+    static romset_t rs;
+    char child[1024], parent[1024];
+    snprintf(child, sizeof child, "%s/sfight.zip", romdir);
+    snprintf(parent, sizeof parent, "%s/schamp.zip", romdir);
+    if (sfight_load(&rs, child, parent) != 0 || !rs.audiocpu || !rs.samples) { fprintf(stderr, "ROM load failed (%s)\n", romdir); return 1; }
+    if (getenv("SND_HLE")) g_sound_hle_want = atoi(getenv("SND_HLE"));
+    if (getenv("SND_SYNTH")) g_sound_synth_want = atoi(getenv("SND_SYNTH"));   /* the voices in C too (sound_synth.h) */
+    if (getenv("SCSP_EXACT")) g_scsp_exact = atoi(getenv("SCSP_EXACT"));   /* the DSP every sample (scsp.h, "A quiet DSP") */   /* the driver in C (sound_hle.h) */
+    sound_reset();
+    sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
+    sound_load_samples(rs.samples, (uint32_t)rs.samples_size);
+
+    bench_board(midi, nmidi, seconds, run);
+    bench_dsp(dsp_iters);
     romset_free(&rs);
     return 0;
 }

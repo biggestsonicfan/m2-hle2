@@ -203,9 +203,9 @@ function pct(a, b) { return b ? `${(100 * a / b).toFixed(2)}%` : 'n/a'; }
  * matters. Where one surface is emitted more than once (a decal is a surface's
  * own faces again) the copies are paired whichever way agrees best.
  */
-function gradeTexture(ours, theirs) {
-    const out = { corners: 0, cornersExact: 0, cornersWrapped: 0 };
-    if (!theirs) return out;
+/* The explorer's triangles by their corner positions' key, each with its
+ * corners' texture coordinates, tile and fill flags. */
+function theirTris(theirs) {
     const byKey = new Map();
     const tp = theirs.positions;
     for (let t = 0; t < tp.length / 9; t++) {
@@ -221,6 +221,32 @@ function gradeTexture(ours, theirs) {
             flags: theirs.flags[t * 3] & FILL_FLAGS,
         });
     }
+    return byKey;
+}
+
+/* The unused candidate that agrees best with our corners and tile. */
+function bestCandidate(cands, mine, tile) {
+    let best = null, bestScore = -1;
+    for (const c of cands) {
+        if (c.used) continue;
+        const s = scoreCorners(mine, tile, c);
+        const score = s.exact * 2 + (sameTile(tile, c.tile) ? 1 : 0);
+        if (score > bestScore) { best = c; bestScore = score; }
+    }
+    return best;
+}
+
+/* Count a paired face's fill flags as the same or as which differ. */
+function tallyFlags(fl, there) {
+    if (fl === there) { tex.flagsSame++; return; }
+    const k = `${fl} here, ${there} there`;
+    tex.flagsDiffer.set(k, (tex.flagsDiffer.get(k) ?? 0) + 1);
+}
+
+function gradeTexture(ours, theirs) {
+    const out = { corners: 0, cornersExact: 0, cornersWrapped: 0 };
+    if (!theirs) return out;
+    const byKey = theirTris(theirs);
 
     for (let t = 0; t < ours.tris.length / 9; t++) {
         const cands = byKey.get(triKey(ours.tris, t));
@@ -231,22 +257,11 @@ function gradeTexture(ours, theirs) {
         }));
         const tile = Array.from(ours.tiles.subarray(t * 4, t * 4 + 4));
 
-        let best = null, bestScore = -1;
-        for (const c of cands) {
-            if (c.used) continue;
-            const s = scoreCorners(mine, tile, c);
-            const score = s.exact * 2 + (sameTile(tile, c.tile) ? 1 : 0);
-            if (score > bestScore) { best = c; bestScore = score; }
-        }
+        const best = bestCandidate(cands, mine, tile);
         if (!best) continue;
         best.used = true;
         tex.faces++;
-        const fl = ours.flags[t] & FILL_FLAGS;
-        if (fl === best.flags) tex.flagsSame++;
-        else {
-            const k = `${fl} here, ${best.flags} there`;
-            tex.flagsDiffer.set(k, (tex.flagsDiffer.get(k) ?? 0) + 1);
-        }
+        tallyFlags(ours.flags[t] & FILL_FLAGS, best.flags);
 
         const hereTex = tile[2] > 0, thereTex = best.tile[2] > 0;
         if (hereTex && thereTex) tex.texturedBoth++;

@@ -50,6 +50,71 @@ static uint32_t interesting(void) {
     return (b + (rnd() % 32)) & 0xFFFFFF;
 }
 
+/* A scenario's sound RAM: random, dense in the fast forms, or the driver's
+ * own words, with every vector into RAM code. */
+static void scenario_ram(int sc) {
+    for (uint32_t i = 0x400; i < SOUND_RAM_SIZE; i++) g_sound.ram[i] = (uint8_t)rnd();
+    /* half the scenarios run mostly real instructions: RAM seeded with
+     * words from the driver's own ROM */
+    if (sc % 3 == 2)                                /* dense in the fast forms */
+        for (uint32_t i = 0x400; i < SOUND_RAM_SIZE; i += 2) {
+            uint32_t w, k = rnd() % 10, r1 = rnd() & 7, r2 = rnd() & 7;
+            switch (k) {
+            case 0: w = 0x4EFA; break;
+            case 1: w = 0x6000 | (rnd() % 16) << 8; w |= rnd() % 4 ? rnd() & 0xFF : 0; break;
+            case 2: w = 0x1010 | r1 << 9 | r2; break;
+            case 3: w = 0x1168 | r1 << 9 | r2; break;
+            case 4: w = 0xD0FC | r1 << 9; break;
+            case 5: w = 0xE098 | r1 << 9 | r2; break;
+            default: w = rnd() & 0xFFFF; break;      /* extension words and anything else */
+            }
+            g_sound.ram[i] = (uint8_t)(w >> 8); g_sound.ram[i + 1] = (uint8_t)w;
+        }
+    else if (sc & 1)
+        for (uint32_t i = 0x400; i < SOUND_RAM_SIZE; i += 2) {
+            uint32_t o = (rnd() % (M68K_ROM_SIZE / 2)) * 2;
+            g_sound.ram[i] = g_sound.rom[o]; g_sound.ram[i + 1] = g_sound.rom[o + 1];
+        }
+    for (uint32_t v = 0; v < 0x100; v++) {          /* every vector into RAM code */
+        uint32_t t = (0x400 + (rnd() % (SOUND_RAM_SIZE - 0x800))) & ~1u;
+        g_sound.ram[v * 4] = 0; g_sound.ram[v * 4 + 1] = (uint8_t)(t >> 16);
+        g_sound.ram[v * 4 + 2] = (uint8_t)(t >> 8); g_sound.ram[v * 4 + 3] = (uint8_t)t;
+    }
+}
+
+/* The 68000's registers and the SCSP's interrupt set-up. */
+static void scenario_cpu(m68k_cpu_t *c) {
+    for (int i = 0; i < 8; i++) c->d[i] = rnd() & 1 ? rnd32() : interesting();
+    for (int i = 0; i < 7; i++) c->a[i] = interesting();
+    c->a[7] = c->ssp = 0x40000 + (rnd() & 0x3FFFC);
+    c->usp = 0x20000 + (rnd() & 0x1FFFC);
+    c->pc = (0x400 + (rnd() % (SOUND_RAM_SIZE - 0x800))) & ~1u;
+    c->sr = (uint16_t)(0x2000 | (rnd() & 0x071F));
+    c->halted = c->stopped = 0;
+    scsp_write(&g_sound.scsp, 0x424, (uint16_t)rnd(), 2);   /* interrupt levels */
+    scsp_write(&g_sound.scsp, 0x41E, (uint16_t)rnd(), 2);   /* and enables */
+}
+
+/* SAMPLES of the board, RUN at a time: the samples (when more than one),
+ * the registers, the PC, SR and clocks, and the last sample. */
+static void scenario_run(m68k_cpu_t *c, int samples, uint32_t run) {
+    for (int n = 0; n < samples && !c->halted; n++) {
+        if (rnd() % 64 == 0) scsp_midi_in(&g_sound.scsp, (uint8_t)rnd());
+        if (rnd() % 256 == 0) { int r = (int)(rnd() % 7); c->a[r] = interesting(); }   /* keep aiming at the edges */
+        uint32_t w0 = g_sound.out_w;
+        sound_run(run);
+        n += run - 1;
+        if (run > 1)
+            for (uint32_t w = w0; w != g_sound.out_w; w = (w + 1) & (SOUND_OUT_FRAMES - 1))
+                put((uint32_t)(uint16_t)g_sound.out[w * 2] | (uint32_t)(uint16_t)g_sound.out[w * 2 + 1] << 16);
+        g_sound.out_r = g_sound.out_w;
+        uint32_t h = 0x811C9DC5u;
+        for (int i = 0; i < 8; i++) { h = (h ^ c->d[i]) * 16777619u; h = (h ^ c->a[i]) * 16777619u; }
+        put(h); put(c->pc); put(c->sr); put((uint32_t)c->cycles);
+        put((uint32_t)(uint16_t)g_sound.out[((g_sound.out_w - 1) & (SOUND_OUT_FRAMES - 1)) * 2]);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: m68k_fuzz <out-file> [scenarios] [samples]\n"); return 2; }
     out = fopen(argv[1], "wb");
@@ -57,6 +122,7 @@ int main(int argc, char **argv) {
     int scenarios = argc > 2 ? atoi(argv[2]) : 600;
     int samples = argc > 3 ? atoi(argv[3]) : 3000;
     uint32_t run = argc > 4 ? (uint32_t)atoi(argv[4]) : 1;
+    if (getenv("SCSP_EXACT")) g_scsp_exact = atoi(getenv("SCSP_EXACT"));   /* the DSP every sample (scsp.h, "A quiet DSP") */
     if (run < 1) run = 1;
     const char *romdir = test_rom_dir();
     char child[1024], parent[1024];
@@ -71,58 +137,10 @@ int main(int argc, char **argv) {
     for (int sc = 0; sc < scenarios; sc++) {
         rs = 0x85EBCA6Bu * (uint32_t)(sc + 1);
         sound_reset();
-        for (uint32_t i = 0x400; i < SOUND_RAM_SIZE; i++) g_sound.ram[i] = (uint8_t)rnd();
-        /* half the scenarios run mostly real instructions: RAM seeded with
-         * words from the driver's own ROM */
-        if (sc % 3 == 2)                                /* dense in the fast forms */
-            for (uint32_t i = 0x400; i < SOUND_RAM_SIZE; i += 2) {
-                uint32_t w, k = rnd() % 10, r1 = rnd() & 7, r2 = rnd() & 7;
-                switch (k) {
-                case 0: w = 0x4EFA; break;
-                case 1: w = 0x6000 | (rnd() % 16) << 8; w |= rnd() % 4 ? rnd() & 0xFF : 0; break;
-                case 2: w = 0x1010 | r1 << 9 | r2; break;
-                case 3: w = 0x1168 | r1 << 9 | r2; break;
-                case 4: w = 0xD0FC | r1 << 9; break;
-                case 5: w = 0xE098 | r1 << 9 | r2; break;
-                default: w = rnd() & 0xFFFF; break;      /* extension words and anything else */
-                }
-                g_sound.ram[i] = (uint8_t)(w >> 8); g_sound.ram[i + 1] = (uint8_t)w;
-            }
-        else if (sc & 1)
-            for (uint32_t i = 0x400; i < SOUND_RAM_SIZE; i += 2) {
-                uint32_t o = (rnd() % (M68K_ROM_SIZE / 2)) * 2;
-                g_sound.ram[i] = g_sound.rom[o]; g_sound.ram[i + 1] = g_sound.rom[o + 1];
-            }
-        for (uint32_t v = 0; v < 0x100; v++) {          /* every vector into RAM code */
-            uint32_t t = (0x400 + (rnd() % (SOUND_RAM_SIZE - 0x800))) & ~1u;
-            g_sound.ram[v * 4] = 0; g_sound.ram[v * 4 + 1] = (uint8_t)(t >> 16);
-            g_sound.ram[v * 4 + 2] = (uint8_t)(t >> 8); g_sound.ram[v * 4 + 3] = (uint8_t)t;
-        }
+        scenario_ram(sc);
         m68k_cpu_t *c = &g_sound.m68k.cpu;
-        for (int i = 0; i < 8; i++) c->d[i] = rnd() & 1 ? rnd32() : interesting();
-        for (int i = 0; i < 7; i++) c->a[i] = interesting();
-        c->a[7] = c->ssp = 0x40000 + (rnd() & 0x3FFFC);
-        c->usp = 0x20000 + (rnd() & 0x1FFFC);
-        c->pc = (0x400 + (rnd() % (SOUND_RAM_SIZE - 0x800))) & ~1u;
-        c->sr = (uint16_t)(0x2000 | (rnd() & 0x071F));
-        c->halted = c->stopped = 0;
-        scsp_write(&g_sound.scsp, 0x424, (uint16_t)rnd(), 2);   /* interrupt levels */
-        scsp_write(&g_sound.scsp, 0x41E, (uint16_t)rnd(), 2);   /* and enables */
-        for (int n = 0; n < samples && !c->halted; n++) {
-            if (rnd() % 64 == 0) scsp_midi_in(&g_sound.scsp, (uint8_t)rnd());
-            if (rnd() % 256 == 0) { int r = (int)(rnd() % 7); c->a[r] = interesting(); }   /* keep aiming at the edges */
-            uint32_t w0 = g_sound.out_w;
-            sound_run(run);
-            n += run - 1;
-            if (run > 1)
-                for (uint32_t w = w0; w != g_sound.out_w; w = (w + 1) & (SOUND_OUT_FRAMES - 1))
-                    put((uint32_t)(uint16_t)g_sound.out[w * 2] | (uint32_t)(uint16_t)g_sound.out[w * 2 + 1] << 16);
-            g_sound.out_r = g_sound.out_w;
-            uint32_t h = 0x811C9DC5u;
-            for (int i = 0; i < 8; i++) { h = (h ^ c->d[i]) * 16777619u; h = (h ^ c->a[i]) * 16777619u; }
-            put(h); put(c->pc); put(c->sr); put((uint32_t)c->cycles);
-            put((uint32_t)(uint16_t)g_sound.out[((g_sound.out_w - 1) & (SOUND_OUT_FRAMES - 1)) * 2]);
-        }
+        scenario_cpu(c);
+        scenario_run(c, samples, run);
         halts += c->halted != 0;
         cyc += c->cycles;
         uint32_t h = 0x811C9DC5u;

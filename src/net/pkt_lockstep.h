@@ -204,6 +204,27 @@ static inline void pkt_lockstep_stop(pkt_lockstep_t *p) {
     p->state = PKT_OFF;
 }
 
+/* Joiner only: the host's hello, which starts the round or turns this core away. */
+static inline void pkt_lockstep_on_hello(pkt_lockstep_t *p, const lockstep_header_t *h, const void *buf, size_t len) {
+    if (p->is_host || len < sizeof(pkt_hello_t)) return;
+    pkt_hello_t hello;
+    memcpy(&hello, buf, sizeof hello);
+    if (hello.magic != PKT_HELLO_MAGIC || hello.version != PKT_HELLO_VERSION) {
+        pkt_lockstep_end(p, "the host runs an incompatible core version");
+        return;
+    }
+    if (hello.game_tag != p->game_tag) {
+        pkt_lockstep_end(p, "the host is running a different game");
+        return;
+    }
+    p->have_peer   = true;
+    p->peer_id     = 0;
+    p->frame_delay = hello.frame_delay;
+    p->generation  = h->generation & 0x1Fu;
+    pkt_begin_round(p);
+    pkt_note(p, "Netplay: joined as player 2 (input delay %u) - both boards restart now", p->frame_delay);
+}
+
 static inline void pkt_lockstep_receive(pkt_lockstep_t *p, const void *buf, size_t len, uint64_t now_ms) {
     if (len < sizeof(lockstep_header_t) || p->state == PKT_OFF || p->state == PKT_ENDED) return;
     lockstep_header_t h;
@@ -211,23 +232,7 @@ static inline void pkt_lockstep_receive(pkt_lockstep_t *p, const void *buf, size
     p->last_peer_ms = now_ms;
 
     if (h.type == PKT_PACKET_HELLO) {
-        if (p->is_host || len < sizeof(pkt_hello_t)) return;
-        pkt_hello_t hello;
-        memcpy(&hello, buf, sizeof hello);
-        if (hello.magic != PKT_HELLO_MAGIC || hello.version != PKT_HELLO_VERSION) {
-            pkt_lockstep_end(p, "the host runs an incompatible core version");
-            return;
-        }
-        if (hello.game_tag != p->game_tag) {
-            pkt_lockstep_end(p, "the host is running a different game");
-            return;
-        }
-        p->have_peer   = true;
-        p->peer_id     = 0;
-        p->frame_delay = hello.frame_delay;
-        p->generation  = h.generation & 0x1Fu;
-        pkt_begin_round(p);
-        pkt_note(p, "Netplay: joined as player 2 (input delay %u) - both boards restart now", p->frame_delay);
+        pkt_lockstep_on_hello(p, &h, buf, len);
         return;
     }
     if (h.session != p->game_tag) return;
@@ -243,6 +248,35 @@ static inline void pkt_lockstep_receive(pkt_lockstep_t *p, const void *buf, size
             p->peer_check_frame[idx] = pkt.check_frame;
             p->peer_check_value[idx] = pkt.check_value;
         }
+    }
+}
+
+/* This player's input for the frame frame_delay ahead, sent once; the
+ * session's first frames go out neutral before it. */
+static inline void pkt_lockstep_send_input(pkt_lockstep_t *p, uint32_t local) {
+    /* Service and test belong to the cabinet: only player 0 may send them. */
+    if (p->local_player != 0) local &= 0x3FFu;
+    uint32_t send_frame = p->frame + p->ls.frame_delay;
+    if (p->ls.last_local_frame == LOCKSTEP_INVALID_FRAME || send_frame > p->ls.last_local_frame) {
+        /* The first frames of a session have no input from anyone yet: fill them
+         * with a neutral pad, as netplay_seed_delay_frames does, or frame 0
+         * waits for a sample that was never going to be taken. */
+        lockstep_input_packet_t pkt;
+        if (p->ls.last_local_frame == LOCKSTEP_INVALID_FRAME) {
+            for (uint32_t f = 0; f < p->ls.frame_delay; f++) {
+                memset(&pkt, 0, sizeof pkt);
+                pkt_header(p, &pkt.header, LOCKSTEP_PACKET_INPUT);
+                pkt.check_frame = LOCKSTEP_NO_CHECK;
+                lockstep_submit_local(&p->ls, f, 0, &pkt.record);
+                p->send(&pkt, sizeof pkt, p->send_ud);
+            }
+        }
+        memset(&pkt, 0, sizeof pkt);
+        pkt_header(p, &pkt.header, LOCKSTEP_PACKET_INPUT);
+        pkt.check_frame = p->last_check_frame;
+        pkt.check_value = p->last_check_value;
+        lockstep_submit_local(&p->ls, send_frame, local, &pkt.record);
+        p->send(&pkt, sizeof pkt, p->send_ud);
     }
 }
 
@@ -268,31 +302,7 @@ static inline pkt_step_t pkt_lockstep_begin_frame(pkt_lockstep_t *p, uint32_t lo
         return PKT_STEP_RESET;
     }
 
-    /* Service and test belong to the cabinet: only player 0 may send them. */
-    if (p->local_player != 0) local &= 0x3FFu;
-    uint32_t send_frame = p->frame + p->ls.frame_delay;
-    if (p->ls.last_local_frame == LOCKSTEP_INVALID_FRAME || send_frame > p->ls.last_local_frame) {
-        /* The first frames of a session have no input from anyone yet: fill them
-         * with a neutral pad, as netplay_seed_delay_frames does, or frame 0
-         * waits for a sample that was never going to be taken. */
-        lockstep_input_packet_t pkt;
-        if (p->ls.last_local_frame == LOCKSTEP_INVALID_FRAME) {
-            for (uint32_t f = 0; f < p->ls.frame_delay; f++) {
-                memset(&pkt, 0, sizeof pkt);
-                pkt_header(p, &pkt.header, LOCKSTEP_PACKET_INPUT);
-                pkt.check_frame = LOCKSTEP_NO_CHECK;
-                lockstep_submit_local(&p->ls, f, 0, &pkt.record);
-                p->send(&pkt, sizeof pkt, p->send_ud);
-            }
-        }
-        memset(&pkt, 0, sizeof pkt);
-        pkt_header(p, &pkt.header, LOCKSTEP_PACKET_INPUT);
-        pkt.check_frame = p->last_check_frame;
-        pkt.check_value = p->last_check_value;
-        lockstep_submit_local(&p->ls, send_frame, local, &pkt.record);
-        p->send(&pkt, sizeof pkt, p->send_ud);
-    }
-
+    pkt_lockstep_send_input(p, local);
     if (!lockstep_ready(&p->ls, p->frame)) {
         if (p->stall_since_ms == 0) {
             p->stall_since_ms = now_ms;

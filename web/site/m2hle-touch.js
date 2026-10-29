@@ -466,8 +466,6 @@ const m2hleTouch = (() => {
       $('touch-vibrate').addEventListener('change', (e) => { cfg.vibrate = e.target.checked; save(); });
     }
     $('touch-customize').addEventListener('click', () => edit(true));
-    /* On a phone this is what the panel is for; a controller comes second. */
-    if (touchSeen) $('controls').insertBefore($('touch-section'), $('pad-section'));
 
     /* The editor. Settings apply as the sliders move and are saved when it closes. */
     $('te-size').addEventListener('input', (e) => { cfg.size = e.target.value / 100; render(); });

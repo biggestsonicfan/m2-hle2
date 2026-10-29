@@ -376,7 +376,7 @@ export async function startGateway(userConfig = {}, log = defaultLog) {
     res.end('not found\n');
   });
 
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20, perMessageDeflate: false });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false });
 
   server.on('upgrade', (req, socket, head) => {
     const path = (req.url || '').split('?')[0];

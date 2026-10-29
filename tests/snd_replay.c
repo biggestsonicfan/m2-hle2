@@ -13,6 +13,9 @@
  *   writes <out>.bin/.ram.bin/.regs.bin/.json and <out>.wav (44.1 kHz stereo)
  *   $ROMDIR (else $ROMS_DIR): directory with sfight.zip and schamp.zip
  *     (default: the claude_mame oracle's roms)
+ *   $SND_SET: another game's board instead, a directory of region images
+ *     (m2hle --export-roms; only audiocpu.bin and samples.bin are read)
+ *   $SND_RAM_BASE: the .ram.bin dump's first address (default 0x1000)
  */
 #define NDEBUG 1
 #include "test_rom_dir.h"
@@ -48,12 +51,9 @@ static void wav_header(FILE *f, uint32_t frames) {
     fwrite("data", 1, 4, f); fwrite(&data, 4, 1, f);
 }
 
-int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: snd_replay <mame-capture-prefix> <out-prefix> [seconds]\n"); return 2; }
-    const char *in = argv[1], *out = argv[2];
-    double seconds = argc > 3 ? atof(argv[3]) : 0.0;
-    const char *romdir = test_rom_dir();
-
+/* The capture IN.bin: its record count, its last clock period and its MIDI
+ * bytes (the i960's writes to the UART's data port); 1 if it cannot be read. */
+static int load_midi(const char *in, midi_t **midi_out, size_t *nmidi_out, size_t *nrec_out, uint64_t *t_last_out) {
     char path[1024];
     snprintf(path, sizeof path, "%s.bin", in);
     FILE *f = fopen(path, "rb");
@@ -75,25 +75,35 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < nrec; i++) {
         uint32_t *r = rec + i * 4;
         if (r[2] > t_last) t_last = r[2];
-        if ((r[0] >> 24) == 1 && (r[0] & 0xFFFFFF) == 0x9C0000) {
+        /* the UART's data port: 0x9C0000 on a 2B, 0x01C80000 on a 2A or 2C (24 bits kept) */
+        if ((r[0] >> 24) == 1 && ((r[0] & 0xFFFFFF) == 0x9C0000 || (r[0] & 0xFFFFFF) == 0xC80000)) {
             midi[nmidi].t = r[2];
             midi[nmidi].b = (uint8_t)r[1];
             nmidi++;
         }
     }
     free(rec);
-    uint64_t total = seconds > 0 ? (uint64_t)(seconds * SOUND_RATE) : (t_last >> 8) + 1;
-    printf("capture: %zu records, %zu MIDI bytes, %.2f s; replaying %.2f s\n",
-           nrec, nmidi, (double)t_last / 11289600.0, (double)total / SOUND_RATE);
+    *midi_out = midi;
+    *nmidi_out = nmidi;
+    *nrec_out = nrec;
+    *t_last_out = t_last;
+    return 0;
+}
 
-    static romset_t rs;
+static romset_t rs;
+
+/* The sound board from power-on, and the $SND_TRACE trace; 1 without the ROMs. */
+static int load_board(const char *romdir) {
     char child[1024], parent[1024];
     snprintf(child, sizeof child, "%s/sfight.zip", romdir);
     snprintf(parent, sizeof parent, "%s/schamp.zip", romdir);
-    if (sfight_load(&rs, child, parent) != 0 || !rs.audiocpu || !rs.samples) {
-        fprintf(stderr, "ROM load failed (%s)\n", romdir); return 1;
+    const char *set = getenv("SND_SET");
+    if ((set ? romset_load_dir(&rs, set) : sfight_load(&rs, child, parent)) != 0 || !rs.audiocpu || !rs.samples) {
+        fprintf(stderr, "ROM load failed (%s)\n", set ? set : romdir); return 1;
     }
     if (getenv("SND_HLE")) g_sound_hle_want = atoi(getenv("SND_HLE"));
+    if (getenv("SND_SYNTH")) g_sound_synth_want = atoi(getenv("SND_SYNTH"));   /* the voices in C too (sound_synth.h) */
+    if (getenv("SCSP_EXACT")) g_scsp_exact = atoi(getenv("SCSP_EXACT"));   /* the DSP every sample (scsp.h, "A quiet DSP") */
     sound_reset();
     sound_load_rom(rs.audiocpu, (uint32_t)rs.audiocpu_size);
     sound_load_samples(rs.samples, (uint32_t)rs.samples_size);
@@ -103,7 +113,13 @@ int main(int argc, char **argv) {
         s_trace_to   = (uint64_t)(atof(getenv("SND_TRACE_TO")   ? getenv("SND_TRACE_TO")   : "1e9") * 11289600.0);
         if (s_trace) g_sound_step_trace = trace_step;
     }
+    return 0;
+}
 
+/* OUT's capture files and its WAV, the capture started; 1 if one cannot be
+ * written. */
+static int open_outputs(const char *out, uint64_t total, uint32_t (**marks_out)[4], FILE **wav_out) {
+    char path[1024];
     const uint32_t frames_per_mark = SOUND_RATE * 1000u / 57524u;   /* MAME's 57.524 Hz frames */
     uint32_t nmarks_cap = (uint32_t)(total / frames_per_mark) + 4;
     uint32_t (*marks)[4] = calloc(nmarks_cap, sizeof *marks);
@@ -113,10 +129,19 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof path, "%s.wav", out);      FILE *wav      = fopen(path, "wb");
     if (!marks || !g_sndcap.f || !g_sndcap.ramf || !g_sndcap.regsf || !wav) { fprintf(stderr, "cannot write %s.*\n", out); return 1; }
     g_sndcap.marks = marks;
+    if (getenv("SND_RAM_BASE")) g_sndcap.ram_base = (uint32_t)strtoul(getenv("SND_RAM_BASE"), NULL, 0);
     g_sndcap.want = nmarks_cap;
     g_sndcap.active = 1;
     wav_header(wav, 0);
+    *marks_out = marks;
+    *wav_out = wav;
+    return 0;
+}
 
+/* TOTAL samples of the board, the MIDI fed at its samples and the audio into
+ * WAV; the MIDI bytes fed. */
+static size_t replay(const midi_t *midi, size_t nmidi, uint64_t total, FILE *wav) {
+    const uint32_t frames_per_mark = SOUND_RATE * 1000u / 57524u;   /* MAME's 57.524 Hz frames */
     size_t next = 0;
     uint32_t mark = 0;
     int16_t block[4096 * 2];
@@ -141,12 +166,11 @@ int main(int argc, char **argv) {
         if (nblock == 4096) { fwrite(block, 2, nblock * 2, wav); nblock = 0; }
     }
     if (nblock) fwrite(block, 2, nblock * 2, wav);
-    uint32_t n = g_sndcap.n, nm = g_sndcap.nmarks;
-    sndcap_stop();
-    fseek(wav, 0, SEEK_SET);
-    wav_header(wav, (uint32_t)total);
-    fclose(wav);
+    return next;
+}
 
+static void write_json(const char *out, uint32_t (*marks)[4], uint32_t n, uint32_t nm) {
+    char path[1024];
     snprintf(path, sizeof path, "%s.json", out);
     FILE *m = fopen(path, "w");
     fprintf(m, "{\"source\":\"replay-snd\",\"records\":%u,\"ram_base\":4096,\"ram_size\":16384,\"regs_words\":536,\"marks\":[", n);
@@ -154,14 +178,48 @@ int main(int argc, char **argv) {
         fprintf(m, "%s[%u,%u,%u,%u]", i ? "," : "", marks[i][0], marks[i][1], marks[i][2], marks[i][3]);
     fprintf(m, "]}\n");
     fclose(m);
+}
 
+static void report(uint32_t n, uint32_t nm, size_t next) {
     if (g_shle.on) printf("sound HLE: %llu events, %llu key-ons, %llu unknown\n",
                           (unsigned long long)g_shle.events, (unsigned long long)g_shle.keyons, (unsigned long long)g_shle.unknown);
     if (g_shle.on) printf("sound HLE: %llu refill chunks\n", (unsigned long long)g_shle.chunks_total);
     else if (g_sound_hle_want) printf("sound HLE: driver not known (code hash %08X); the board ran\n", shle_code_hash());
+    if (g_ssyn.on) printf("sound synth: %llu samples, %llu key-ons\n", (unsigned long long)g_ssyn.samples, (unsigned long long)g_ssyn.keyons);
     printf("replayed: %u records, %u marks; 68000 pc 0x%06X; irqs L1 %llu L2 %llu L3 %llu; midi fed %zu\n",
            n, nm, g_sound.m68k.cpu.pc, (unsigned long long)g_sound.irqs[1],
            (unsigned long long)g_sound.irqs[2], (unsigned long long)g_sound.irqs[3], next);
+}
+
+int main(int argc, char **argv) {
+    g_sound_hle_want = 0;   /* the board unless SND_HLE=1: what the C driver is graded against */
+    if (argc < 3) { fprintf(stderr, "usage: snd_replay <mame-capture-prefix> <out-prefix> [seconds]\n"); return 2; }
+    const char *in = argv[1], *out = argv[2];
+    double seconds = argc > 3 ? atof(argv[3]) : 0.0;
+    const char *romdir = test_rom_dir();
+
+    midi_t *midi;
+    size_t nmidi, nrec;
+    uint64_t t_last;
+    if (load_midi(in, &midi, &nmidi, &nrec, &t_last)) return 1;
+    uint64_t total = seconds > 0 ? (uint64_t)(seconds * SOUND_RATE) : (t_last >> 8) + 1;
+    printf("capture: %zu records, %zu MIDI bytes, %.2f s; replaying %.2f s\n",
+           nrec, nmidi, (double)t_last / 11289600.0, (double)total / SOUND_RATE);
+
+    if (load_board(romdir)) return 1;
+    uint32_t (*marks)[4];
+    FILE *wav;
+    if (open_outputs(out, total, &marks, &wav)) return 1;
+
+    size_t next = replay(midi, nmidi, total, wav);
+    uint32_t n = g_sndcap.n, nm = g_sndcap.nmarks;
+    sndcap_stop();
+    fseek(wav, 0, SEEK_SET);
+    wav_header(wav, (uint32_t)total);
+    fclose(wav);
+
+    write_json(out, marks, n, nm);
+    report(n, nm, next);
     if (s_trace) fclose(s_trace);
     romset_free(&rs);
     return 0;

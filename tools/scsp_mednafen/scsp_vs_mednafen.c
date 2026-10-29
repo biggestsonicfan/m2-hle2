@@ -170,104 +170,144 @@ static void random_dsp(int known) {
     }
 }
 
+/* The draw's voices and settings, before the first sample. Returns how many
+ * voices vs holds. */
+static void setup_fm(voice_t *v, voice_t *vs) {                 /* slot 1 modulated by slot 0 */
+    voice_t c = plain(); p_pitch(v); p_pitch(&c);
+    c.w[7] = (uint16_t)(((5 + rnd() % 11) << 12) | (0x20 << 6) | 0x20);  /* MDL, MDXSL=MDYSL=stack[-32]: slot 0 */
+    key_on(0, v); key_on(1, &c); vs[0] = c;
+}
+static void setup_many(voice_t *vs) {
+    for (int i = 0; i < 8; i++) {
+        vs[i] = plain(); p_pitch(&vs[i]); p_eg(&vs[i]); p_level(&vs[i]);
+        if (rnd() & 1) p_loop(&vs[i]);
+        if (rnd() % 4 == 0) p_pcm8(&vs[i]);
+        key_on(i * 4, &vs[i]);
+    }
+}
+static void setup_dsp(int known, voice_t *vs) {
+    random_dsp(known);
+    for (int i = 0; i < 4; i++) {                                /* sends into the DSP, and its outputs mixed */
+        vs[i] = plain(); p_pitch(&vs[i]);
+        vs[i].w[10] = (uint16_t)(((rnd() & 15) << 3) | (1 + rnd() % 7));   /* ISEL, IMXL */
+        vs[i].w[11] = (uint16_t)(0x0000 | ((1 + rnd() % 7) << 5) | (rnd() & 0x1F));  /* EFSDL, EFPAN only */
+        key_on(i, &vs[i]);
+    }
+    for (int i = 4; i < 16; i++) slotw(i, 11, (uint16_t)(((1 + rnd() % 7) << 5) | (rnd() & 0x1F)));
+}
+static void setup_timers(void) {
+    w16(0x424, (uint16_t)rnd()); w16(0x426, (uint16_t)rnd()); w16(0x428, (uint16_t)rnd());
+    w16(0x418, (uint16_t)(rnd() & 0x7FF)); w16(0x41A, (uint16_t)(rnd() & 0x7FF)); w16(0x41C, (uint16_t)(rnd() & 0x7FF));
+    w16(0x41E, (uint16_t)(0x01C0 | (rnd() & 0x37)));            /* SCIEB: timers A-C and some others, not the
+                                                                    * one-sample interrupt (bit 10), which scsp.h
+                                                                    * never raises -- see README.md */
+}
+static int setup_probe(int probe, const char *pn, voice_t *v, voice_t *vs) {
+    if (probe < NV) { if (VPROBES[probe].tweak) VPROBES[probe].tweak(v); key_on(0, v); }
+    if (!strcmp(pn, "fm")) { setup_fm(v, vs); return 2; }
+    if (!strcmp(pn, "many-voices")) { setup_many(vs); return 8; }
+    if (!strcmp(pn, "dsp") || !strcmp(pn, "dsp-random")) setup_dsp(!strcmp(pn, "dsp"), vs);
+    else if (!strcmp(pn, "timers-irq")) setup_timers();
+    else if (!strcmp(pn, "monitor")) { p_eg(v); p_pitch(v); key_on(5, v); }
+    return 1;
+}
+
+/* fuzz: one of 64 events, most of them nothing. */
+static void fuzz_key_on(void) {
+    int sl = (int)(rnd() & 31); voice_t q = plain(); p_pitch(&q); p_eg(&q); p_level(&q); p_loop(&q);
+    if (rnd() % 4 == 0) p_pcm8(&q);
+    if (rnd() % 6 == 0) p_noise(&q);
+    if (rnd() % 3 == 0) p_plfo(&q);
+    if (rnd() % 3 == 0) q.w[9] |= (uint16_t)(rnd() & 0x1F);
+    key_on(sl, &q);
+}
+static void fuzz_event(void) {
+    uint32_t ev = rnd() % 64;
+    if (ev == 0) fuzz_key_on();
+    else if (ev == 1) { int sl = (int)(rnd() & 31), wd = 1 + (int)(rnd() % 11); slotw(sl, wd, (uint16_t)rnd()); }
+    else if (ev == 2) { int sl = (int)(rnd() & 31); slotw(sl, 0, (uint16_t)((scsp_peek16(&m2, (uint32_t)sl * 0x20) & ~0x0800u) | 0x1000)); }
+    else if (ev == 3) { w16(0x408, (uint16_t)((rnd() & 31) << 11)); rb(0x408, 2); }
+    else if (ev == 4) { uint32_t a = rnd() & 0x3FF; w8(a, (uint8_t)rnd()); }                /* byte writes to slots */
+}
+
+static void timers_events(void) {
+    if (now % 7 == 0) rbm(0x420, 2, 0x01FF);                    /* SCIPD, less the sample and MIDI-out bits */
+    if (now % 211 == 0) w16(0x422, (uint16_t)rnd());             /* SCIRE: acknowledge some */
+    if (now % 1499 == 0) w16(0x418 + 2 * (rnd() % 3), (uint16_t)(rnd() & 0x7FF));
+}
+/* MSLC before every read: scsp.h (MAME) resets it to slot 0 on a read,
+ * and Mednafen latches the monitor as it produces a sample, so the
+ * read comes a sample after the write. */
+static void monitor_events(void) { if (now % 13 == 0) w16(0x408, (uint16_t)(5 << 11)); else if (now % 13 == 1) rb(0x408, 2); }
+static void midi_events(void) {
+    if (now % 3 == 0) midi((uint8_t)rnd());
+    if (now % 5 == 0) rb(0x404, 2);
+    if (now == 0) { w16(0x41E, 0x0008); w16(0x424, 0); w16(0x426, 0); w16(0x428, 0); }
+}
+
+/* The probe's events at this sample, the same on both sides. */
+static void probe_events(int probe, const char *pn, int samples, const voice_t *v, const voice_t *vs, int nvoice) {
+    if (probe < NV && now == samples * 3 / 4) key_off(0, v);
+    if (!strcmp(pn, "many-voices") && now > 0 && now % 997 == 0) { int i = (int)(rnd() % nvoice); key_off(i * 4, &vs[i]); }
+    if (!strcmp(pn, "fm") && now == samples * 3 / 4) { key_off(0, v); key_off(1, &vs[0]); }
+    if (!strcmp(pn, "timers-irq")) timers_events();
+    if (!strcmp(pn, "monitor")) monitor_events();
+    if (!strcmp(pn, "midi")) midi_events();
+    if (!strcmp(pn, "fuzz")) fuzz_event();
+}
+
+/* The sums the error and level come from, over all samples and over the settled ones. */
+typedef struct { double se, ss, se2, ss2, sa, sb; int peak; } sums_t;
+static void add_sample(sums_t *t, int16_t al, int16_t ar, int16_t bl, int16_t br, int settled) {
+    int dl = al - bl, dr = ar - br;
+    t->se += (double)dl * dl + (double)dr * dr;
+    t->ss += (double)al * al + (double)ar * ar;
+    t->sa += (double)al * al + (double)ar * ar;
+    t->sb += (double)bl * bl + (double)br * br;
+    if (settled) {
+        t->se2 += (double)dl * dl + (double)dr * dr;
+        t->ss2 += (double)al * al + (double)ar * ar;
+    }
+    if (abs(dl) > t->peak) t->peak = abs(dl);
+    if (abs(dr) > t->peak) t->peak = abs(dr);
+}
+static double rel_err(double se, double ss) { return ss > 0 ? sqrt(se / ss) : (se > 0 ? 1.0 : 0.0); }
+
+/* One sample from both chips, compared. */
+static void step_both(result_t *res, sums_t *t, int settled) {
+    clk += 256;
+    scsp_timers(&m2, clk);
+    int16_t al, ar, bl, br;
+    scsp_sample(&m2, &al, &ar);
+    mdfn_scsp_sample(&bl, &br);
+    int ia = scsp_irq_level(&m2), ib = mdfn_scsp_irq_level();
+    if (ia != ib) { if (res->irq_first < 0) res->irq_first = now; res->irq_bad++; }
+    if (wa) { wa[now] = al; wb[now] = bl; }
+    if ((al != bl || ar != br) && res->first < 0) res->first = now;
+    add_sample(t, al, ar, bl, br, settled);
+}
+
 static result_t run(int probe, int seed, int samples) {
     uint32_t h = 2166136261u;                                   /* by name: adding a probe moves no seed */
     for (const char *c = probe_name(probe); *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
     rs = 0x9E3779B9u * (uint32_t)(seed + 1) ^ h;
     setup_common();
     voice_t v = plain();
-    int nvoice = 1;
     voice_t vs[8];
-    if (probe < NV) { if (VPROBES[probe].tweak) VPROBES[probe].tweak(&v); key_on(0, &v); }
     const char *pn = probe_name(probe);
-    if (!strcmp(pn, "fm")) {                                    /* slot 1 modulated by slot 0 */
-        voice_t c = plain(); p_pitch(&v); p_pitch(&c);
-        c.w[7] = (uint16_t)(((5 + rnd() % 11) << 12) | (0x20 << 6) | 0x20);  /* MDL, MDXSL=MDYSL=stack[-32]: slot 0 */
-        key_on(0, &v); key_on(1, &c); vs[0] = c; nvoice = 2;
-    } else if (!strcmp(pn, "many-voices")) {
-        nvoice = 8;
-        for (int i = 0; i < 8; i++) {
-            vs[i] = plain(); p_pitch(&vs[i]); p_eg(&vs[i]); p_level(&vs[i]);
-            if (rnd() & 1) p_loop(&vs[i]);
-            if (rnd() % 4 == 0) p_pcm8(&vs[i]);
-            key_on(i * 4, &vs[i]);
-        }
-    } else if (!strcmp(pn, "dsp") || !strcmp(pn, "dsp-random")) {
-        random_dsp(!strcmp(pn, "dsp"));
-        for (int i = 0; i < 4; i++) {                            /* sends into the DSP, and its outputs mixed */
-            vs[i] = plain(); p_pitch(&vs[i]);
-            vs[i].w[10] = (uint16_t)(((rnd() & 15) << 3) | (1 + rnd() % 7));   /* ISEL, IMXL */
-            vs[i].w[11] = (uint16_t)(0x0000 | ((1 + rnd() % 7) << 5) | (rnd() & 0x1F));  /* EFSDL, EFPAN only */
-            key_on(i, &vs[i]);
-        }
-        for (int i = 4; i < 16; i++) slotw(i, 11, (uint16_t)(((1 + rnd() % 7) << 5) | (rnd() & 0x1F)));
-    } else if (!strcmp(pn, "timers-irq")) {
-        w16(0x424, (uint16_t)rnd()); w16(0x426, (uint16_t)rnd()); w16(0x428, (uint16_t)rnd());
-        w16(0x418, (uint16_t)(rnd() & 0x7FF)); w16(0x41A, (uint16_t)(rnd() & 0x7FF)); w16(0x41C, (uint16_t)(rnd() & 0x7FF));
-        w16(0x41E, (uint16_t)(0x01C0 | (rnd() & 0x37)));        /* SCIEB: timers A-C and some others, not the
-                                                                    * one-sample interrupt (bit 10), which scsp.h
-                                                                    * never raises -- see README.md */
-    } else if (!strcmp(pn, "monitor")) {
-        p_eg(&v); p_pitch(&v); key_on(5, &v);
-    }
-    int16_t prev_irq_m2 = 0; (void)prev_irq_m2;
+    int nvoice = setup_probe(probe, pn, &v, vs);
     result_t res = {1, -1, 0, 0, 0, 0, 0, -1};
-    double se = 0, ss = 0, se2 = 0, ss2 = 0, sa = 0, sb = 0; int peak = 0;
+    sums_t t = {0};
     for (now = 0; now < samples; now++) {
-        /* events, the same on both sides */
-        if (probe < NV && now == samples * 3 / 4) key_off(0, &v);
-        if (!strcmp(pn, "many-voices") && now > 0 && now % 997 == 0) { int i = (int)(rnd() % nvoice); key_off(i * 4, &vs[i]); }
-        if (!strcmp(pn, "fm") && now == samples * 3 / 4) { key_off(0, &v); key_off(1, &vs[0]); }
-        if (!strcmp(pn, "timers-irq")) {
-            if (now % 7 == 0) rbm(0x420, 2, 0x01FF);            /* SCIPD, less the sample and MIDI-out bits */
-            if (now % 211 == 0) w16(0x422, (uint16_t)rnd());     /* SCIRE: acknowledge some */
-            if (now % 1499 == 0) w16(0x418 + 2 * (rnd() % 3), (uint16_t)(rnd() & 0x7FF));
-        }
-        /* MSLC before every read: scsp.h (MAME) resets it to slot 0 on a read,
-         * and Mednafen latches the monitor as it produces a sample, so the
-         * read comes a sample after the write. */
-        if (!strcmp(pn, "monitor")) { if (now % 13 == 0) w16(0x408, (uint16_t)(5 << 11)); else if (now % 13 == 1) rb(0x408, 2); }
-        if (!strcmp(pn, "midi")) {
-            if (now % 3 == 0) midi((uint8_t)rnd());
-            if (now % 5 == 0) rb(0x404, 2);
-            if (now == 0) { w16(0x41E, 0x0008); w16(0x424, 0); w16(0x426, 0); w16(0x428, 0); }
-        }
-        if (!strcmp(pn, "fuzz")) {
-            uint32_t ev = rnd() % 64;
-            if (ev == 0) { int sl = (int)(rnd() & 31); voice_t q = plain(); p_pitch(&q); p_eg(&q); p_level(&q); p_loop(&q);
-                if (rnd() % 4 == 0) p_pcm8(&q); if (rnd() % 6 == 0) p_noise(&q); if (rnd() % 3 == 0) p_plfo(&q);
-                if (rnd() % 3 == 0) q.w[9] |= (uint16_t)(rnd() & 0x1F); key_on(sl, &q); }
-            else if (ev == 1) { int sl = (int)(rnd() & 31), wd = 1 + (int)(rnd() % 11); slotw(sl, wd, (uint16_t)rnd()); }
-            else if (ev == 2) { int sl = (int)(rnd() & 31); slotw(sl, 0, (uint16_t)((scsp_peek16(&m2, (uint32_t)sl * 0x20) & ~0x0800u) | 0x1000)); }
-            else if (ev == 3) { w16(0x408, (uint16_t)((rnd() & 31) << 11)); rb(0x408, 2); }
-            else if (ev == 4) { uint32_t a = rnd() & 0x3FF; w8(a, (uint8_t)rnd()); }                /* byte writes to slots */
-        }
-        clk += 256;
-        scsp_timers(&m2, clk);
-        int16_t al, ar, bl, br;
-        scsp_sample(&m2, &al, &ar);
-        mdfn_scsp_sample(&bl, &br);
-        int ia = scsp_irq_level(&m2), ib = mdfn_scsp_irq_level();
-        if (ia != ib) { if (res.irq_first < 0) res.irq_first = now; res.irq_bad++; }
-        if (wa) { wa[now] = al; wb[now] = bl; }
-        int dl = al - bl, dr = ar - br;
-        if ((dl || dr) && res.first < 0) res.first = now;
-        se += (double)dl * dl + (double)dr * dr;
-        ss += (double)al * al + (double)ar * ar;
-        sa += (double)al * al + (double)ar * ar;
-        sb += (double)bl * bl + (double)br * br;
-        if (now >= SETTLE && (probe >= NV || now < samples * 3 / 4)) {   /* past the attack, before key-off */
-            se2 += (double)dl * dl + (double)dr * dr;
-            ss2 += (double)al * al + (double)ar * ar;
-        }
-        if (abs(dl) > peak) peak = abs(dl);
-        if (abs(dr) > peak) peak = abs(dr);
+        probe_events(probe, pn, samples, &v, vs, nvoice);
+        /* past the attack, before key-off */
+        step_both(&res, &t, now >= SETTLE && (probe >= NV || now < samples * 3 / 4));
     }
     res.exact = res.first < 0 && !rd.bad && !res.irq_bad;
-    res.err = ss > 0 ? sqrt(se / ss) : (se > 0 ? 1.0 : 0.0);
-    res.settled = ss2 > 0 ? sqrt(se2 / ss2) : (se2 > 0 ? 1.0 : 0.0);
-    res.gain_db = sa > 0 && sb > 0 ? 10.0 * log10(sb / sa) : 0.0;
-    res.peak = peak;
+    res.err = rel_err(t.se, t.ss);
+    res.settled = rel_err(t.se2, t.ss2);
+    res.gain_db = t.sa > 0 && t.sb > 0 ? 10.0 * log10(t.sb / t.sa) : 0.0;
+    res.peak = t.peak;
     return res;
 }
 
@@ -358,48 +398,53 @@ static void bench(int samples) {
     (void)sink;
 }
 
+/* --show: one draw, its first differing samples and a WAV. */
+static int show(int argc, char **argv) {
+    if (argc < 4) { fprintf(stderr, "usage: --show <probe> <seed> [samples] [out.wav]\n"); return 2; }
+    int p = find_probe(argv[2]), seed = atoi(argv[3]), n = argc > 4 ? atoi(argv[4]) : 8192;
+    wa = calloc((size_t)n, 2); wb = calloc((size_t)n, 2);
+    result_t r = run(p, seed, n);
+    printf("%s seed %d: %s, first differing sample %d, error %.4f (settled %.4f), level %+.2f dB, peak %g, reads %d/%d bad",
+           probe_name(p), seed, r.exact ? "exact" : "differs", r.first, r.err, r.settled, r.gain_db, r.peak, rd.bad, rd.n);
+    if (rd.bad) printf(" (first at sample %d: 0x%03X scsp.h %04X mednafen %04X)", rd.first_at, rd.off, rd.a, rd.b);
+    printf(", irq %d bad (first %d)\n", r.irq_bad, r.irq_first);
+    printf("  slot 0 words:"); for (int i = 0; i < 12; i++) printf(" %04X", scsp_peek16(&m2, (uint32_t)i * 2)); printf("\n");
+    if (r.first >= 0)
+        for (int i = r.first; i < r.first + 12 && i < n; i++) printf("  %6d  scsp.h %6d  mednafen %6d\n", i, wa[i], wb[i]);
+    wav(argc > 5 ? argv[5] : "scsp_vs_mednafen.wav", n);
+    return 0;
+}
+
+/* One probe's row of the table, from seeds draws. */
+static void probe_row(int p, int seeds, int samples, double *errs, double *sets, int *firsts) {
+    int exact = 0, nf = 0, rbad = 0, rn = 0, ibad = 0; double gain = 0;
+    for (int s = 0; s < seeds; s++) {
+        result_t r = run(p, s, samples);
+        exact += r.exact; errs[s] = r.err; sets[s] = r.settled; gain += r.gain_db;
+        if (r.first >= 0) firsts[nf++] = r.first;
+        rbad += rd.bad; rn += rd.n; ibad += r.irq_bad > 0;
+    }
+    qsort(errs, (size_t)seeds, sizeof *errs, cmpd);
+    qsort(sets, (size_t)seeds, sizeof *sets, cmpd);
+    qsort(firsts, (size_t)nf, sizeof *firsts, cmpi);
+    char fd[16], rbs[24];
+    if (nf) snprintf(fd, sizeof fd, "%d", firsts[nf / 2]); else snprintf(fd, sizeof fd, "-");
+    if (rn) snprintf(rbs, sizeof rbs, "%d/%d", rbad, rn); else snprintf(rbs, sizeof rbs, "-");
+    printf("%-12s %3d/%-3d %8s %8.4f %8.4f %8.4f %+8.2f %11s %5d/%-3d\n", probe_name(p), exact, seeds, fd,
+           errs[seeds / 2], sets[seeds / 2], sets[seeds - 1], gain / seeds, rbs, ibad, seeds);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--timers")) { timer_table(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "--bench")) { bench(argc > 2 ? atoi(argv[2]) : 441000); return 0; }
-    if (argc > 1 && !strcmp(argv[1], "--show")) {
-        if (argc < 4) { fprintf(stderr, "usage: --show <probe> <seed> [samples] [out.wav]\n"); return 2; }
-        int p = find_probe(argv[2]), seed = atoi(argv[3]), n = argc > 4 ? atoi(argv[4]) : 8192;
-        wa = calloc((size_t)n, 2); wb = calloc((size_t)n, 2);
-        result_t r = run(p, seed, n);
-        printf("%s seed %d: %s, first differing sample %d, error %.4f (settled %.4f), level %+.2f dB, peak %g, reads %d/%d bad",
-               probe_name(p), seed, r.exact ? "exact" : "differs", r.first, r.err, r.settled, r.gain_db, r.peak, rd.bad, rd.n);
-        if (rd.bad) printf(" (first at sample %d: 0x%03X scsp.h %04X mednafen %04X)", rd.first_at, rd.off, rd.a, rd.b);
-        printf(", irq %d bad (first %d)\n", r.irq_bad, r.irq_first);
-        printf("  slot 0 words:"); for (int i = 0; i < 12; i++) printf(" %04X", scsp_peek16(&m2, (uint32_t)i * 2)); printf("\n");
-        if (r.first >= 0)
-            for (int i = r.first; i < r.first + 12 && i < n; i++) printf("  %6d  scsp.h %6d  mednafen %6d\n", i, wa[i], wb[i]);
-        wav(argc > 5 ? argv[5] : "scsp_vs_mednafen.wav", n);
-        return 0;
-    }
+    if (argc > 1 && !strcmp(argv[1], "--show")) return show(argc, argv);
     int seeds = argc > 1 ? atoi(argv[1]) : 40, samples = argc > 2 ? atoi(argv[2]) : 8192;
     int only = argc > 3 ? find_probe(argv[3]) : -1;
     printf("%-12s %7s %8s %8s %8s %8s %8s %11s %8s\n", "probe", "exact", "1st diff", "err med", "settled", "set max", "level dB", "reads bad", "irq bad");
     double *errs = malloc(sizeof(double) * (size_t)seeds), *sets = malloc(sizeof(double) * (size_t)seeds);
     int *firsts = malloc(sizeof(int) * (size_t)seeds);
-    for (int p = 0; p < NPROBES; p++) {
-        if (only >= 0 && p != only) continue;
-        int exact = 0, nf = 0, rbad = 0, rn = 0, ibad = 0; double peak = 0, gain = 0;
-        for (int s = 0; s < seeds; s++) {
-            result_t r = run(p, s, samples);
-            exact += r.exact; errs[s] = r.err; sets[s] = r.settled; gain += r.gain_db; if (r.peak > peak) peak = r.peak;
-            if (r.first >= 0) firsts[nf++] = r.first;
-            rbad += rd.bad; rn += rd.n; ibad += r.irq_bad > 0;
-        }
-        qsort(errs, (size_t)seeds, sizeof *errs, cmpd);
-        qsort(sets, (size_t)seeds, sizeof *sets, cmpd);
-        qsort(firsts, (size_t)nf, sizeof *firsts, cmpi);
-        char fd[16], rbs[24];
-        if (nf) snprintf(fd, sizeof fd, "%d", firsts[nf / 2]); else snprintf(fd, sizeof fd, "-");
-        if (rn) snprintf(rbs, sizeof rbs, "%d/%d", rbad, rn); else snprintf(rbs, sizeof rbs, "-");
-        (void)peak;
-        printf("%-12s %3d/%-3d %8s %8.4f %8.4f %8.4f %+8.2f %11s %5d/%-3d\n", probe_name(p), exact, seeds, fd,
-               errs[seeds / 2], sets[seeds / 2], sets[seeds - 1], gain / seeds, rbs, ibad, seeds);
-        fflush(stdout);
-    }
+    for (int p = 0; p < NPROBES; p++)
+        if (only < 0 || p == only) probe_row(p, seeds, samples, errs, sets, firsts);
     return 0;
 }

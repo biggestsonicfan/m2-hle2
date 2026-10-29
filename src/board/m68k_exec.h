@@ -956,8 +956,9 @@ static inline int m68k_step_core(m68k_state_t *s) {
         /* 0000 Dn 1 op ea: BTST/BCHG/BCLR/BSET register form            */
         {
             int bit_op, bit_num_from_reg, dn;
-            if ((op & 0x0100) && !(op & 0x0800)) {
-                /* Register form: 0000 Dn 1 xx ea */
+            if (op & 0x0100) {
+                /* Register form: 0000 Dn 1 xx ea. Dn is bits 11-9, so D4-D7 set
+                 * bit 11 too: Power Sled's driver runs btst/bclr d6,(d16,a0). */
                 dn              = (op >> 9) & 7;
                 bit_op          = (op >> 6) & 3;
                 bit_num_from_reg = 1;
@@ -1162,9 +1163,12 @@ static inline int m68k_step_core(m68k_state_t *s) {
             break;
         }
 
-        /* 0100 1100 1 ea: MOVEM memory→regs */
-        /* 0100 1000 1 ea: MOVEM regs→memory  (already handled PEA above; check again) */
-        if ((op & 0xFB80) == 0x4880 && (op & 0x0040)) {
+        /* 0100 1100 1s ea: MOVEM memory→regs */
+        /* 0100 1000 1s ea: MOVEM regs→memory, s = 0 word, 1 long. Mode 0 is EXT
+         * (above); a word MOVEM must not fall to the NEG/CLR decode below, which
+         * left its register mask to run as an opcode (Motor Raid's sound driver
+         * saves its registers with movem.w, Pinboard #1627). */
+        if ((op & 0xFB80) == 0x4880 && mode >= 2) {
             /* MOVEM: bit 10 = direction (0=regs→mem, 1=mem→regs) */
             int to_regs = (op >> 10) & 1;
             int sz_long = (op >> 6) & 1; /* 0=word, 1=long */

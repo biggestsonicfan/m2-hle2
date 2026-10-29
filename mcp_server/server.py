@@ -443,6 +443,41 @@ def get_geo_captures() -> dict:
 
 
 @mcp.tool()
+def screenshot(path: str, width: Optional[int] = None, height: Optional[int] = None,
+               timeout_ms: int = 10000) -> dict:
+    """Write the game's picture to a PNG: the board's 496x384 unless width and
+    height say otherwise, with no menus, windows or picture filter.
+
+    `path` MUST BE ABSOLUTE: the emulator process resolves it. The picture is
+    the frame the renderer last prepared, so it works with the board stopped
+    (emu_stop) too. Needs a renderer: a window (an Xvfb will do) or
+    --headless with --av-port; plain --headless answers ok: false. Returns
+    `frame` (the game frame drawn), `width`, `height` and `bytes`.
+
+    With set_geo_isolate it shows one captured object alone on the board's
+    own picture."""
+    cmd: dict = {"cmd": "screenshot", "path": path, "timeout_ms": timeout_ms}
+    if width is not None:
+        cmd["width"] = width
+    if height is not None:
+        cmd["height"] = height
+    return _send(cmd)
+
+
+@mcp.tool()
+def set_geo_isolate(index: int = -1, from_: Optional[int] = None,
+                    to: Optional[int] = None) -> dict:
+    """Draw only captured object `index` (get_geo_captures' `idx`; -1 for all),
+    or only the captures in [from_, to] (to < from_ turns the range off), to
+    find which object puts a given thing on screen. Returns `isolate`."""
+    cmd: dict = {"cmd": "set_geo_isolate", "index": index if index >= 0 else 0xFFFFFFFF}
+    if from_ is not None and to is not None:
+        cmd["from"] = from_
+        cmd["to"] = to
+    return _send(cmd)
+
+
+@mcp.tool()
 def wait_frames(count: int = 1, timeout_ms: int = 10000) -> dict:
     """Block until `count` more game frames have completed, or the timeout.
     Use it to let the game reach the scene that draws the object you want."""

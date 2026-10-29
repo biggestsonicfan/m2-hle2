@@ -255,33 +255,38 @@ static void netplay_window_adopt(void) {
     g_np_ui.vs_mode = g_vs_mode != 0;   /* --vs-mode */
 }
 
+/* The room: its number, who this end is, where the room is between matches,
+ * and whether the others are waiting on this end. */
+static void netplay_window_room_status(const netplay_status_t *st) {
+    const char *role = st->local_player == 0 ? "1P" : st->local_player == 1 ? "2P"
+                     : st->local_player == 2 ? "watching" : "in line";
+    igText("Room %llu   %u of %u   you: %s%s", (unsigned long long)st->room_id,
+           st->member_count, st->max_slot, role, st->is_host ? "  (you run the room)" : "");
+    if (st->room_known) {
+        if (st->room.phase == ROOM_PHASE_MATCH)
+            igText("Match %u in progress%s", st->room.match, st->room.vs_mode ? " (VS mode)" : "");
+        else if (st->auto_start_s)
+            igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f}, "Next match in %u s", st->auto_start_s);
+        else if (st->room.match)
+            igText("Lobby - %u match%s played", st->room.match, st->room.match == 1 ? "" : "es");
+        else
+            igText("Lobby - the first match starts when every player is ready");
+    }
+    /* Somebody else is ready and this end is not. Worth saying outright: from
+     * here it is otherwise indistinguishable from somebody who merely joined. */
+    if (st->peer_ready)
+        igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f},
+                      "Others are ready and waiting - press Ready to start");
+}
+
 /* The state, the room and the match, above everything else. */
 static void netplay_window_status(const netplay_status_t *st) {
     igText("State: %s", netplay_state_text(st->state));
     if (st->com_id[0]) { igSameLine(); igText("   lobby %s", st->com_id); }
     if (st->error[0]) igTextColored((ImVec4){1.0f, 0.45f, 0.45f, 1.0f}, "%s", st->error);
 
-    if (st->state >= NETPLAY_IN_ROOM && st->state != NETPLAY_FAILED) {
-        const char *role = st->local_player == 0 ? "1P" : st->local_player == 1 ? "2P"
-                         : st->local_player == 2 ? "watching" : "in line";
-        igText("Room %llu   %u of %u   you: %s%s", (unsigned long long)st->room_id,
-               st->member_count, st->max_slot, role, st->is_host ? "  (you run the room)" : "");
-        if (st->room_known) {
-            if (st->room.phase == ROOM_PHASE_MATCH)
-                igText("Match %u in progress%s", st->room.match, st->room.vs_mode ? " (VS mode)" : "");
-            else if (st->auto_start_s)
-                igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f}, "Next match in %u s", st->auto_start_s);
-            else if (st->room.match)
-                igText("Lobby - %u match%s played", st->room.match, st->room.match == 1 ? "" : "es");
-            else
-                igText("Lobby - the first match starts when every player is ready");
-        }
-        /* Somebody else is ready and this end is not. Worth saying outright: from
-         * here it is otherwise indistinguishable from somebody who merely joined. */
-        if (st->peer_ready)
-            igTextColored((ImVec4){0.45f, 0.95f, 0.55f, 1.0f},
-                          "Others are ready and waiting - press Ready to start");
-    }
+    if (st->state >= NETPLAY_IN_ROOM && st->state != NETPLAY_FAILED)
+        netplay_window_room_status(st);
     if (netplay_state_running(st->state)) {
         igText("frame %u   stalls %u   match %u   seed 0x%08X",
                st->frame, st->stalls, st->generation, st->seed);
@@ -290,6 +295,21 @@ static void netplay_window_status(const netplay_status_t *st) {
                           "DESYNC at frame %u - this board no longer agrees with the fighters'",
                           st->desync_frame);
     }
+}
+
+/* The code to approve on twitch.tv while the server waits, and its page. */
+static void netplay_window_twitch_code(const netplay_status_t *st) {
+    igTextColored((ImVec4){0.6f, 0.8f, 1.0f, 1.0f}, "Enter this code on twitch.tv:");
+    igSameLine();
+    igTextColored((ImVec4){1.0f, 1.0f, 0.6f, 1.0f}, "%s", st->twitch_user_code);
+    igTextWrapped("A browser should have opened at %s - the code is already filled in "
+                  "there. Check it matches the one above before you approve it.",
+                  st->twitch_uri);
+    if (igButton("Open the page again")) netplay_open_url(st->twitch_uri);
+    igSameLine();
+    if (igButton("Copy code")) igSetClipboardText(st->twitch_user_code);
+    igSameLine();
+    if (igButton("Cancel")) netplay_post(NETPLAY_CMD_TWITCH_CANCEL, &g_np_ui);
 }
 
 /*
@@ -313,17 +333,7 @@ static void netplay_window_twitch(const netplay_status_t *st) {
         igSameLine();
         if (igButton("Cancel")) netplay_post(NETPLAY_CMD_TWITCH_CANCEL, &g_np_ui);
     } else if (st->twitch_state == RPCN_TWITCH_WAITING) {
-        igTextColored((ImVec4){0.6f, 0.8f, 1.0f, 1.0f}, "Enter this code on twitch.tv:");
-        igSameLine();
-        igTextColored((ImVec4){1.0f, 1.0f, 0.6f, 1.0f}, "%s", st->twitch_user_code);
-        igTextWrapped("A browser should have opened at %s - the code is already filled in "
-                      "there. Check it matches the one above before you approve it.",
-                      st->twitch_uri);
-        if (igButton("Open the page again")) netplay_open_url(st->twitch_uri);
-        igSameLine();
-        if (igButton("Copy code")) igSetClipboardText(st->twitch_user_code);
-        igSameLine();
-        if (igButton("Cancel")) netplay_post(NETPLAY_CMD_TWITCH_CANCEL, &g_np_ui);
+        netplay_window_twitch_code(st);
     } else {
         if (igButton("Sign in with Twitch")) netplay_post(NETPLAY_CMD_TWITCH_START, &g_np_ui);
         if (igIsItemHovered(0))
@@ -360,6 +370,29 @@ static void netplay_window_signup(const netplay_status_t *st) {
     else if (st->account_state == RPCN_ACCOUNT_FAILED)
         igTextColored((ImVec4){1.0f, 0.45f, 0.45f, 1.0f}, "%s", st->account_error);
     igUnindentEx(0.0f);
+}
+
+/* Connect (as the Twitch login when signed in with it), or Disconnect. */
+static void netplay_window_connect(const netplay_status_t *st) {
+    bool connected = (st->state != NETPLAY_OFF && st->state != NETPLAY_FAILED);
+    if (!connected) {
+        if (igButton("Connect")) {
+            if (st->twitch_signed_in) {
+                /* The account boxes above are greyed out, so what is in them
+                 * is left over from before and is nobody's input. Signed in
+                 * with Twitch, Connect means "as that login" - which
+                 * TWITCH_START now is, without a browser, while the token
+                 * holds (netplay_twitch_reuse). */
+                netplay_config_t as_twitch = g_np_ui;
+                as_twitch.npid[0] = '\0';
+                netplay_post(NETPLAY_CMD_TWITCH_START, &as_twitch);
+            } else {
+                netplay_post(NETPLAY_CMD_CONNECT, &g_np_ui);
+            }
+        }
+    } else {
+        if (igButton("Disconnect")) netplay_post(NETPLAY_CMD_DISCONNECT, &g_np_ui);
+    }
 }
 
 /* The server, the sign-in and the account boxes. */
@@ -402,25 +435,7 @@ static void netplay_window_account(const netplay_status_t *st) {
                      "be joined from here - they are listed so an empty lobby can be told "
                      "apart from an empty lobby with people next door.");
 
-    bool connected = (st->state != NETPLAY_OFF && st->state != NETPLAY_FAILED);
-    if (!connected) {
-        if (igButton("Connect")) {
-            if (st->twitch_signed_in) {
-                /* The account boxes above are greyed out, so what is in them
-                 * is left over from before and is nobody's input. Signed in
-                 * with Twitch, Connect means "as that login" - which
-                 * TWITCH_START now is, without a browser, while the token
-                 * holds (netplay_twitch_reuse). */
-                netplay_config_t as_twitch = g_np_ui;
-                as_twitch.npid[0] = '\0';
-                netplay_post(NETPLAY_CMD_TWITCH_START, &as_twitch);
-            } else {
-                netplay_post(NETPLAY_CMD_CONNECT, &g_np_ui);
-            }
-        }
-    } else {
-        if (igButton("Disconnect")) netplay_post(NETPLAY_CMD_DISCONNECT, &g_np_ui);
-    }
+    netplay_window_connect(st);
     igSameLine();
     if (igButton(g_np_ui_show_signup ? "Hide sign-up" : "No account yet?"))
         g_np_ui_show_signup = !g_np_ui_show_signup;
@@ -453,33 +468,9 @@ static void netplay_window_room_options(void) {
                      "as usual.");
 }
 
-/* Hosting, joining, and the server's list of this game's rooms. */
-static void netplay_window_room_list(const netplay_status_t *st, bool online) {
-    igBeginDisabled(!online);
-    if (igButton("Host a room")) netplay_post(NETPLAY_CMD_HOST, &g_np_ui);
-    igSameLine();
-    if (igButton("Refresh list")) netplay_post(NETPLAY_CMD_SEARCH, &g_np_ui);
-    igEndDisabled();
-    if (st->search_pending) { igSameLine(); igText("searching..."); }
-
-    /* Its own row: with the two buttons above it this ran off the right edge
-     * of the default window, which put the button doing the work off-screen. */
-    igSetNextItemWidth(160.0f);
-    igInputTextWithHint("##joinid", "room id", g_np_ui_join_id, sizeof(g_np_ui_join_id),
-                        ImGuiInputTextFlags_CharsDecimal);
-    igSameLine();
-    igBeginDisabled(!online || !g_np_ui_join_id[0]);
-    if (igButton("Join by id")) {
-        netplay_config_t c = g_np_ui;
-#ifdef _WIN32
-        c.room_id = _strtoui64(g_np_ui_join_id, NULL, 10);
-#else
-        c.room_id = strtoull(g_np_ui_join_id, NULL, 10);
-#endif
-        if (c.room_id) netplay_post(NETPLAY_CMD_JOIN, &c);
-    }
-    igEndDisabled();
-
+/* The server's rooms, one row each: its number (click to pick it), host, head
+ * count, lock, and why this build can't join it or the delay it plays at. */
+static void netplay_window_room_table(const netplay_status_t *st) {
     ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
                        | ImGuiTableFlags_SizingFixedFit;
     if (igBeginTable("##rooms", 5, tf)) {
@@ -512,6 +503,36 @@ static void netplay_window_room_list(const netplay_status_t *st, bool online) {
         }
         igEndTable();
     }
+}
+
+/* Hosting, joining, and the server's list of this game's rooms. */
+static void netplay_window_room_list(const netplay_status_t *st, bool online) {
+    igBeginDisabled(!online);
+    if (igButton("Host a room")) netplay_post(NETPLAY_CMD_HOST, &g_np_ui);
+    igSameLine();
+    if (igButton("Refresh list")) netplay_post(NETPLAY_CMD_SEARCH, &g_np_ui);
+    igEndDisabled();
+    if (st->search_pending) { igSameLine(); igText("searching..."); }
+
+    /* Its own row: with the two buttons above it this ran off the right edge
+     * of the default window, which put the button doing the work off-screen. */
+    igSetNextItemWidth(160.0f);
+    igInputTextWithHint("##joinid", "room id", g_np_ui_join_id, sizeof(g_np_ui_join_id),
+                        ImGuiInputTextFlags_CharsDecimal);
+    igSameLine();
+    igBeginDisabled(!online || !g_np_ui_join_id[0]);
+    if (igButton("Join by id")) {
+        netplay_config_t c = g_np_ui;
+#ifdef _WIN32
+        c.room_id = _strtoui64(g_np_ui_join_id, NULL, 10);
+#else
+        c.room_id = strtoull(g_np_ui_join_id, NULL, 10);
+#endif
+        if (c.room_id) netplay_post(NETPLAY_CMD_JOIN, &c);
+    }
+    igEndDisabled();
+
+    netplay_window_room_table(st);
     if (st->room_count == 0)
         igTextDisabled(online ? "No rooms here yet - host one, and the other player joins it."
                               : "Connect to see the rooms on this server.");

@@ -7,7 +7,7 @@
  * (Text_Printf at 0x430ac and its callers; see tools/ps3ui/README.md).
  *
  * Button glyphs travel in strings as control characters: PS3UI_BTN_CIRCLE
- * and friends, which the text drawer renders as the pad's face buttons.
+ * to PS3UI_BTN_R2, which the text drawer renders as the pad's buttons.
  */
 #ifndef PS3UI_SCREENS_H
 #define PS3UI_SCREENS_H
@@ -49,7 +49,7 @@ static float ps3ui_rich_width(const ps3ui_text_style_t *st, const char *s)
     char run[256];
     int n = 0;
     for (const char *p = s;; p++) {
-        if (*p == 0 || (*p >= PS3UI_BTN_CIRCLE && *p <= PS3UI_BTN_SQUARE)) {
+        if (*p == 0 || (*p >= PS3UI_BTN_CIRCLE && *p <= PS3UI_BTN_R2)) {
             run[n] = 0;
             if (n)
                 w += ps3ui_text_width(st, run) + (st->metrics ? 4.0f * st->cap / st->ps3_cap : 0.0f);
@@ -71,7 +71,7 @@ static void ps3ui_rich(ps3ui_canvas_t *cv, const ps3ui_text_style_t *st, float x
     char run[256];
     int n = 0;
     for (const char *p = s;; p++) {
-        if (*p == 0 || (*p >= PS3UI_BTN_CIRCLE && *p <= PS3UI_BTN_SQUARE)) {
+        if (*p == 0 || (*p >= PS3UI_BTN_CIRCLE && *p <= PS3UI_BTN_R2)) {
             run[n] = 0;
             if (n) {
                 ps3ui_text(cv, st, x, y, run, opacity);

@@ -42,10 +42,13 @@ static const char *k_blur =
     "#pragma parameter BLUR \"Blur\" 2.0 1.0 4.0 1.0\n"
     "#if defined(VERTEX)\nvoid main() {}\n#elif defined(FRAGMENT)\nvoid main() {}\n#endif\n";
 
-int main(void) {
-    char buf[RS_PATH], err[RS_ERR];
+/* The preset (B) to (D) load into, and why a load was refused. */
+static rs_preset_t p;
+static char err[RS_ERR];
 
-    /* ---- (A) ---- */
+/* ---- (A) ---- */
+static void test_paths(void) {
+    char buf[RS_PATH];
     snprintf(buf, sizeof buf, "a\\b\\.\\c\\..\\d.glsl");
     rs_path_normalize(buf);
     CHECK(!strcmp(buf, "a/b/d.glsl"), "normalize: backslashes, . and .. go");
@@ -69,9 +72,10 @@ int main(void) {
     CHECK(f && !strcmp(f->path, "pick/crt-geom.glsl"), "table: an exact path wins outright");
     CHECK(rs_vfs_find("nothing.glsl") == NULL, "table: an unknown name is not found");
     rs_vfs_clear();
+}
 
-    /* ---- (B) ---- */
-    static rs_preset_t p;
+/* ---- (B) ---- */
+static void test_glsl(void) {
     add_text("crt.glsl", k_crt);
     bool ok = rs_preset_load(&p, "crt.glsl", err, sizeof err);
     CHECK(ok && p.n_passes == 1, "glsl: one pass");
@@ -82,8 +86,10 @@ int main(void) {
     CHECK(ok && !strcmp(p.param[0].desc, "Scanline strength"), "glsl: the description without its quotes");
     rs_preset_free(&p);
     rs_vfs_clear();
+}
 
-    /* ---- (C) ---- */
+/* (C): the pack's shaders, its LUT and its presets. */
+static void add_pack(void) {
     uint8_t px[2 * 2 * 4] = { 255, 0, 0, 255,  0, 255, 0, 255,  0, 0, 255, 255,  255, 255, 255, 255 };
     int png_len = 0;
     unsigned char *png = stbi_write_png_to_mem(px, 2 * 4, 2, 2, 4, &png_len);
@@ -119,8 +125,9 @@ int main(void) {
              "mask_grille_wrap_mode = repeat\n"
              "parameters = \"SCAN\"\n"
              "SCAN = 0.25\n");
-    ok = rs_preset_load(&p, "pack/presets/mine.glslp", err, sizeof err);
-    if (!ok) printf("      (%s)\n", err);
+}
+
+static void check_glslp_passes(bool ok) {
     CHECK(ok && p.n_passes == 2, "glslp: two passes through #reference");
     CHECK(ok && !strcmp(p.pass[0].path, "pack/shaders/blur.glsl"), "glslp: the referenced preset's paths are its own");
     CHECK(ok && p.pass[0].filter_set && p.pass[0].filter_linear && p.pass[0].wrap == RS_WRAP_REPEAT,
@@ -132,6 +139,9 @@ int main(void) {
           p.pass[1].scale_y == 720.0f && p.pass[1].scale_set, "glslp: per-axis scale types");
     CHECK(ok && p.pass[1].mipmap_input && p.pass[1].frame_count_mod == 60, "glslp: mipmap_input, frame_count_mod");
     CHECK(ok && !p.pass[1].filter_set && p.pass[1].wrap == RS_WRAP_BORDER, "glslp: RetroArch's defaults when unset");
+}
+
+static void check_glslp_lut_params(bool ok) {
     CHECK(ok && p.n_luts == 1 && !strcmp(p.lut[0].name, "mask_grille") && p.lut[0].w == 2 && p.lut[0].h == 2 &&
           p.lut[0].linear && p.lut[0].wrap == RS_WRAP_REPEAT, "glslp: the LUT, decoded");
     CHECK(ok && p.lut[0].rgba && p.lut[0].rgba[0] == 255 && p.lut[0].rgba[5] == 255 && p.lut[0].rgba[10] == 255,
@@ -142,17 +152,30 @@ int main(void) {
     CHECK(scan && scan->value == 0.25f && scan->initial == 0.25f, "glslp: the preset's value overrides the shader's");
     CHECK(scan && !strcmp(scan->desc, "Scanline strength (again)"), "glslp: the first pass to name it describes it");
     CHECK(blur && blur->value == 3.0f, "glslp: a referenced preset's override carries");
-    rs_preset_free(&p);
+}
 
+/* ---- (C) ---- */
+static void test_glslp(void) {
+    add_pack();
+    bool ok = rs_preset_load(&p, "pack/presets/mine.glslp", err, sizeof err);
+    if (!ok) printf("      (%s)\n", err);
+    check_glslp_passes(ok);
+    check_glslp_lut_params(ok);
+    rs_preset_free(&p);
+}
+
+static void test_glslp_defaults(void) {
     /* A last pass with no scale draws to the screen; the passes before it are source x1. */
     add_text("pack/two.glslp", "shaders = 2\nshader0 = shaders/blur.glsl\nshader1 = shaders/crt.glsl\n");
-    ok = rs_preset_load(&p, "pack/two.glslp", err, sizeof err);
+    bool ok = rs_preset_load(&p, "pack/two.glslp", err, sizeof err);
     CHECK(ok && !p.pass[0].scale_set && p.pass[0].type_x == RS_SCALE_SOURCE && p.pass[0].scale_x == 1.0f,
           "defaults: an unscaled middle pass is source x1");
     CHECK(ok && !p.pass[1].scale_set && p.pass[1].type_x == RS_SCALE_VIEWPORT, "defaults: an unscaled last pass is the viewport");
     rs_preset_free(&p);
+}
 
-    /* ---- (D) ---- */
+/* ---- (D) ---- */
+static void test_refused(void) {
     CHECK(!rs_preset_load(&p, "x.slangp", err, sizeof err) && strstr(err, "GLSL"), "refused: slang, pointing at GLSL");
     CHECK(!rs_preset_load(&p, "x.cgp", err, sizeof err) && strstr(err, "Cg"), "refused: Cg");
     add_text("pack/missing.glslp", "shaders = 1\nshader0 = shaders/nowhere.glsl\n");
@@ -167,53 +190,62 @@ int main(void) {
     CHECK(!rs_preset_load(&p, "pack/nolut.glslp", err, sizeof err) && strstr(err, "lut"),
           "refused: a texture with no file");
     rs_vfs_clear();
+}
 
-    /* ---- (E) ---- */
-    {
-        const char *src =
-            "uniform float PARAM;\n"                                       /* 1 */
-            "const float K = 2.0;\n"                                       /* 2 */
-            "#ifdef FRAGMENT\n"                                            /* 3 */
-            "static const float x = PARAM * K; // scaled\n"                /* 4 */
-            "#endif\n"                                                     /* 5 */
-            "vec3 arr[2] = vec3[](vec3(PARAM),\n"                          /* 6 */
-            "                     vec3(1.0));\n"                           /* 7 */
-            "float a = 1.0, b = PARAM;\n"                                  /* 8 */
-            "struct S { float f; };\n"                                     /* 9 */
-            "float f(float v) { float y = v * PARAM; return y; }\n"        /* 10 */
-            "void main()\n{\n  gl_FragColor = vec4(x);\n}\n";
-        int lines[] = { 4, 7, 8, 10 };
-        int counter = 0;
-        char *out = rs_hoist_globals(src, lines, 4, &counter);
-        CHECK(out != NULL && counter == 2, "hoist: two statements moved (a declarator list and a local are not)");
-        if (out) {
-            CHECK(strstr(out, "float x;\n#define RS_INIT_0 x =  PARAM * K;") != NULL,
-                  "hoist: const and static gone, the initialiser in a macro, its comment cut");
-            CHECK(strstr(out, "#ifdef FRAGMENT\n  float x;") != NULL || strstr(out, "#ifdef FRAGMENT\n float x;") != NULL ||
-                  strstr(out, "#ifdef FRAGMENT\nfloat x;") != NULL, "hoist: the declaration stays inside its #if");
-            CHECK(strstr(out, "vec3 arr[2];\n#define RS_INIT_1 arr =") != NULL, "hoist: an array keeps its size, the name is found");
-            CHECK(strstr(out, "vec3(PARAM),                      vec3(1.0))") != NULL, "hoist: a two-line initialiser on one line");
-            CHECK(strstr(out, "const float K = 2.0;") != NULL, "hoist: a line the compiler did not name is untouched");
-            CHECK(strstr(out, "float a = 1.0, b = PARAM;") != NULL, "hoist: a declarator list is left alone");
-            CHECK(strstr(out, "float y = v * PARAM;") != NULL, "hoist: a function's own locals are left alone");
-            const char *m = strstr(out, "void main()\n{");
-            CHECK(m && strstr(m, "#ifdef RS_INIT_0\nRS_INIT_0\n#endif\n#ifdef RS_INIT_1\nRS_INIT_1\n#endif") != NULL,
-                  "hoist: the assignments open main(), in source order, each guarded");
-            /* A second round appends after the first. */
-            int more[] = { 2 };
-            char *out2 = rs_hoist_globals(out, more, 1, &counter);
-            CHECK(out2 && counter == 3 && strstr(out2, "RS_INIT_1\n#endif\n#ifdef RS_INIT_2\nRS_INIT_2\n#endif\n/*rs_inits*/"),
-                  "hoist: a later round's assignments come after the earlier ones");
-            free(out2);
-            free(out);
-        }
-        int got[4];
-        int n = rs_glsl_global_init_errors(
-            "ERROR: 0:9: '=' : global variable initializers must be constant expressions\n"
-            "ERROR: 0:12: 'x' : undeclared identifier\n"
-            "ERROR: 0:40: '=' : global variable initializers must be constant expressions\n", 5, got, 4);
-        CHECK(n == 2 && got[0] == 4 && got[1] == 35, "hoist: the compiler's lines, less the prologue");
+/* ---- (E) ---- */
+static void test_hoist(void) {
+    const char *src =
+        "uniform float PARAM;\n"                                       /* 1 */
+        "const float K = 2.0;\n"                                       /* 2 */
+        "#ifdef FRAGMENT\n"                                            /* 3 */
+        "static const float x = PARAM * K; // scaled\n"                /* 4 */
+        "#endif\n"                                                     /* 5 */
+        "vec3 arr[2] = vec3[](vec3(PARAM),\n"                          /* 6 */
+        "                     vec3(1.0));\n"                           /* 7 */
+        "float a = 1.0, b = PARAM;\n"                                  /* 8 */
+        "struct S { float f; };\n"                                     /* 9 */
+        "float f(float v) { float y = v * PARAM; return y; }\n"        /* 10 */
+        "void main()\n{\n  gl_FragColor = vec4(x);\n}\n";
+    int lines[] = { 4, 7, 8, 10 };
+    int counter = 0;
+    char *out = rs_hoist_globals(src, lines, 4, &counter);
+    CHECK(out != NULL && counter == 2, "hoist: two statements moved (a declarator list and a local are not)");
+    if (out) {
+        CHECK(strstr(out, "float x;\n#define RS_INIT_0 x =  PARAM * K;") != NULL,
+              "hoist: const and static gone, the initialiser in a macro, its comment cut");
+        CHECK(strstr(out, "#ifdef FRAGMENT\n  float x;") != NULL || strstr(out, "#ifdef FRAGMENT\n float x;") != NULL ||
+              strstr(out, "#ifdef FRAGMENT\nfloat x;") != NULL, "hoist: the declaration stays inside its #if");
+        CHECK(strstr(out, "vec3 arr[2];\n#define RS_INIT_1 arr =") != NULL, "hoist: an array keeps its size, the name is found");
+        CHECK(strstr(out, "vec3(PARAM),                      vec3(1.0))") != NULL, "hoist: a two-line initialiser on one line");
+        CHECK(strstr(out, "const float K = 2.0;") != NULL, "hoist: a line the compiler did not name is untouched");
+        CHECK(strstr(out, "float a = 1.0, b = PARAM;") != NULL, "hoist: a declarator list is left alone");
+        CHECK(strstr(out, "float y = v * PARAM;") != NULL, "hoist: a function's own locals are left alone");
+        const char *m = strstr(out, "void main()\n{");
+        CHECK(m && strstr(m, "#ifdef RS_INIT_0\nRS_INIT_0\n#endif\n#ifdef RS_INIT_1\nRS_INIT_1\n#endif") != NULL,
+              "hoist: the assignments open main(), in source order, each guarded");
+        /* A second round appends after the first. */
+        int more[] = { 2 };
+        char *out2 = rs_hoist_globals(out, more, 1, &counter);
+        CHECK(out2 && counter == 3 && strstr(out2, "RS_INIT_1\n#endif\n#ifdef RS_INIT_2\nRS_INIT_2\n#endif\n/*rs_inits*/"),
+              "hoist: a later round's assignments come after the earlier ones");
+        free(out2);
+        free(out);
     }
+    int got[4];
+    int n = rs_glsl_global_init_errors(
+        "ERROR: 0:9: '=' : global variable initializers must be constant expressions\n"
+        "ERROR: 0:12: 'x' : undeclared identifier\n"
+        "ERROR: 0:40: '=' : global variable initializers must be constant expressions\n", 5, got, 4);
+    CHECK(n == 2 && got[0] == 4 && got[1] == 35, "hoist: the compiler's lines, less the prologue");
+}
+
+int main(void) {
+    test_paths();
+    test_glsl();
+    test_glslp();
+    test_glslp_defaults();
+    test_refused();
+    test_hoist();
 
     printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail, g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;

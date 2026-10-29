@@ -396,8 +396,10 @@ static void m2comm_phantom_report(void) {
                     g_m2comm_link.alive == M2COMM_LINK_UP ? "up" : "down",
                     g_m2comm_link.id, g_m2comm_link.count, g_m2comm_link.taken, g_m2comm_link.sent);
         if (!strncmp(g_active_profile->id, "von", 3))
-            fprintf(stderr, "vonj: role byte %u, link_ID %u, 503A08 %u, net_flag %u, packets in (cRecn+4) %u\n",
-                    mem_read8(&bus, 0x01D00028u), mem_read8(&bus, 0x005770B1u), mem_read32(&bus, 0x00503A08u),
+            /* vonj's 0x503A08 is von's 0x503A04 (profiles/vonj.h). */
+            fprintf(stderr, "%s: role byte %u, link_ID %u, 503A08 %u, net_flag %u, packets in (cRecn+4) %u\n",
+                    g_active_profile->id, mem_read8(&bus, 0x01D00028u), mem_read8(&bus, 0x005770B1u),
+                    mem_read32(&bus, strcmp(g_active_profile->id, "von") ? 0x00503A08u : 0x00503A04u),
                     mem_read8(&bus, 0x005770B0u), mem_read32(&bus, 0x005024F4u));
     }
 #ifndef __EMSCRIPTEN__
@@ -503,10 +505,11 @@ static void link_host_report(void) {
  * net/comm_role.h's, through the reset hook). */
 static void install_board(void *ctx) {
     (void)ctx;
-    g_active_profile->install_fn(&romset, &cpu, &bus);
+    m2_spin_install(&romset, &cpu, &bus);
     if (g_gems_i960 || g_gems_cop || g_gems_verify) gems_apply(profile_rom_set(g_active_profile));
     irqt_reset();
     if (g_active_profile->quirks.enable_68k_sound) {
+        sound_select_board(g_active_profile->quirks.model1_sound);
         sound_reset();
         sound_attach(&bus);
         if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
@@ -652,33 +655,23 @@ static void rewind_report(void) {
                 (double)rw.moved[i] / rw.compared);
 }
 
+/* A key script's letters: player 1's, then player 2's, and their actions. */
+static const char k_key_letters[] = "udlr1234scUDLR!@#$SC";
+static const int  k_key_acts[] = {
+    GAME_INPUT_P1_UP, GAME_INPUT_P1_DOWN, GAME_INPUT_P1_LEFT, GAME_INPUT_P1_RIGHT,
+    GAME_INPUT_P1_B1, GAME_INPUT_P1_B2, GAME_INPUT_P1_B3, GAME_INPUT_P1_B4,
+    GAME_INPUT_P1_START, GAME_INPUT_P1_COIN,
+    GAME_INPUT_P2_UP, GAME_INPUT_P2_DOWN, GAME_INPUT_P2_LEFT, GAME_INPUT_P2_RIGHT,
+    GAME_INPUT_P2_B1, GAME_INPUT_P2_B2, GAME_INPUT_P2_B3, GAME_INPUT_P2_B4,
+    GAME_INPUT_P2_START, GAME_INPUT_P2_COIN,
+};
+
 static uint32_t keys_mask(const char *p, const char *end) {
     const game_input_map_t *in = &g_active_profile->input;
     uint32_t m = 0;
     for (; p < end; p++) {
-        switch (*p) {
-            case 'u': m |= in->bits[GAME_INPUT_P1_UP];    break;
-            case 'd': m |= in->bits[GAME_INPUT_P1_DOWN];  break;
-            case 'l': m |= in->bits[GAME_INPUT_P1_LEFT];  break;
-            case 'r': m |= in->bits[GAME_INPUT_P1_RIGHT]; break;
-            case '1': m |= in->bits[GAME_INPUT_P1_B1];    break;
-            case '2': m |= in->bits[GAME_INPUT_P1_B2];    break;
-            case '3': m |= in->bits[GAME_INPUT_P1_B3];    break;
-            case '4': m |= in->bits[GAME_INPUT_P1_B4];    break;
-            case 's': m |= in->bits[GAME_INPUT_P1_START]; break;
-            case 'c': m |= in->bits[GAME_INPUT_P1_COIN];    break;
-            case 'U': m |= in->bits[GAME_INPUT_P2_UP];    break;
-            case 'D': m |= in->bits[GAME_INPUT_P2_DOWN];  break;
-            case 'L': m |= in->bits[GAME_INPUT_P2_LEFT];  break;
-            case 'R': m |= in->bits[GAME_INPUT_P2_RIGHT]; break;
-            case '!': m |= in->bits[GAME_INPUT_P2_B1];    break;
-            case '@': m |= in->bits[GAME_INPUT_P2_B2];    break;
-            case '#': m |= in->bits[GAME_INPUT_P2_B3];    break;
-            case '$': m |= in->bits[GAME_INPUT_P2_B4];    break;
-            case 'S': m |= in->bits[GAME_INPUT_P2_START]; break;
-            case 'C': m |= in->bits[GAME_INPUT_P2_COIN];    break;
-            default: break;
-        }
+        const char *k = *p ? strchr(k_key_letters, *p) : NULL;
+        if (k) m |= in->bits[k_key_acts[k - k_key_letters]];
     }
     return m;
 }
@@ -692,6 +685,38 @@ static void cop_tap(uint32_t tag, uint32_t val) {
 
 static FILE    *trace_out;
 static uint32_t trace_frame;
+
+/* The trace's line for the instruction at ip: the registers' hash after it. */
+static void trace_line(uint32_t ip, const i960_cpu_t *c) {
+    uint64_t h = fnv(FNV0, c->globals.g, sizeof c->globals.g);
+    h = fnv(h, c->locals.r, sizeof c->locals.r);
+    h = fnv(h, &c->sfr.ac, sizeof c->sfr.ac);
+    h = fnv(h, c->fp_regs, sizeof c->fp_regs);
+    fprintf(trace_out, "%08x %016llx\n", ip, (unsigned long long)h);
+}
+
+/* After a traced step: a hook's extra steps, the sound board's interrupts and
+ * the timers; true when the slice stops here (a warning, a watchpoint, an
+ * unknown COP command). */
+static bool trace_after_step(emu_thread_ctx_t *ctx, uint64_t *steps, int *i) {
+    if (g_hle_extra) { ctx->total_steps += g_hle_extra; *steps += g_hle_extra; *i += (int)g_hle_extra; g_hle_extra = 0; }
+    if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
+    else if (g_irqt_sound_kick && g_active_profile) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
+    emu_timers_after_step(ctx);
+    return g_log.warn_triggered || g_wp.hit || g_sharc.unknown_triggered;
+}
+
+/* The end of a traced slice: the frame edge, the sound, the snapshots. */
+static void trace_slice_end(emu_thread_ctx_t *ctx) {
+    bool frame = g_vblank_edge != 0;
+    if (frame && g_active_profile->quirks.board_vblank) {
+        cop_geo_frame_edge(); dl_frame_edge(ctx->bus, g_emu_frames); hle_match_replay_edge(ctx->bus);
+    }
+    emu_sound_slice_end(frame);
+    if (g_active_profile->quirks.geo_displaylist) geodl_capture(ctx->bus);
+    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
+    ctx->cpu_snapshot      = *ctx->cpu;
+}
 
 /* emu_slice_body (emu_thread.h), with a line per instruction. */
 static void trace_slice(emu_thread_ctx_t *ctx) {
@@ -707,28 +732,10 @@ static void trace_slice(emu_thread_ctx_t *ctx) {
         if (i960_step_hot(ctx->cpu, ctx->bus) != 0) break;
         ctx->total_steps++;
         steps++;
-        const i960_cpu_t *c = ctx->cpu;
-        uint64_t h = fnv(FNV0, c->globals.g, sizeof c->globals.g);
-        h = fnv(h, c->locals.r, sizeof c->locals.r);
-        h = fnv(h, &c->sfr.ac, sizeof c->sfr.ac);
-        h = fnv(h, c->fp_regs, sizeof c->fp_regs);
-        fprintf(trace_out, "%08x %016llx\n", ip, (unsigned long long)h);
-        if (g_hle_extra) { ctx->total_steps += g_hle_extra; steps += g_hle_extra; i += (int)g_hle_extra; g_hle_extra = 0; }
-        if (s_irq_in_service && g_active_profile) emu_service_sound_again(ctx);
-        else if (g_irqt_sound_kick && g_active_profile) { g_irqt_sound_kick = 0; emu_offer_sound(ctx); }
-        emu_timers_after_step(ctx);
-        if (g_log.warn_triggered) break;
-        if (g_wp.hit) break;
-        if (g_sharc.unknown_triggered) break;
+        trace_line(ip, ctx->cpu);
+        if (trace_after_step(ctx, &steps, &i)) break;
     }
-    bool frame = g_vblank_edge != 0;
-    if (frame) {
-        if (g_active_profile->quirks.board_vblank) { cop_geo_frame_edge(); dl_frame_edge(ctx->bus, g_emu_frames); hle_match_replay_edge(ctx->bus); }
-    }
-    emu_sound_slice_end(frame);
-    if (g_active_profile->quirks.geo_displaylist) geodl_capture(ctx->bus);
-    ctx->cpu_prev_snapshot = ctx->cpu_snapshot;
-    ctx->cpu_snapshot      = *ctx->cpu;
+    trace_slice_end(ctx);
 }
 
 /* --aot-map F0:F1:FILE: the code those game frames run, for the static
@@ -1374,9 +1381,7 @@ static uint32_t words_mask(uint32_t w0, uint32_t w1) {
         if (w0 & (1u << i)) held |= in->bits[p1[i]];
         if (w1 & (1u << i)) held |= in->bits[p2[i]];
     }
-    if (w0 & (1u << NP_BIT_SERVICE)) held |= in->bits[GAME_INPUT_SERVICE];
-    if (w0 & (1u << NP_BIT_TEST))    held |= in->bits[GAME_INPUT_TEST];
-    return held;
+    return held | np_cabinet_held(w0, in);
 }
 
 static void parse_script(const char *s) {
@@ -1435,178 +1440,247 @@ static int load_rom_dir(const char *dir) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: det_digest <merged sfight zip, a folder of region images, or the PS3 stf_rom folder> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem] [--profile ID] [--gems-i960] [--gems-cop] [--gems-verify]\n");
-        return 2;
-    }
-    uint32_t frames = 3600, from = 0;
-    uint32_t peek_addr = 0, peek32_addr = 0;
-    bool frames_given = false, sound_cols = false, cpu_cols = false;
-    const char *out_path = NULL, *script_text = NULL, *inputs_path = NULL, *profile_id = "sfight";
-    for (int i = 2; i < argc; i++) {
-        if      (!strcmp(argv[i], "--frames") && i + 1 < argc) { frames = (uint32_t)strtoul(argv[++i], NULL, 10); frames_given = true; }
-        else if (!strcmp(argv[i], "--inputs") && i + 1 < argc) inputs_path = argv[++i];
-        else if (!strcmp(argv[i], "--from")   && i + 1 < argc) from   = (uint32_t)strtoul(argv[++i], NULL, 10);
-        else if (!strcmp(argv[i], "--script") && i + 1 < argc) script_text = argv[++i];
-        else if (!strcmp(argv[i], "--out")    && i + 1 < argc) out_path = argv[++i];
-        else if (!strcmp(argv[i], "--sound"))                   sound_cols = true;
-        else if (!strcmp(argv[i], "--cpu"))                     cpu_cols = true;
-        else if (!strcmp(argv[i], "--no-sound-thread"))         g_sound_thread_want = 0;
-        else if (!strcmp(argv[i], "--sound-hle"))               g_sound_hle_want = 1;
-        else if (!strcmp(argv[i], "--texload-i960"))            g_texload_hle = 0;
-        else if (!strcmp(argv[i], "--spin-i960"))               g_spin_skip = 0;
-        else if (!strcmp(argv[i], "--i960-timing") && i + 1 < argc)
-            g_i960_timing_force = !strcmp(argv[++i], "board") ? 1 : !strcmp(argv[i], "table") ? 0 : -1;
-        else if (!strcmp(argv[i], "--live-timers"))             ;   /* always on now */
-        else if (!strcmp(argv[i], "--nowarnskip"))              g_warning_skip = 0;
-        else if (!strcmp(argv[i], "--steps-per-slice") && i + 1 < argc) g_emu_steps_per_slice = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--region") && i + 1 < argc) { const char *r = argv[++i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
-        else if (!strcmp(argv[i], "--peek")   && i + 1 < argc) peek_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
-        else if (!strcmp(argv[i], "--peek32") && i + 1 < argc) peek32_addr = (uint32_t)strtoul(argv[++i], NULL, 16);
-        else if (!strcmp(argv[i], "--pcm")    && i + 1 < argc) snd_pcm = fopen(argv[++i], "wb");
-#if I960_BLOCKS
-        else if (!strcmp(argv[i], "--census") && i + 1 < argc) {
-            char path[1024];
-            if (sscanf(argv[++i], "%u:%u:%1023s", &census_from, &census_to, path) != 3 || !(census_out = fopen(path, "wb"))) {
-                fprintf(stderr, "--census F0:F1:FILE\n");
-                return 2;
-            }
-        }
-#endif
-        else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
-            char *a = argv[++i], *colon = strrchr(a, ':');
-            if (!colon || !(raw_out = fopen(colon + 1, "wb"))) { fprintf(stderr, "--raw wants RANGES:FILE\n"); return 2; }
-            for (char *p = a; p < colon && raw_n < 16; ) {
-                char *e;
-                raw_rng[raw_n][0] = (uint32_t)strtoul(p, &e, 16);
-                if (*e != ':') break;
-                raw_rng[raw_n][1] = (uint32_t)strtoul(e + 1, &e, 16) & ~3u;
-                raw_n++;
-                p = (*e == ',') ? e + 1 : colon;
-            }
-        }
-        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
-        else if (!strcmp(argv[i], "--gems"))   g_gems_i960 = g_gems_cop = true;
-        else if (!strcmp(argv[i], "--gems-verify")) g_gems_verify = g_gems_cop = true;   /* each trap both ways */
-        else if (!strcmp(argv[i], "--aot-map") && i + 1 < argc) {
-            if (sscanf(argv[++i], "%u:%u:%1023s", &aotmap_from, &aotmap_to, aotmap_path) != 3
-                    || !(aotmap_out = fopen(aotmap_path, "wb"))) {
-                fprintf(stderr, "--aot-map F0:F1:FILE\n");
-                return 2;
-            }
-        }
-        else if (!strcmp(argv[i], "--strip-keys") && i + 1 < argc) {
-            char path[1024] = {0};
-            if (sscanf(argv[++i], "%u:%u:%1023s", &spkey_from, &spkey_to, path) != 3
-                    || !(spkey_out = fopen(path, "wb"))) {
-                fprintf(stderr, "--strip-keys F0:F1:FILE\n");
-                return 2;
-            }
-        }
-        else if (!strcmp(argv[i], "--tex-pack") && i + 1 < argc) {
-            static char path[1024];
-            char *plus;
-            if (sscanf(argv[++i], "%u:%u:%1023s", &txp_from, &txp_to, path) != 3) {
-                fprintf(stderr, "--tex-pack F0:F1:FILE[:+BASE]\n");
-                return 2;
-            }
-            if ((plus = strstr(path, ":+")) != NULL) { txp_base = (uint32_t)strtoul(plus + 2, NULL, 10); *plus = 0; }
-            txp_path = path;
-            txp_load();
-        }
-        else if (!strcmp(argv[i], "--tex-groups") && i + 1 < argc) {
-            if (txg_read(argv[++i]) != 0) return 2;
-        }
-        else if (!strcmp(argv[i], "--model-map") && i + 1 < argc) {
-            char path[1024] = {0};
-            if (sscanf(argv[++i], "%u:%u:%1023s", &mdlmap_from, &mdlmap_to, path) != 3
-                    || !(mdlmap_out = fopen(path, "wb"))) {
-                fprintf(stderr, "--model-map F0:F1:FILE\n");
-                return 2;
-            }
-        }
-        else if (!strcmp(argv[i], "--trace")  && i + 1 < argc) {
-            char path[1024] = {0};
-            if (sscanf(argv[++i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
-                fprintf(stderr, "--trace F:FILE\n");
-                return 2;
-            }
-        }
-        else if (!strcmp(argv[i], "--load")   && i + 1 < argc) load_path = argv[++i];
-        else if (!strcmp(argv[i], "--follow-out")   && i + 1 < argc) follow_out = argv[++i];
-        else if (!strcmp(argv[i], "--follow-every") && i + 1 < argc) follow_every = (uint32_t)atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--follow") && i + 1 < argc) follow_in = argv[++i];
-        else if (!strcmp(argv[i], "--poke") && i + 1 < argc) {
-            if (!parse_poke(argv[++i])) { fprintf(stderr, "--poke F:ADDR:HEX\n"); return 2; }
-        }
-        else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile_id = argv[++i];
-        else if (!strcmp(argv[i], "--mem")) state_mem = true;
-        else if (!strcmp(argv[i], "--m2comm-phantom")) m2comm_phantom = true;
-        else if (!strcmp(argv[i], "--m2comm-udp")) m2comm_udp = true;
-        else if (!strcmp(argv[i], "--link-host-hz") && i + 1 < argc) link_host_hz = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--link-host-jitter") && i + 1 < argc) link_host_jitter_us = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--link-unpaced")) link_unpaced = true;
-        else if (!strcmp(argv[i], "--room-role") && i + 1 < argc) {
-            const char *r = argv[++i];
-            room_role = !strcmp(r, "host") ? GAME_LINK_MASTER : !strcmp(r, "guest") ? GAME_LINK_SLAVE : GAME_LINK_ALONE;
-            if (room_role == GAME_LINK_ALONE) { fprintf(stderr, "--room-role host|guest\n"); return 2; }
-        }
-        else if (!strcmp(argv[i], "--gems-i960"))   g_gems_i960 = true;
-        else if (!strcmp(argv[i], "--gems-cop"))    g_gems_cop = true;
-        else if (!strcmp(argv[i], "--gems-verify")) g_gems_verify = true;
-        else if (!strcmp(argv[i], "--rewind-census")) rewind_census = true;
-        else if (!strcmp(argv[i], "--rewind") && i + 1 < argc) {
-            if (!rewind_arg(argv[++i])) return 2;
-        }
-        else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
-            if (sscanf(argv[++i], "%u:%1023s", &save_frame, save_path) != 2) {
-                fprintf(stderr, "--save-at F:FILE\n");
-                return 2;
-            }
-        }
-        else if (!strcmp(argv[i], "--cop")    && i + 1 < argc) {
-            char path[1024] = {0};
-            if (sscanf(argv[++i], "%u:%u:%1023s", &cop_from, &cop_to, path) != 3 || !(cop_out = fopen(path, "wb"))) {
-                fprintf(stderr, "--cop FROM:TO:FILE\n");
-                return 2;
-            }
-            g_cop_tap = cop_tap;
-            g_tgp_tap = cop_tap;
-        }
-    }
+/* The command line's settings that only main uses; the rest go straight
+ * into the globals above. */
+typedef struct {
+    uint32_t    frames, from, peek_addr, peek32_addr;
+    bool        frames_given, sound_cols, cpu_cols;
+    const char *out_path, *script_text, *inputs_path, *profile_id;
+} dd_opts_t;
 
+/* What the frame loop counts, for the report. */
+typedef struct {
+    uint64_t slices;
+    uint32_t mismatches, first_mismatch;
+} dd_run_t;
+
+/* argv[i] is NAME, with a value after it. */
+static bool arg_val(int argc, char **argv, int i, const char *name) {
+    return !strcmp(argv[i], name) && i + 1 < argc;
+}
+
+/* The argument parsers take argv[*i] if it is theirs: 1 taken, 0 not
+ * theirs, 2 a bad value (main exits 2). */
+static int parse_run_arg(dd_opts_t *o, int argc, char **argv, int *i) {
+    const char *a = argv[*i];
+    if      (arg_val(argc, argv, *i, "--frames")) { o->frames = (uint32_t)strtoul(argv[++*i], NULL, 10); o->frames_given = true; }
+    else if (arg_val(argc, argv, *i, "--inputs")) o->inputs_path = argv[++*i];
+    else if (arg_val(argc, argv, *i, "--from"))   o->from   = (uint32_t)strtoul(argv[++*i], NULL, 10);
+    else if (arg_val(argc, argv, *i, "--script")) o->script_text = argv[++*i];
+    else if (arg_val(argc, argv, *i, "--out"))    o->out_path = argv[++*i];
+    else if (!strcmp(a, "--sound"))                o->sound_cols = true;
+    else if (!strcmp(a, "--cpu"))                  o->cpu_cols = true;
+    else if (arg_val(argc, argv, *i, "--peek"))   o->peek_addr = (uint32_t)strtoul(argv[++*i], NULL, 16);
+    else if (arg_val(argc, argv, *i, "--peek32")) o->peek32_addr = (uint32_t)strtoul(argv[++*i], NULL, 16);
+    else if (arg_val(argc, argv, *i, "--profile")) o->profile_id = argv[++*i];
+    else return 0;
+    return 1;
+}
+
+static int parse_board_arg(int argc, char **argv, int *i) {
+    const char *a = argv[*i];
+    if      (!strcmp(a, "--no-sound-thread"))         g_sound_thread_want = 0;
+    else if (!strcmp(a, "--sound-hle"))               g_sound_hle_want = 1;
+    else if (!strcmp(a, "--sound-68k"))               g_sound_hle_want = 0;
+    else if (!strcmp(a, "--sound-synth"))             g_sound_synth_want = 1;
+    else if (!strcmp(a, "--scsp-exact"))              g_scsp_exact = 1;
+    else if (!strcmp(a, "--texload-i960"))            g_texload_hle = 0;
+    else if (!strcmp(a, "--spin-i960"))               g_spin_skip = 0;
+    else if (arg_val(argc, argv, *i, "--i960-timing"))
+        g_i960_timing_force = !strcmp(argv[++*i], "board") ? 1 : !strcmp(argv[*i], "table") ? 0 : -1;
+    else if (!strcmp(a, "--live-timers"))             ;   /* always on now */
+    else if (!strcmp(a, "--nowarnskip"))              g_warning_skip = 0;
+    else if (arg_val(argc, argv, *i, "--steps-per-slice")) g_emu_steps_per_slice = atoi(argv[++*i]);
+    else if (arg_val(argc, argv, *i, "--region")) { const char *r = argv[++*i]; g_region = !strcmp(r, "japan") ? GAME_REGION_JAPAN : !strcmp(r, "export") ? GAME_REGION_EXPORT : GAME_REGION_USA; }
+    else if (!strcmp(a, "--gems-i960"))   g_gems_i960 = true;
+    else if (!strcmp(a, "--gems-cop"))    g_gems_cop = true;
+    else if (!strcmp(a, "--gems"))        g_gems_i960 = g_gems_cop = true;
+    else if (!strcmp(a, "--gems-verify")) g_gems_verify = g_gems_cop = true;   /* each trap both ways */
+    else return 0;
+    return 1;
+}
+
+static int parse_state_arg(int argc, char **argv, int *i) {
+    const char *a = argv[*i];
+    if      (arg_val(argc, argv, *i, "--pcm"))    snd_pcm = fopen(argv[++*i], "wb");
+    else if (arg_val(argc, argv, *i, "--trace")) {
+        char path[1024] = {0};
+        if (sscanf(argv[++*i], "%u:%1023s", &trace_frame, path) != 2 || !(trace_out = fopen(path, "wb"))) {
+            fprintf(stderr, "--trace F:FILE\n");
+            return 2;
+        }
+    }
+    else if (arg_val(argc, argv, *i, "--load"))   load_path = argv[++*i];
+    else if (arg_val(argc, argv, *i, "--follow-out"))   follow_out = argv[++*i];
+    else if (arg_val(argc, argv, *i, "--follow-every")) follow_every = (uint32_t)atoi(argv[++*i]);
+    else if (arg_val(argc, argv, *i, "--follow")) follow_in = argv[++*i];
+    else if (arg_val(argc, argv, *i, "--poke")) {
+        if (!parse_poke(argv[++*i])) { fprintf(stderr, "--poke F:ADDR:HEX\n"); return 2; }
+    }
+    else if (!strcmp(a, "--mem")) state_mem = true;
+    else if (!strcmp(a, "--rewind-census")) rewind_census = true;
+    else if (arg_val(argc, argv, *i, "--rewind")) {
+        if (!rewind_arg(argv[++*i])) return 2;
+    }
+    else if (arg_val(argc, argv, *i, "--save-at")) {
+        if (sscanf(argv[++*i], "%u:%1023s", &save_frame, save_path) != 2) {
+            fprintf(stderr, "--save-at F:FILE\n");
+            return 2;
+        }
+    }
+    else if (arg_val(argc, argv, *i, "--cop")) {
+        char path[1024] = {0};
+        if (sscanf(argv[++*i], "%u:%u:%1023s", &cop_from, &cop_to, path) != 3 || !(cop_out = fopen(path, "wb"))) {
+            fprintf(stderr, "--cop FROM:TO:FILE\n");
+            return 2;
+        }
+        g_cop_tap = cop_tap;
+        g_tgp_tap = cop_tap;
+    }
+    else return 0;
+    return 1;
+}
+
+static int parse_link_arg(int argc, char **argv, int *i) {
+    const char *a = argv[*i];
+    if      (!strcmp(a, "--m2comm-phantom")) m2comm_phantom = true;
+    else if (!strcmp(a, "--m2comm-udp")) m2comm_udp = true;
+    else if (arg_val(argc, argv, *i, "--link-host-hz")) link_host_hz = atof(argv[++*i]);
+    else if (arg_val(argc, argv, *i, "--link-host-jitter")) link_host_jitter_us = atoi(argv[++*i]);
+    else if (!strcmp(a, "--link-unpaced")) link_unpaced = true;
+    else if (arg_val(argc, argv, *i, "--room-role")) {
+        const char *r = argv[++*i];
+        room_role = !strcmp(r, "host") ? GAME_LINK_MASTER : !strcmp(r, "guest") ? GAME_LINK_SLAVE : GAME_LINK_ALONE;
+        if (room_role == GAME_LINK_ALONE) { fprintf(stderr, "--room-role host|guest\n"); return 2; }
+    }
+    else return 0;
+    return 1;
+}
+
+/* The maps and dumps the Dreamcast port's build reads (dreamcast/README.md). */
+static int parse_tool_arg(int argc, char **argv, int *i) {
+    char path[1024] = {0};
+    if (0) ;
+#if I960_BLOCKS
+    else if (arg_val(argc, argv, *i, "--census")) {
+        if (sscanf(argv[++*i], "%u:%u:%1023s", &census_from, &census_to, path) != 3 || !(census_out = fopen(path, "wb"))) {
+            fprintf(stderr, "--census F0:F1:FILE\n");
+            return 2;
+        }
+    }
+#endif
+    else if (arg_val(argc, argv, *i, "--raw")) {
+        char *a = argv[++*i], *colon = strrchr(a, ':');
+        if (!colon || !(raw_out = fopen(colon + 1, "wb"))) { fprintf(stderr, "--raw wants RANGES:FILE\n"); return 2; }
+        for (char *p = a; p < colon && raw_n < 16; ) {
+            char *e;
+            raw_rng[raw_n][0] = (uint32_t)strtoul(p, &e, 16);
+            if (*e != ':') break;
+            raw_rng[raw_n][1] = (uint32_t)strtoul(e + 1, &e, 16) & ~3u;
+            raw_n++;
+            p = (*e == ',') ? e + 1 : colon;
+        }
+    }
+    else if (arg_val(argc, argv, *i, "--aot-map")) {
+        if (sscanf(argv[++*i], "%u:%u:%1023s", &aotmap_from, &aotmap_to, aotmap_path) != 3
+                || !(aotmap_out = fopen(aotmap_path, "wb"))) {
+            fprintf(stderr, "--aot-map F0:F1:FILE\n");
+            return 2;
+        }
+    }
+    else if (arg_val(argc, argv, *i, "--strip-keys")) {
+        if (sscanf(argv[++*i], "%u:%u:%1023s", &spkey_from, &spkey_to, path) != 3
+                || !(spkey_out = fopen(path, "wb"))) {
+            fprintf(stderr, "--strip-keys F0:F1:FILE\n");
+            return 2;
+        }
+    }
+    else if (arg_val(argc, argv, *i, "--tex-pack")) {
+        static char pack[1024];
+        char *plus;
+        if (sscanf(argv[++*i], "%u:%u:%1023s", &txp_from, &txp_to, pack) != 3) {
+            fprintf(stderr, "--tex-pack F0:F1:FILE[:+BASE]\n");
+            return 2;
+        }
+        if ((plus = strstr(pack, ":+")) != NULL) { txp_base = (uint32_t)strtoul(plus + 2, NULL, 10); *plus = 0; }
+        txp_path = pack;
+        txp_load();
+    }
+    else if (arg_val(argc, argv, *i, "--tex-groups")) {
+        if (txg_read(argv[++*i]) != 0) return 2;
+    }
+    else if (arg_val(argc, argv, *i, "--model-map")) {
+        if (sscanf(argv[++*i], "%u:%u:%1023s", &mdlmap_from, &mdlmap_to, path) != 3
+                || !(mdlmap_out = fopen(path, "wb"))) {
+            fprintf(stderr, "--model-map F0:F1:FILE\n");
+            return 2;
+        }
+    }
+    else return 0;
+    return 1;
+}
+
+static int parse_args(dd_opts_t *o, int argc, char **argv) {
+    for (int i = 2; i < argc; i++) {
+        int r = parse_run_arg(o, argc, argv, &i);
+        if (!r) r = parse_board_arg(argc, argv, &i);
+        if (!r) r = parse_state_arg(argc, argv, &i);
+        if (!r) r = parse_link_arg(argc, argv, &i);
+        if (!r) r = parse_tool_arg(argc, argv, &i);
+        if (r == 2) return 2;
+    }
+    return 0;
+}
+
+/* The profile, the script or input log, the ROM set and the board, up to a
+ * running one (from --load's state if there is one). 0, or 2 to exit with. */
+/* The profile, then the script or the input log (the run's length from it).
+ * 0, or 2. */
+static int board_inputs(dd_opts_t *o) {
+    for (size_t i = 0; i < g_profile_count; i++)
+        if (!strcmp(g_profiles[i]->id, o->profile_id)) g_active_profile = g_profiles[i];
+    if (!g_active_profile) { fprintf(stderr, "no %s profile\n", o->profile_id); return 2; }
+    if (o->script_text) parse_script(o->script_text);
+    if (o->inputs_path) {
+        if (!load_inputs(o->inputs_path)) { fprintf(stderr, "cannot read an input log from %s\n", o->inputs_path); return 2; }
+        if (!o->frames_given || o->frames > in_n) o->frames = in_n;
+        fprintf(stderr, "replaying %u session frames from %s\n", (unsigned)in_n, o->inputs_path);
+    }
+    return 0;
+}
+
+/* A directory of region images (--export-roms) loads as it is, and the PS3
+ * release's stf_rom folder as the Dreamcast disc places it. Otherwise the
+ * web build's load: one zip, read whole, strict by CRC. 0, or 2. */
+static int board_load_set(const char *set) {
+    if (romset_is_dir(set)) {
+        char probe[1024];
+        snprintf(probe, sizeof probe, "%s/%s", set, k_romset_files[0]);
+        struct stat st;
+        if (!stat(probe, &st)) return romset_load_dir(&romset, set) != 0 ? 2 : 0;
+        if (load_rom_dir(set) != 0) { fprintf(stderr, "ROM load from %s failed\n", set); return 2; }
+        return 0;
+    }
+    return load_zip_set(set) != 0 ? 2 : 0;
+}
+
+/* --load's state. A board from a state: what it prints from here on has to
+ * be what the run that saved it printed. The sample hash starts here. 0, or 2. */
+static int board_load_state(void) {
+    const char *err = state_mem ? mem_state_load(&emu, load_path) : emu_state_load_now(&emu, load_path);
+    if (err) { fprintf(stderr, "--load %s: %s\n", load_path, err); return 2; }
+    snd_out_hash = FNV0; snd_out_n = 0;
+    fprintf(stderr, "loaded %s at frame %u\n", load_path, (unsigned)g_emu_frames);
+    return 0;
+}
+
+static int board_setup(dd_opts_t *o, const char *set) {
     log_init();
     mem_init(&bus, NULL, 0);
     i960_reset(&cpu);
     bp_init();
     wp_init();
-    for (size_t i = 0; i < g_profile_count; i++)
-        if (!strcmp(g_profiles[i]->id, profile_id)) g_active_profile = g_profiles[i];
-    if (!g_active_profile) { fprintf(stderr, "no %s profile\n", profile_id); return 2; }
-    if (script_text) parse_script(script_text);
-    if (inputs_path) {
-        if (!load_inputs(inputs_path)) { fprintf(stderr, "cannot read an input log from %s\n", inputs_path); return 2; }
-        if (!frames_given || frames > in_n) frames = in_n;
-        fprintf(stderr, "replaying %u session frames from %s\n", (unsigned)in_n, inputs_path);
-    }
-
-    /* A directory of region images (--export-roms) loads as it is, and the PS3
-     * release's stf_rom folder as the Dreamcast disc places it. Otherwise the
-     * web build's load: one zip, read whole, strict by CRC. */
-    if (romset_is_dir(argv[1])) {
-        char probe[1024];
-        snprintf(probe, sizeof probe, "%s/%s", argv[1], k_romset_files[0]);
-        struct stat st;
-        if (!stat(probe, &st)) {
-            if (romset_load_dir(&romset, argv[1]) != 0) return 2;
-        } else if (load_rom_dir(argv[1]) != 0) {
-            fprintf(stderr, "ROM load from %s failed\n", argv[1]);
-            return 2;
-        }
-    } else if (load_zip_set(argv[1]) != 0) {
-        return 2;
-    }
+    if (board_inputs(o) || board_load_set(set)) return 2;
 
     if (room_role != GAME_LINK_ALONE && !m2comm_phantom && !m2comm_udp) {
         fprintf(stderr, "--room-role needs --m2comm-phantom or --m2comm-udp\n");
@@ -1619,17 +1693,13 @@ int main(int argc, char **argv) {
     emu_run(&emu);
     if (raw_out) { raw_bus = &bus; raw_cpu = &cpu; g_game_frame_edge_cb = raw_frame; }
     sound_set_tap(snd_out_tap, NULL);
-    if (load_path) {
-        /* A board from a state: what it prints from here on has to be what
-         * the run that saved it printed. The sample hash starts here. */
-        const char *err = state_mem ? mem_state_load(&emu, load_path) : emu_state_load_now(&emu, load_path);
-        if (err) { fprintf(stderr, "--load %s: %s\n", load_path, err); return 2; }
-        snd_out_hash = FNV0; snd_out_n = 0;
-        fprintf(stderr, "loaded %s at frame %u\n", load_path, (unsigned)g_emu_frames);
-    }
+    return load_path ? board_load_state() : 0;
+}
 
-    FILE *out = out_path ? fopen(out_path, "wb") : stdout;
-    if (!out) { fprintf(stderr, "cannot write %s\n", out_path); return 2; }
+/* The digest file, a follow feed out or in, and the rewind ring. 0, or 2. */
+static int run_setup(const dd_opts_t *o, FILE **out) {
+    *out = o->out_path ? fopen(o->out_path, "wb") : stdout;
+    if (!*out) { fprintf(stderr, "cannot write %s\n", o->out_path); return 2; }
     if (follow_out) {
         const char *err = follow_lead_start(follow_out, follow_every ? follow_every : 1000000000u);
         if (err) { fprintf(stderr, "--follow-out %s: %s\n", follow_out, err); return 2; }
@@ -1644,87 +1714,123 @@ int main(int argc, char **argv) {
     }
 
     if (rewind_k && !rewind_init(&emu)) { fprintf(stderr, "--rewind: out of memory\n"); return 2; }
+    return 0;
+}
+
+/* This frame's held mask (from the script or the input log) and pokes. */
+static void frame_inputs(int *at) {
+    /* Inputs change only on a frame boundary, as the lockstep's do. */
+    while (*at < script_n && script[*at].frame <= g_emu_frames) g_input.held = script[(*at)++].held;
+    if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
+    for (int p = 0; p < poke_n; p++) {
+        if (pokes[p].frame != g_emu_frames || !pokes[p].n) continue;
+        follow_bus_write(&bus, pokes[p].addr, false, pokes[p].b, pokes[p].n);
+        follow_lead_write(pokes[p].addr, false, pokes[p].b, pokes[p].n);
+        pokes[p].n = 0;
+    }
+}
+
+/* A frame of the input log: does the replay's check match the session's? */
+static void frame_check_log(dd_run_t *run) {
+    uint32_t f = g_emu_frames - 1, c = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
+    if (c != in_check[f]) {
+        if (!run->mismatches) {
+            run->first_mismatch = f;
+            fprintf(stderr, "first mismatch at session frame %u: the log says %08X, the replay %08X\n",
+                    (unsigned)f, in_check[f], c);
+        }
+        run->mismatches++;
+    }
+}
+
+static bool frame_save_at(void) {
+    /* ... and the samples from here on are what the loaded run's are. */
+    const char *err = state_mem ? mem_state_save(&emu, save_path) : emu_state_save_now(&emu, save_path);
+    if (err) { fprintf(stderr, "--save-at %s: %s\n", save_path, err); return false; }
+    snd_out_hash = FNV0; snd_out_n = 0;
+    fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
+    return true;
+}
+
+/* A frame's line of the digest. */
+static void frame_print(const dd_opts_t *o, FILE *out) {
+    uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
+    uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);
+    uint64_t buf  = fnv(FNV0, bus.buff_ram, BUFF_RAM_SIZE);
+    uint64_t dm   = fnv(FNV0, g_sharc.dm, sizeof g_sharc.dm);
+    fprintf(out, "%u %08x %016llx %016llx %016llx %llu", (unsigned)g_emu_frames, check,
+            (unsigned long long)ram, (unsigned long long)buf, (unsigned long long)dm,
+            (unsigned long long)emu.total_steps);
+    if (o->cpu_cols) {
+        uint64_t tex  = fnv(fnv(FNV0, bus.texram0, TEXRAM0_SIZE), bus.texram1, TEXRAM1_SIZE);
+        uint64_t regs = fnv(fnv(fnv(FNV0, cpu.globals.g, sizeof cpu.globals.g), cpu.locals.r, sizeof cpu.locals.r), &cpu.sfr, sizeof cpu.sfr);
+        fprintf(out, " %016llx %016llx %llu", (unsigned long long)tex, (unsigned long long)regs,
+                (unsigned long long)cpu.cycles);
+    }
+    if (o->sound_cols) {
+        sound_settle();
+        fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
+                (unsigned long long)g_sound.out_total);
+    }
+    if (o->peek_addr) fprintf(out, " %02x", mem_read8(&bus, o->peek_addr));
+    if (o->peek32_addr) fprintf(out, " %d", (int32_t)mem_read32(&bus, o->peek32_addr));
+    fputc('\n', out);
+}
+
+/* One slice (traced on --trace's frame), the link's host clock around its
+ * frame edge. */
+static emu_slice_result_t run_slice(bool frame_edge) {
+    if (frame_edge && link_host_on()) link_host_frame_start();
+#if I960_BLOCKS
+    if (census_out && g_emu_frames + 1 >= census_from && g_emu_frames + 1 <= census_to) census_slice(&emu);
+    else
+#endif
+    if (aotmap_out && g_emu_frames + 1 >= aotmap_from && g_emu_frames + 1 <= aotmap_to) aotmap_slice(&emu);
+    else
+    if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
+    else                                              emu_slice_body(&emu);
+    emu_slice_result_t r = emu_slice_finish(&emu);
+    if (r == EMU_SLICE_FRAME && link_host_on()) link_host_frame_end();
+    if (r == EMU_SLICE_FRAME) m2comm_phantom_frame_edge(&emu);
+    return r;
+}
+
+/* A frame done: the log check, --save-frame, the rewind ring, the digest
+ * line. 0, or 2 when the save failed. */
+static int run_frame_done(const dd_opts_t *o, FILE *out, dd_run_t *run) {
+    if (in_n && g_emu_frames - 1 < in_n) frame_check_log(run);
+    if (mdlmap_out && g_emu_frames >= mdlmap_from && g_emu_frames <= mdlmap_to) mdlmap_frame();
+    if (spkey_out && g_emu_frames >= spkey_from && g_emu_frames <= spkey_to) spkey_frame();
+    if (txp_path && g_emu_frames >= txp_from && g_emu_frames <= txp_to) txp_frame();
+    if (save_frame && g_emu_frames == save_frame && !frame_save_at()) return 2;
+    if (rewind_k && !rewind_frame(&emu, g_emu_frames)) return 0;
+    if (g_emu_frames >= o->from) frame_print(o, out);
+    return 0;
+}
+
+/* The board up to --frames, a digest line per frame from --from. 0, or 2. */
+static int run_frames(const dd_opts_t *o, FILE *out, dd_run_t *run) {
     int at = 0;
     bool frame_edge = true;
-    uint64_t slices = 0;
-    uint32_t mismatches = 0, first_mismatch = UINT32_MAX;
-    while (g_emu_frames < frames) {
+    while (g_emu_frames < o->frames) {
         if (rewind_slice(&emu)) at = 0;   /* the script again from its start, up to the frame gone back to */
-        /* Inputs change only on a frame boundary, as the lockstep's do. */
-        while (at < script_n && script[at].frame <= g_emu_frames) g_input.held = script[at++].held;
-        if (in_n && g_emu_frames < in_n) g_input.held = words_mask(in_w0[g_emu_frames], in_w1[g_emu_frames]);
-        for (int p = 0; p < poke_n; p++) {
-            if (pokes[p].frame != g_emu_frames || !pokes[p].n) continue;
-            follow_bus_write(&bus, pokes[p].addr, false, pokes[p].b, pokes[p].n);
-            follow_lead_write(pokes[p].addr, false, pokes[p].b, pokes[p].n);
-            pokes[p].n = 0;
-        }
+        frame_inputs(&at);
         if (follow_in && !follow_next_ready(&emu)) break;
-        if (frame_edge && link_host_on()) link_host_frame_start();
-#if I960_BLOCKS
-        if (census_out && g_emu_frames + 1 >= census_from && g_emu_frames + 1 <= census_to) census_slice(&emu);
-        else
-#endif
-        if (aotmap_out && g_emu_frames + 1 >= aotmap_from && g_emu_frames + 1 <= aotmap_to) aotmap_slice(&emu);
-        else
-        if (trace_out && g_emu_frames + 1 == trace_frame) trace_slice(&emu);
-        else                                              emu_slice_body(&emu);
-        emu_slice_result_t r = emu_slice_finish(&emu);
-        slices++;
+        emu_slice_result_t r = run_slice(frame_edge);
+        run->slices++;
         frame_edge = r == EMU_SLICE_FRAME;
-        if (r == EMU_SLICE_FRAME && link_host_on()) link_host_frame_end();
-        if (r == EMU_SLICE_FRAME) m2comm_phantom_frame_edge(&emu);
         if (r == EMU_SLICE_STOPPED) {
             fprintf(stderr, "board stopped at frame %u, IP 0x%08X\n", (unsigned)g_emu_frames, cpu.sfr.ip);
             break;
         }
-        if (r == EMU_SLICE_FRAME && in_n && g_emu_frames - 1 < in_n) {
-            uint32_t f = g_emu_frames - 1, c = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
-            if (c != in_check[f]) {
-                if (!mismatches) {
-                    first_mismatch = f;
-                    fprintf(stderr, "first mismatch at session frame %u: the log says %08X, the replay %08X\n",
-                            (unsigned)f, in_check[f], c);
-                }
-                mismatches++;
-            }
-        }
-        if (r == EMU_SLICE_FRAME && mdlmap_out && g_emu_frames >= mdlmap_from && g_emu_frames <= mdlmap_to) mdlmap_frame();
-        if (r == EMU_SLICE_FRAME && spkey_out && g_emu_frames >= spkey_from && g_emu_frames <= spkey_to) spkey_frame();
-        if (r == EMU_SLICE_FRAME && txp_path && g_emu_frames >= txp_from && g_emu_frames <= txp_to) txp_frame();
-        if (r == EMU_SLICE_FRAME && save_frame && g_emu_frames == save_frame) {
-            /* ... and the samples from here on are what the loaded run's are. */
-            const char *err = state_mem ? mem_state_save(&emu, save_path) : emu_state_save_now(&emu, save_path);
-            if (err) { fprintf(stderr, "--save-at %s: %s\n", save_path, err); return 2; }
-            snd_out_hash = FNV0; snd_out_n = 0;
-            fprintf(stderr, "saved %s at frame %u\n", save_path, (unsigned)g_emu_frames);
-        }
-        if (r == EMU_SLICE_FRAME && rewind_k && !rewind_frame(&emu, g_emu_frames)) continue;
-        if (r != EMU_SLICE_FRAME || g_emu_frames < from) continue;
-        uint32_t check = netplay_frame_check(&emu.cpu_snapshot, emu.total_steps);
-        uint64_t ram  = fnv(fnv(FNV0, bus.ram, RAM_SIZE), bus.ram2, RAM2_SIZE);
-        uint64_t buf  = fnv(FNV0, bus.buff_ram, BUFF_RAM_SIZE);
-        uint64_t dm   = fnv(FNV0, g_sharc.dm, sizeof g_sharc.dm);
-        fprintf(out, "%u %08x %016llx %016llx %016llx %llu", (unsigned)g_emu_frames, check,
-                (unsigned long long)ram, (unsigned long long)buf, (unsigned long long)dm,
-                (unsigned long long)emu.total_steps);
-        if (cpu_cols) {
-            uint64_t tex  = fnv(fnv(FNV0, bus.texram0, TEXRAM0_SIZE), bus.texram1, TEXRAM1_SIZE);
-            uint64_t regs = fnv(fnv(fnv(FNV0, cpu.globals.g, sizeof cpu.globals.g), cpu.locals.r, sizeof cpu.locals.r), &cpu.sfr, sizeof cpu.sfr);
-            fprintf(out, " %016llx %016llx %llu", (unsigned long long)tex, (unsigned long long)regs,
-                    (unsigned long long)cpu.cycles);
-        }
-        if (sound_cols) {
-            sound_settle();
-            fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
-                    (unsigned long long)g_sound.out_total);
-        }
-        if (peek_addr) fprintf(out, " %02x", mem_read8(&bus, peek_addr));
-        if (peek32_addr) fprintf(out, " %d", (int32_t)mem_read32(&bus, peek32_addr));
-        fputc('\n', out);
+        if (r == EMU_SLICE_FRAME && run_frame_done(o, out, run)) return 2;
     }
-    if (out != stdout) fclose(out);
-    gems_verify_report();
+    return 0;
+}
+
+/* What ran, on stderr. Main's exit code: a split follow or a log mismatch
+ * is 1. */
+static int run_report(const dd_run_t *run) {
     if (follow_out) {
         fprintf(stderr, "follow: led %u segments, the last join point took %u ms\n", g_follow_lead.seg, g_follow_lead.join_ms);
         follow_lead_stop();
@@ -1755,21 +1861,42 @@ int main(int argc, char **argv) {
             emu.total_steps ? 100.0 * (double)g_aot_ops / (double)emu.total_steps : 0.0);
 #endif
     fprintf(stderr, "%u frames, %llu slices, %llu i960 steps\n", (unsigned)g_emu_frames,
-            (unsigned long long)slices, (unsigned long long)emu.total_steps);
+            (unsigned long long)run->slices, (unsigned long long)emu.total_steps);
     sound_settle();
     fprintf(stderr, "sound: %llu samples, output %016llx, sound RAM %016llx (%s, %llu slices handed over)\n",
             (unsigned long long)snd_out_n, (unsigned long long)snd_out_hash,
             (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
             sound_thread_on() ? "sound thread" : "one thread", (unsigned long long)g_emu_times.sound_jobs);
+    fprintf(stderr, "sound: chip syncs %llu, single-slot catch-ups %llu, lockstep samples %llu, DSP samples skipped %llu%s\n",
+            (unsigned long long)g_sound.scsp.syncs, (unsigned long long)g_sound.scsp.catches,
+            (unsigned long long)g_scsp_coupled_ticks, (unsigned long long)g_scsp_dsp_skipped,
+            g_scsp_exact ? " (--scsp-exact)" : "");
     fprintf(stderr, "sound: %s; i960 commands %u, bytes that waited a slice %llu, midi drops %u\n",
-            g_shle.on ? "driver in C (--sound-hle)" : "68000", g_sound.code_n,
+            g_ssyn.on ? "driver and voices in C (--sound-synth)" : g_shle.on ? "driver in C (--sound-hle)" : "68000", g_sound.code_n,
             (unsigned long long)g_sound.midi_holds, g_sound.scsp.mi_drops);
     gems_verify_report();
     if (in_n) {
-        if (mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
-                                (unsigned)mismatches, (unsigned)g_emu_frames, (unsigned)first_mismatch);
-        else            fprintf(stderr, "input log: every check matches (%u frames)\n", (unsigned)g_emu_frames);
-        return mismatches ? 1 : 0;
+        if (run->mismatches) fprintf(stderr, "input log: %u of %u frames' checks differ, the first at session frame %u\n",
+                                     (unsigned)run->mismatches, (unsigned)g_emu_frames, (unsigned)run->first_mismatch);
+        else                 fprintf(stderr, "input log: every check matches (%u frames)\n", (unsigned)g_emu_frames);
+        return run->mismatches ? 1 : 0;
     }
     return 0;
+}
+
+int main(int argc, char **argv) {
+    g_sound_hle_want = 0;   /* the 68000, so digests compare across builds; --sound-hle for the C driver */
+    if (argc < 2) {
+        fprintf(stderr, "usage: det_digest <merged sfight zip, a folder of region images, or the PS3 stf_rom folder> [--frames N] [--script S] [--from F] [--out FILE] [--save-at F:FILE] [--load FILE] [--mem] [--profile ID] [--gems-i960] [--gems-cop] [--gems-verify]\n");
+        return 2;
+    }
+    dd_opts_t o = { .frames = 3600, .profile_id = "sfight" };
+    if (parse_args(&o, argc, argv)) return 2;
+    if (board_setup(&o, argv[1])) return 2;
+    FILE *out;
+    if (run_setup(&o, &out)) return 2;
+    dd_run_t run = { .first_mismatch = UINT32_MAX };
+    if (run_frames(&o, out, &run)) return 2;
+    if (out != stdout) fclose(out);
+    return run_report(&run);
 }

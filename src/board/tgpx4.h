@@ -177,6 +177,7 @@ static inline uint32_t tgx_ea(uint32_t mode, uint32_t rx, uint32_t ry, uint32_t 
     case 0x09: return ar[rx] + (bbus ? (ar[ry] >> 7) : (ar[ry] & 0x7Fu));
     case 0x0A: return ar[rx] + disp;
     case 0x0B: return ar[rx] + ar[ry] + disp;
+    case 0x0C: return disp;                                  /* absolute: no AR */
     case 0x0D: res = ar[ry] & (0x1FFu >> (7u - bits)); tgx_ar_step(ry, 1u);          return ar[rx] + res;
     case 0x0E: res = ar[ry] & (0x1FFu >> (7u - bits)); tgx_ar_step(ry, 0xFFFFFFFFu); return ar[rx] + res;
     case 0x0F: res = ar[ry] & (0x1FFu >> (7u - bits)); tgx_ar_step(ry, disp);        return ar[rx] + res;
@@ -268,7 +269,21 @@ static inline double tgx_ln(double x) {
     return 2.0 * sum + (double)e * 0.69314718055994530942;
 }
 
-static inline void tgx_aluop(uint32_t op, uint32_t s1, uint32_t s2, uint32_t imm, uint32_t dst) {
+/* CFIB: a float to a byte, with AU below 0, AZ at 0 and AV over 0xFF. */
+static inline void tgx_cfib(uint32_t s1, uint32_t dst) {
+    uint32_t *st = &g_tgx.st;
+    float f = tgp_u2f(s1);
+    /* uint32_t(f) on x86-64: NaN gives 0, 256 and up are over 0xFF. */
+    uint32_t res = f >= 0.0f && f < 256.0f ? (uint32_t)f : (f >= 256.0f ? 0x100u : 0u);
+    if (f < 0.0f) { *st |= TGX_AU; res = 0; }
+    *st &= ~(uint32_t)TGX_AZ;
+    if (res == 0) *st |= TGX_AZ;
+    if (res > 0xFFu) { *st |= TGX_AV; res = 0xFFu; }
+    tgx_setreg(dst, res);
+}
+
+/* The float half of the ALU, ops 0x00 to 0x0F. */
+static inline void tgx_aluop_float(uint32_t op, uint32_t s1, uint32_t s2, uint32_t imm, uint32_t dst) {
     uint32_t *st = &g_tgx.st;
     switch (op) {
     case 0x00: case 0x01: case 0x02: case 0x03: {          /* FADD FADDZ FSUB FSUBZ */
@@ -345,17 +360,14 @@ static inline void tgx_aluop(uint32_t op, uint32_t s1, uint32_t s2, uint32_t imm
         tgx_setreg(dst, v);
         break;
     }
-    case 0x0F: {                                            /* CFIB */
-        float f = tgp_u2f(s1);
-        /* uint32_t(f) on x86-64: NaN gives 0, 256 and up are over 0xFF. */
-        uint32_t res = f >= 0.0f && f < 256.0f ? (uint32_t)f : (f >= 256.0f ? 0x100u : 0u);
-        if (f < 0.0f) { *st |= TGX_AU; res = 0; }
-        *st &= ~(uint32_t)TGX_AZ;
-        if (res == 0) *st |= TGX_AZ;
-        if (res > 0xFFu) { *st |= TGX_AV; res = 0xFFu; }
-        tgx_setreg(dst, res);
-        break;
+    case 0x0F: tgx_cfib(s1, dst); break;                    /* CFIB */
     }
+}
+
+/* The integer half, ops 0x10 to 0x1F. */
+static inline void tgx_aluop_int(uint32_t op, uint32_t s1, uint32_t s2, uint32_t imm, uint32_t dst) {
+    uint32_t *st = &g_tgx.st;
+    switch (op) {
     case 0x10: case 0x11: case 0x12: case 0x13: {          /* ADD ADDZ SUB SUBZ */
         uint32_t r = (op & 2u) ? s2 - s1 : s1 + s2;
         if (op & 1u) {
@@ -389,6 +401,11 @@ static inline void tgx_aluop(uint32_t op, uint32_t s1, uint32_t s2, uint32_t imm
         break;
     }
     }
+}
+
+static inline void tgx_aluop(uint32_t op, uint32_t s1, uint32_t s2, uint32_t imm, uint32_t dst) {
+    if (op & 0x10u) tgx_aluop_int(op, s1, s2, imm, dst);
+    else            tgx_aluop_float(op, s1, s2, imm, dst);
 }
 
 static inline void tgx_mulop(bool fmul, uint32_t s1, uint32_t s2, uint32_t dst) {
@@ -736,6 +753,33 @@ static inline uint32_t tgx_pop_pc(void)    { g_tgx.pcp = (g_tgx.pcp - 1u) & 3u; 
 
 static inline void tgx_jump(uint32_t to) { g_tgx.delay_slot = true; g_tgx.delay_pc = to & 0xFFFu; }
 
+/* The branch ops, 0x10 to 0x1B: a delayed jump when the condition holds, and
+ * for DCcc and DCALL the return address pushed. */
+static inline void tgx_branch(uint64_t op, uint32_t cop, uint32_t ef1) {
+    switch (cop) {
+    case 0x10: { bool r = tgx_cond(ef1); tgx_note_wait(ef1, r);  if (r)  tgx_jump(tgx_ctl_dst(op)); break; }  /* DBcc */
+    case 0x11: { bool r = tgx_cond(ef1); tgx_note_wait(ef1, !r); if (!r) tgx_jump(tgx_ctl_dst(op)); break; }  /* DBNcc */
+    case 0x12: tgx_jump(tgx_ctl_dst(op)); break;                        /* DJMP */
+    case 0x13:                                                          /* DBLP */
+        if (g_tgx.st & TGX_LP) tgx_jump(g_tgx.pc + ((uint32_t)op & 0xFFFu));
+        if (--g_tgx.lpc == 1u) g_tgx.st &= ~(uint32_t)TGX_LP;
+        break;
+    case 0x14: case 0x15: {                                             /* DBBC DBBS */
+        bool set = (g_tgx.ar[(op >> 13) & 7u] >> ((op >> 16) & 0xFu)) & 1u;
+        if (set == (cop == 0x15u)) tgx_jump(g_tgx.pc + ((uint32_t)op & 0xFFFu));
+        break;
+    }
+    case 0x18: case 0x19: {                                             /* DCcc DCNcc */
+        bool r = tgx_cond(ef1);
+        if (cop == 0x19u) r = !r;
+        if (r) { tgx_jump(tgx_ctl_dst(op)); tgx_push_pc(g_tgx.pc + 1u); }
+        break;
+    }
+    case 0x1A: tgx_jump(tgx_ctl_dst(op)); tgx_push_pc(g_tgx.pc + 1u); break;   /* DCALL */
+    case 0x1B: tgx_jump(tgx_pop_pc()); break;                           /* DRET */
+    }
+}
+
 static inline void tgx_control(uint64_t op) {
     uint32_t cop = (uint32_t)(op >> 22) & 0x1Fu;
     uint32_t ef1 = (uint32_t)(op >> 16) & 0x3Fu;
@@ -763,26 +807,8 @@ static inline void tgx_control(uint64_t op) {
     case 0x0B: g_tgx.mod = (g_tgx.mod & ~0x0080u) | ef2; break;         /* SETMRF */
     case 0x0C: g_tgx.mod = (g_tgx.mod & ~0x0010u) | ef2; break;         /* SETMRDY */
     case 0x0D: g_tgx.mod = (g_tgx.mod & ~0x0007u) | ef2; break;         /* SETMWAIT */
-    case 0x10: { bool r = tgx_cond(ef1); tgx_note_wait(ef1, r);  if (r)  tgx_jump(tgx_ctl_dst(op)); break; }  /* DBcc */
-    case 0x11: { bool r = tgx_cond(ef1); tgx_note_wait(ef1, !r); if (!r) tgx_jump(tgx_ctl_dst(op)); break; }  /* DBNcc */
-    case 0x12: tgx_jump(tgx_ctl_dst(op)); break;                        /* DJMP */
-    case 0x13:                                                          /* DBLP */
-        if (g_tgx.st & TGX_LP) tgx_jump(g_tgx.pc + ((uint32_t)op & 0xFFFu));
-        if (--g_tgx.lpc == 1u) g_tgx.st &= ~(uint32_t)TGX_LP;
-        break;
-    case 0x14: case 0x15: {                                             /* DBBC DBBS */
-        bool set = (g_tgx.ar[(op >> 13) & 7u] >> ((op >> 16) & 0xFu)) & 1u;
-        if (set == (cop == 0x15u)) tgx_jump(g_tgx.pc + ((uint32_t)op & 0xFFFu));
-        break;
-    }
-    case 0x18: case 0x19: {                                             /* DCcc DCNcc */
-        bool r = tgx_cond(ef1);
-        if (cop == 0x19u) r = !r;
-        if (r) { tgx_jump(tgx_ctl_dst(op)); tgx_push_pc(g_tgx.pc + 1u); }
-        break;
-    }
-    case 0x1A: tgx_jump(tgx_ctl_dst(op)); tgx_push_pc(g_tgx.pc + 1u); break;   /* DCALL */
-    case 0x1B: tgx_jump(tgx_pop_pc()); break;                           /* DRET */
+    case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15:   /* branches */
+    case 0x18: case 0x19: case 0x1A: case 0x1B: tgx_branch(op, cop, ef1); break;
     default: tgx_bad("control op", cop); break;
     }
     if ((op >> 63) & 1u) tgx_alu1(op); else tgx_alu2(op);
