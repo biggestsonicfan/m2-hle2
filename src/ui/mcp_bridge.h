@@ -2594,6 +2594,8 @@ static void mcp_ggl_args(const char *req, ggl_cmd_kind_t kind, char *a, int na, 
         break;
     case GGL_CMD_CHALLENGE: mcp_json_get_str(req, "user", a, na); break;
     case GGL_CMD_CHAT:      json_get_str_unescaped(req, "text", a, na); break;
+    case GGL_CMD_LAN_HOST:  mcp_json_get_str(req, "port", a, na); break;     /* "" = 7000 */
+    case GGL_CMD_LAN_JOIN:  mcp_json_get_str(req, "addr", a, na); break;     /* IP:PORT or ws(s):// */
     default: break;
     }
 }

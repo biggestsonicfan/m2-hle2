@@ -59,6 +59,7 @@
 #include "game_shot.h"     /* the bridge's screenshot: the game's picture as a PNG */
 #include "mcp_bridge.h"    /* --mcp TCP debug server (ported from m2-hle) */
 #include "netplay_window.h"  /* the RPCN netplay front-end */
+#include "lan_window.h"      /* direct play, no server (Pinboard #1891) */
 #include "replay_window.h"   /* the Replays menu and the playback window */
 #include "tas_window.h"      /* tool-assisted play (Pinboard #1462) */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
@@ -180,6 +181,7 @@ static struct {
     bool             show_m68k_mem;
     bool             show_debug;
     bool             show_netplay;
+    bool             show_lan;        /* Direct play (lan_window.h) */
     bool             show_controls;   /* the Controls window (controls_window.h) */
     bool             always_show_menu;  /* Debug -> Always show menu bar */
     m68k_state_t     m68k_snapshot;   /* prev-frame 68K state for change highlights */
@@ -838,6 +840,9 @@ static void menu_netplay_status(void) {
 static void menu_netplay(void) {
     if (!igBeginMenu("Netplay")) return;
     igMenuItemBoolPtr("Netplay window", NULL, &state.show_netplay, true);
+#ifdef M2HLE_GGPO
+    igMenuItemBoolPtr("Direct play (LAN / Tailscale)", NULL, &state.show_lan, true);
+#endif
     igSeparator();
     menu_netplay_status();
     igEndMenu();
@@ -1584,6 +1589,7 @@ static void draw_windows(void) {
     if (state.show_m68k_mem)    m68k_memview_draw(&state.show_m68k_mem);
     if (state.show_debug)       debug_window_draw(&state.show_debug);
     if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
+    if (state.show_lan)         lan_window_draw(&state.show_lan);
     controls_window_draw(&state.show_controls, pads_running());
     netplay_empty_room_overlay();
     netplay_vs_again_overlay();

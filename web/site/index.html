@@ -284,10 +284,20 @@
   <section id="gg-off">
     <p class="lead" data-i18n="ui.gg.lead">Rollback netplay on ggpo.sonicthefighte.rs: a separate lobby and accounts from RPCN.</p>
     <button id="gg-connect" class="tool primary big" data-i18n="ui.gg.connect">Connect</button>
+    <!-- Direct play (net/ggpo_lan.h, Pinboard #1891): no lobby, a host's address. -->
+    <h3 data-i18n="ui.gg.lan">Direct play (LAN / Tailscale)</h3>
+    <p class="fine left" data-i18n="ui.gg.lan.lead">No lobby: join a PC or RetroArch hosting a direct match (Netplay, Direct play), at its address.</p>
+    <p class="np-row">
+      <input id="gg-lan-addr" maxlength="250" placeholder="wss://host.tailnet.ts.net:8443" autocomplete="off" spellcheck="false">
+      <button id="gg-lan-join" class="tool" data-i18n="ui.gg.lan.join">Join</button>
+    </p>
+    <p id="gg-lan-fine" class="fine left" data-i18n="ui.gg.lan.fine">This page is https, so the host needs wss://: on Tailscale, run tailscale serve on the host (LAN.md). A page from http:// can join ws://IP:PORT.</p>
   </section>
 
   <section id="gg-busy" hidden>
-    <p class="status" data-i18n="ui.gg.connecting">Connecting...</p>
+    <p id="gg-busy-text" class="status" data-i18n="ui.gg.connecting">Connecting...</p>
+    <p id="gg-lan-wait" class="status" hidden></p>
+    <p id="gg-lan-cancel-row" class="np-row" hidden><button id="gg-lan-cancel" class="tool" data-i18n="ui.cancel">Cancel</button></p>
   </section>
 
   <section id="gg-signin" hidden>
