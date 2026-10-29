@@ -15,7 +15,7 @@
  *   Model 2B (SHARC):   vstriker, vstrikero, zerogun, zerogunj, dynabb,
  *                       gunblade, indy500, indy500d, sgt24h, overrevb
  *   Model 2C (TGPx4):   overrev, stcc, skisuprg, segawski, waverunr,
- *                       topskatr, bel
+ *                       topskatr, topskatru, topskatruo, topskatrj, bel
  *
  * Which game is on which board, and its I/O, is MAME's machine config
  * (src/mame/sega/model2.cpp); the controls are its INPUT_PORTS. What MAME
@@ -661,22 +661,38 @@ static const rom_part_t waverunr_parts[] = {
 };
 #define WAVERUNR_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x2000000, [ROM_TEXTURES] = 0x1000000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
 
-/* With MAME's dsb2:mpegcpu and dsb2:mpeg, the music board (board/dsb2.h). */
+/* With MAME's dsb2:mpegcpu and dsb2:mpeg, the music board (board/dsb2.h).
+ * The other three sets are its program pair on the same data and boards. */
+#define TOPSKATR_DATA \
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "mpr-19735.11", 0x8e509266, "mpr-19736.12", 0x094e0a0d), \
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0800000, "mpr-19737.9", 0x281a7dde, "mpr-19738.10", 0xf688327e), \
+    ROM_PAIR32(ROM_COPRO_DATA, 0x0000000, "mpr-19743.29", 0xd41a41bf, "mpr-19744.30", 0x84f203bf), \
+    ROM_PAIR32(ROM_POLYGONS, 0x0000000, "mpr-19741.17", 0x111a6e29, "mpr-19742.21", 0x28510aff), \
+    ROM_PAIR32(ROM_TEXTURES, 0x0000000, "mpr-19740.27", 0xb20f508b, "mpr-19739.25", 0x8120cfd8), \
+    ROM_SWAP16(ROM_AUDIOCPU, 0x0000000, "mpr-19759.31", 0x573530f2), \
+    ROM_SWAP16(ROM_SAMPLES, 0x0000000, "mpr-19745.32", 0x7082a0af), \
+    ROM_SWAP16(ROM_SAMPLES, 0x0400000, "mpr-19746.34", 0x657b5977), \
+    ROM_SWAP16(ROM_MPEGCPU, 0x0000000, "mpr-19760.2s", 0x2e41ca15), \
+    ROM_BYTES(ROM_MPEG, 0x0000000, "mpr-19747.18s", 0x6e895aaa), \
+    ROM_BYTES(ROM_MPEG, 0x0400000, "mpr-19748.20s", 0xfcd74de3), \
+    ROM_BYTES(ROM_MPEG, 0x0800000, "mpr-19749.22s", 0x842ca1eb), \
+    ROM_BYTES(ROM_MPEG, 0x0c00000, "mpr-19750.24s", 0xcd95d0bf)
+
 static const rom_part_t topskatr_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19755a.15", 0xb80633b9, "epr-19756a.16", 0x472046a2),
-    ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "mpr-19735.11", 0x8e509266, "mpr-19736.12", 0x094e0a0d),
-    ROM_PAIR32(ROM_MAIN_DATA, 0x0800000, "mpr-19737.9", 0x281a7dde, "mpr-19738.10", 0xf688327e),
-    ROM_PAIR32(ROM_COPRO_DATA, 0x0000000, "mpr-19743.29", 0xd41a41bf, "mpr-19744.30", 0x84f203bf),
-    ROM_PAIR32(ROM_POLYGONS, 0x0000000, "mpr-19741.17", 0x111a6e29, "mpr-19742.21", 0x28510aff),
-    ROM_PAIR32(ROM_TEXTURES, 0x0000000, "mpr-19740.27", 0xb20f508b, "mpr-19739.25", 0x8120cfd8),
-    ROM_SWAP16(ROM_AUDIOCPU, 0x0000000, "mpr-19759.31", 0x573530f2),
-    ROM_SWAP16(ROM_SAMPLES, 0x0000000, "mpr-19745.32", 0x7082a0af),
-    ROM_SWAP16(ROM_SAMPLES, 0x0400000, "mpr-19746.34", 0x657b5977),
-    ROM_SWAP16(ROM_MPEGCPU, 0x0000000, "mpr-19760.2s", 0x2e41ca15),
-    ROM_BYTES(ROM_MPEG, 0x0000000, "mpr-19747.18s", 0x6e895aaa),
-    ROM_BYTES(ROM_MPEG, 0x0400000, "mpr-19748.20s", 0xfcd74de3),
-    ROM_BYTES(ROM_MPEG, 0x0800000, "mpr-19749.22s", 0x842ca1eb),
-    ROM_BYTES(ROM_MPEG, 0x0c00000, "mpr-19750.24s", 0xcd95d0bf),
+    TOPSKATR_DATA,
+};
+static const rom_part_t topskatru_parts[] = {
+    ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19753a.15", 0x3b3028de, "epr-19754a.16", 0x17535b98),
+    TOPSKATR_DATA,
+};
+static const rom_part_t topskatruo_parts[] = {
+    ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19753.15", 0x179a0954, "epr-19754.16", 0xa4c62e01),
+    TOPSKATR_DATA,
+};
+static const rom_part_t topskatrj_parts[] = {
+    ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19751.15", 0xd615a15f, "epr-19752.16", 0x42f0ba8b),
+    TOPSKATR_DATA,
 };
 #define TOPSKATR_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x400000, [ROM_TEXTURES] = 0x800000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000, [ROM_MPEGCPU] = 0x20000, [ROM_MPEG] = 0x1000000
 
@@ -729,6 +745,9 @@ M2LIB_SET(skisuprg,  SKISUPRG_SIZES,  BOARD_MODEL2C_CRX, 0)
 M2LIB_SET(segawski,  SEGAWSKI_SIZES,  BOARD_MODEL2C_CRX, 0)
 M2LIB_SET(waverunr,  WAVERUNR_SIZES,  BOARD_MODEL2C_CRX, 0)
 M2LIB_SET(topskatr,  TOPSKATR_SIZES,  BOARD_MODEL2C_CRX, 0)
+M2LIB_SET(topskatru, TOPSKATR_SIZES,  BOARD_MODEL2C_CRX, 0)
+M2LIB_SET(topskatruo, TOPSKATR_SIZES, BOARD_MODEL2C_CRX, 0)
+M2LIB_SET(topskatrj, TOPSKATR_SIZES,  BOARD_MODEL2C_CRX, 0)
 M2LIB_SET(bel,       BEL_SIZES,       BOARD_MODEL2C_CRX, 0)
 
 /* ---- Controls (MAME's INPUT_PORTS) --------------------------------------
@@ -960,9 +979,22 @@ M2LIB_PROFILE(waverunr, "Wave Runner (Japan, Revision A)", BOARD_MODEL2C_CRX, WA
               .io_5649 = true, .wheel = { M2LIB_STEER, .accel = 0x10000000 },
               .analog = { .ch = { IO5649_AN_STEER, IO5649_AN_STEER, IO5649_AN_ACCEL_REV,
                                   IO5649_AN_AXIS2_REV }, .in_high = 0x00080000, M2LIB_AXES });
+#define TOPSKATR_QUIRKS \
+    .geo_vertex_matrix = true, .io_5649 = true, .wheel = { M2LIB_STEER }, \
+    .analog = { .ch = { IO5649_AN_STEER, IO5649_AN_AXIS2 }, M2LIB_AXES }
 M2LIB_PROFILE(topskatr, "Top Skater (Export, Revision A)", BOARD_MODEL2C_CRX, TOPSKATR_INPUT,
-              .geo_vertex_matrix = true, .io_5649 = true, .wheel = { M2LIB_STEER },
-              .analog = { .ch = { IO5649_AN_STEER, IO5649_AN_AXIS2 }, M2LIB_AXES });
+              TOPSKATR_QUIRKS);
+/* MAME's topskatru; older dumps name its zip topskatu. */
+static const game_profile_t topskatru_profile = {
+    .id = "topskatru", .display_name = "Top Skater (USA, Revision A)", .board = BOARD_MODEL2C_CRX,
+    .rom_set_old = "topskatu", .parent_zip_name = "topskatr.zip",
+    .load_fn = topskatru_load, .install_fn = topskatru_install,
+    .input = TOPSKATR_INPUT, .quirks = { M2LIB_BASE, TOPSKATR_QUIRKS },
+};
+M2LIB_CLONE(topskatruo, "Top Skater (USA)", BOARD_MODEL2C_CRX, "topskatr.zip", TOPSKATR_INPUT,
+            TOPSKATR_QUIRKS);
+M2LIB_CLONE(topskatrj, "Top Skater (Japan)", BOARD_MODEL2C_CRX, "topskatr.zip", TOPSKATR_INPUT,
+            TOPSKATR_QUIRKS);
 M2LIB_PROFILE(bel, "Behind Enemy Lines", BOARD_MODEL2C_CRX,
               M2LIB_GUNSTICK_INPUT(0x08, 0x04, 0x00001000, 0x00002000), .io_5649 = true, M2LIB_GUNSTICKS);
 

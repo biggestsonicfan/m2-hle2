@@ -90,6 +90,9 @@ static const struct { const char *id; game_region_kind_t kind; } g_region_unhook
     { "segawski",        REGION_TODO },   /* m2_library.h */
     { "waverunr",        REGION_TODO },   /* m2_library.h */
     { "topskatr",        REGION_TODO },   /* m2_library.h */
+    { "topskatru",       REGION_TODO },   /* m2_library.h */
+    { "topskatruo",      REGION_TODO },   /* m2_library.h */
+    { "topskatrj",       REGION_TODO },   /* m2_library.h */
     { "bel",             REGION_TODO },   /* m2_library.h */
     { "m2snake",         REGION_HOMEBREW },
     { "sfight_homebrew", REGION_HOMEBREW },

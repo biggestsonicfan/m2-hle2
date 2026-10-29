@@ -145,6 +145,11 @@ static const comid_entry_t g_comid_registry[] = {
     { "VSTRIKER",           "VRTSTR", NULL },
     { "DYNAMCOP",           "DYNCOP", NULL },
     { "TOPSKATR",           "TOPSKT", NULL },
+    { "TOPSKATRU",          "TOPSKT", NULL },
+    { "TOPSKATU",           "TOPSKT", NULL },
+    { "TOPSKATRUO",         "TOPSKT", NULL },
+    { "TOPSKATRJ",          "TOPSKT", NULL },
+    { "TOPSKATER",          "TOPSKT", NULL },
 
     /* Data East's shooter on the 2A (Pinboard #1063). */
     { "AIRWLKRS",           "ARWLKR", NULL },
