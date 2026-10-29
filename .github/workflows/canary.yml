@@ -387,8 +387,13 @@ jobs:
           path: dist/*.zip
           retention-days: 14
 
+  # The libretro core built by batocera.linux's buildroot, for an x86_64 PC
+  # (OpenGL) and an ARM board (OpenGL ES 3): packaging/batocera/README.md.
+  batocera:
+    uses: ./.github/workflows/batocera.yml
+
   publish:
-    needs: [build, libretro, libretro-linux-arm64, web]
+    needs: [build, libretro, libretro-linux-arm64, web, batocera]
     # A libretro build that fails must not hold back the Windows canary.
     # It does leave that zip's previous build on the release, so the notes
     # below say which archives this run actually produced.
