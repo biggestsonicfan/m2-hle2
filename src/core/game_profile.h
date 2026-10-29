@@ -214,6 +214,14 @@ typedef struct {
      * lever. */
     bool     io_5649;
     struct { uint32_t left, right, accel, brake, shift_up, shift_down, view[4]; bool bike; } wheel;
+    /* A 315-5649 whose analog channels are not Sega Rally's (io_5649.h,
+     * IO5649_AN_*: a wheel, a ski, a bat, a gun stick, MAME's an_port
+     * callbacks): what each channel reads, 0 none (0xFF, as MAME's unwired
+     * pot). Any set puts IN1 and IN2 as plain button ports (held bits 8-15,
+     * 16-23, active low but for `in_high`), `up` / `down` walk the second
+     * axis, and `press` swing a pot full scale (Dynamite Baseball's bats).
+     * The steer, pedals and guns are `wheel`'s and `gun`'s. */
+    struct { uint8_t ch[8]; uint32_t in_high, up, down, press[2]; } analog;
 
     /* The I/O board is a Model 1 one behind a dual-port RAM (model1io.h: its
      * Z80 runs the program in the set's iocpu region). The wheel, pedals and
