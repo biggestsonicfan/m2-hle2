@@ -473,6 +473,46 @@ static inline int net_tcp_recv_timeout(net_sock_t s, void *buf, uint32_t cap,
     }
 }
 
+/* A non-blocking TCP socket listening on `port`, every interface: a LAN host's
+ * door for browsers (net/ggpo_lan.h). Native builds only. */
+static inline bool net_tcp_listen(net_sock_t *out, uint16_t port) {
+    net_sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!net_sock_valid(s)) return false;
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+    local.sin_family      = AF_INET;
+    local.sin_addr.s_addr = INADDR_ANY;
+    local.sin_port        = htons(port);
+    if (bind(s, (struct sockaddr *)&local, sizeof(local)) != 0 || listen(s, 4) != 0) {
+        net_close(&s);
+        return false;
+    }
+    net_set_nonblocking(s);
+    *out = s;
+    return true;
+}
+
+/* The next connection waiting on a listening socket, non-blocking; false for
+ * none. `ip` is network byte order. */
+static inline bool net_tcp_accept(net_sock_t ls, net_sock_t *out, uint32_t *ip_be, uint16_t *port) {
+    struct sockaddr_in from;
+    memset(&from, 0, sizeof(from));
+#ifdef _WIN32
+    int len = (int)sizeof(from);
+#else
+    socklen_t len = sizeof(from);
+#endif
+    net_sock_t s = accept(ls, (struct sockaddr *)&from, &len);
+    if (!net_sock_valid(s)) return false;
+    net_set_nonblocking(s);
+    *out = s;
+    if (ip_be) *ip_be = from.sin_addr.s_addr;
+    if (port)  *port  = ntohs(from.sin_port);
+    return true;
+}
+
 /* ---- Monotonic milliseconds ---------------------------------------------- */
 
 static inline uint64_t net_now_ms(void) {

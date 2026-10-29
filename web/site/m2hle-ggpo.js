@@ -10,6 +10,11 @@
  * (web_ggpo_post) and nothing here touches lobby state directly.
  *
  * ?ggpo=ws://127.0.0.1:8080/ws points it at a local lobby for testing.
+ *
+ * Direct play (Pinboard #1891, net/ggpo_lan.h): no lobby, the page joins a
+ * desktop or RetroArch host at its address, over a WebSocket to the host's
+ * port. An https page may only open wss://, so a bare address becomes ws://
+ * only on an http page. ?lan=ADDR joins it when the panel opens.
  */
 'use strict';
 
@@ -28,6 +33,8 @@ m2hleLang.add({
     'gg.btn.match': 'GGPO match',
     'gg.btn.lobby': 'GGPO lobby',
     'gg.signin.missing': 'A name and a password, please.',
+    'gg.lan.asking': 'Asking {addr} for a match...',
+    'gg.lan.wss': 'This page is https: the host needs a wss:// address (tailscale serve gives one).',
   },
   ja: {
     'gg.challenge': '挑戦する',
@@ -41,6 +48,8 @@ m2hleLang.add({
     'gg.btn.match': 'GGPO対戦',
     'gg.btn.lobby': 'GGPOロビー',
     'gg.signin.missing': '名前とパスワードを入力してください。',
+    'gg.lan.asking': '{addr} に対戦を申し込んでいます…',
+    'gg.lan.wss': 'このページは https です。ホストには wss:// のアドレスが必要です（tailscale serve で用意できます）。',
   },
 });
 
@@ -59,6 +68,7 @@ const m2hleGgpo = (() => {
   let triedSaved = false;       /* offered once a connection; a refusal is shown, not retried */
   let lastStage = '';
   let pending = null;           /* what was typed, stored once the server takes it */
+  let lanAsked = false;         /* ?lan= joined once a load */
 
   function withString(text, fn) {
     const n = M.lengthBytesUTF8(text) + 1, p = M._malloc(n);
@@ -95,6 +105,7 @@ const m2hleGgpo = (() => {
       case 'signed_in':  return 'gg-busy';
       case 'channel':    return 'gg-channel';
       case 'match':      return 'gg-match';
+      case 'lan_join':   return 'gg-busy';
       default:           return 'gg-busy';
     }
   }
@@ -153,6 +164,12 @@ const m2hleGgpo = (() => {
     }
     $('gg-twitch-start').hidden = !st.twitch;
     if (v === 'gg-signin' && saved && !$('gg-user').value) $('gg-user').value = saved.user;
+    const lan = st.stage === 'lan_join';
+    $('gg-busy-text').hidden = lan;
+    $('gg-lan-wait').hidden = !lan;
+    $('gg-lan-cancel-row').hidden = !lan;
+    if (lan) setText('gg-lan-wait', t('gg.lan.asking', { addr: st.url }));
+    $('gg-lan-fine').hidden = location.protocol !== 'https:';
     if (v === 'gg-channel') renderChannel();
     if (v === 'gg-match') renderMatch();
   }
@@ -190,6 +207,19 @@ const m2hleGgpo = (() => {
     post('connect', params.get('ggpo') || '');
   }
 
+  /* A host's address: as it is when it is a URL; a bare IP:PORT is ws://,
+   * which only an http page may open. */
+  function lanJoin(addr) {
+    addr = (addr || '').trim();
+    if (!addr) return;
+    if (location.protocol === 'https:' && !/^wss:\/\//.test(addr)) {
+      setText('gg-error', t('gg.lan.wss'));
+      $('gg-error').hidden = false;
+      return;
+    }
+    post('lan_join', /^wss?:\/\//.test(addr) ? addr : 'ws://' + addr);
+  }
+
   function signIn(kind) {
     const user = $('gg-user').value.trim(), pass = $('gg-pass').value;
     if (!user || !pass) { setText('gg-error', t('gg.signin.missing')); $('gg-error').hidden = false; return; }
@@ -203,7 +233,8 @@ const m2hleGgpo = (() => {
     $('btn-ggpo').setAttribute('aria-expanded', String(open));
     if (open) {
       for (const id of ['online', 'controls']) if (!$(id).hidden) $(id === 'online' ? 'np-close' : 'pad-close').click();
-      if (st && (st.stage === 'off' || st.stage === 'failed')) connect();
+      if (params.get('lan') && st && st.stage === 'off' && !lanAsked) { lanAsked = true; lanJoin(params.get('lan')); }
+      else if (st && (st.stage === 'off' || st.stage === 'failed')) connect();
       poll();
     } else {
       $('canvas').focus();
@@ -216,6 +247,10 @@ const m2hleGgpo = (() => {
     $('btn-online').addEventListener('click', () => toggle(false));
     $('btn-controls').addEventListener('click', () => toggle(false));
     $('gg-connect').addEventListener('click', connect);
+    $('gg-lan-join').addEventListener('click', () => lanJoin($('gg-lan-addr').value));
+    $('gg-lan-addr').addEventListener('keydown', (e) => { if (e.key === 'Enter') lanJoin(e.target.value); });
+    $('gg-lan-cancel').addEventListener('click', () => post('disconnect'));
+    if (params.get('lan')) $('gg-lan-addr').value = params.get('lan');
     $('gg-login').addEventListener('click', () => signIn('login'));
     $('gg-signup').addEventListener('click', () => signIn('signup'));
     $('gg-twitch-start').addEventListener('click', () => post('twitch'));

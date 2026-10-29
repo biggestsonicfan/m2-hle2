@@ -107,12 +107,16 @@ typedef enum {
     GGL_CHANNEL,        /* in a game's channel */
     GGL_MATCH,          /* playing */
     GGL_FAILED,         /* the connection is gone; error says why */
+    GGL_LAN_HOST,       /* direct: waiting for a player at our port (ggpo_lan.h) */
+    GGL_LAN_JOIN,       /* direct: asking the host at url for a match */
 } ggl_stage_t;
 
 typedef enum {
     GGL_CMD_CONNECT, GGL_CMD_LOGIN, GGL_CMD_SIGNUP, GGL_CMD_TWITCH, GGL_CMD_JOIN,
     GGL_CMD_CHALLENGE, GGL_CMD_ACCEPT, GGL_CMD_DECLINE, GGL_CMD_CANCEL, GGL_CMD_CHAT,
     GGL_CMD_END, GGL_CMD_DISCONNECT,
+    GGL_CMD_LAN_HOST,   /* a: the port ("" for 7000) */
+    GGL_CMD_LAN_JOIN,   /* a: "IP:PORT", or a ws:// / wss:// URL */
 } ggl_cmd_kind_t;
 
 typedef struct { char name[GGL_NAME_MAX]; char state[12]; } ggl_user_t;
@@ -233,7 +237,8 @@ static inline ggl_status_t ggl_status(void) {
 }
 
 static inline const char *ggl_stage_name(ggl_stage_t s) {
-    static const char *n[] = { "off", "connecting", "connected", "signed_in", "channel", "match", "failed" };
+    static const char *n[] = { "off", "connecting", "connected", "signed_in", "channel", "match", "failed",
+                                  "lan_host", "lan_join" };
     return (unsigned)s < sizeof n / sizeof n[0] ? n[s] : "?";
 }
 
@@ -817,11 +822,14 @@ static inline void ggl__on_match(const char *m) {
     LOG_INFO("ggpo lobby: match %s against %s, player %d", s->match, s->opponent, side == 0 ? 1 : 2);
 }
 
+#include "ggpo_lan.h"
+
 /* The match is over, from either end: GGPO stops, the socket goes. */
 static inline void ggl__match_done(const char *why) {
     if (g_ggl.st.stage != GGL_MATCH) return;
     g_ggpo_cfg.mode = EMU_GGPO_OFF;          /* emu_ggpo_step stops the session */
     LOG_INFO("ggpo lobby: match %s over (%s)", g_ggl.st.match, why);
+    if (g_lan.matched) { ggl_lan__match_over(); return; }
     g_ggl.st.match[0] = '\0';
     g_ggl.st.stage = g_ggl.st.game[0] ? GGL_CHANNEL : GGL_SIGNED_IN;
 }
@@ -887,9 +895,26 @@ static inline void ggl__challenge(const char *name) {
     ggl__send_str("challenge", "to", name);
 }
 
-static inline void ggl__run_cmd(const ggl_cmd_t *c) {
+static inline void ggl__run_cmd(const ggl_cmd_t *c, const char *rom_set) {
+    if (ggl_lan_on() && (c->kind == GGL_CMD_END || c->kind == GGL_CMD_DISCONNECT)) {
+        ggl_lan_end(c->kind == GGL_CMD_DISCONNECT);
+        return;
+    }
     switch (c->kind) {
-    case GGL_CMD_CONNECT:    ggl__connect(c->a); break;
+    case GGL_CMD_CONNECT:
+        if (ggl_lan_on()) ggl_lan_end(true);
+        ggl__connect(c->a);
+        break;
+    case GGL_CMD_LAN_HOST:
+    case GGL_CMD_LAN_JOIN:
+        if (g_ggl.st.stage == GGL_MATCH || g_lan.matched) {
+            LOG_WARN("lan: a match is on; end it first");
+            break;
+        }
+        ggl__ws_close();                    /* off the lobby: one or the other */
+        if (c->kind == GGL_CMD_LAN_HOST) ggl_lan_host(c->a, rom_set);
+        else ggl_lan_join(c->a, rom_set);
+        break;
     case GGL_CMD_LOGIN:
     case GGL_CMD_SIGNUP:
         snprintf(g_ggl.pass, sizeof g_ggl.pass, "%s", c->b);
@@ -1002,12 +1027,16 @@ static inline void ggl_pump(bool ggpo_on, const char *rom_set) {
     ggl_cmd_t cmds[GGL_CMDS_MAX];
     int n = ggl__take_cmds(cmds);
     if (n == 0 && g_ggl.st.stage == GGL_OFF && !g_ggl.transport_on) return;
-    for (int i = 0; i < n; i++) ggl__run_cmd(&cmds[i]);
+    for (int i = 0; i < n; i++) ggl__run_cmd(&cmds[i], rom_set);
     int64_t now = net_now_ms();
-    ggl__read_ws();
-    ggl__timers(now);
-    ggl__auto(now, rom_set);
-    ggl__match_tick(now, ggpo_on);
+    if (ggl_lan_on()) {
+        ggl_lan_pump(now, ggpo_on);
+    } else {
+        ggl__read_ws();
+        ggl__timers(now);
+        ggl__auto(now, rom_set);
+        ggl__match_tick(now, ggpo_on);
+    }
     emu_mutex_lock(&g_ggl.lock);
     g_ggl.pub = g_ggl.st;
     emu_mutex_unlock(&g_ggl.lock);
@@ -1022,6 +1051,7 @@ static inline bool ggl_cmd_kind_named(const char *v, ggl_cmd_kind_t *out) {
         { "twitch", GGL_CMD_TWITCH }, { "join", GGL_CMD_JOIN }, { "challenge", GGL_CMD_CHALLENGE },
         { "accept", GGL_CMD_ACCEPT }, { "decline", GGL_CMD_DECLINE }, { "cancel", GGL_CMD_CANCEL },
         { "chat", GGL_CMD_CHAT }, { "end", GGL_CMD_END }, { "disconnect", GGL_CMD_DISCONNECT },
+        { "lan_host", GGL_CMD_LAN_HOST }, { "lan_join", GGL_CMD_LAN_JOIN },
     };
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
         if (strcmp(v, k[i].name) == 0) { *out = k[i].kind; return true; }
@@ -1073,6 +1103,8 @@ static inline void ggl_status_json(char *out, int cap, const ggl_status_t *st) {
     ggl__put_str(&o, "user", st->user);
     ggl__put_str(&o, "game", st->game);
     ggl__put_str(&o, "error", st->error);
+    ggl__put(&o, ",\"lan\":%s", st->stage == GGL_LAN_HOST || st->stage == GGL_LAN_JOIN ||
+             strcmp(st->match, "lan") == 0 ? "true" : "false");
     ggl__put(&o, ",\"twitch\":%s", st->twitch ? "true" : "false");
     ggl__put_str(&o, "twitch_code", st->twitch_code);
     ggl__put_str(&o, "twitch_uri", st->twitch_uri);
@@ -1094,6 +1126,8 @@ static inline bool ggl_cli_arg(int argc, char **argv, int *i) {
     if (strcmp(a, "--ggpo-relay") == 0) { g_ggl_auto.force_relay = true; return true; }
     if (strcmp(a, "--ggpo-ws") == 0) { g_ggl_auto.ws_match = true; return true; }
     if (strcmp(a, "--ggpo-signup") == 0) { g_ggl_auto.signup = true; return true; }
+    if (*i + 1 < argc && strcmp(a, "--lan-host") == 0) { ggl_post(GGL_CMD_LAN_HOST, argv[++*i], NULL); return true; }
+    if (*i + 1 < argc && strcmp(a, "--lan-join") == 0) { ggl_post(GGL_CMD_LAN_JOIN, argv[++*i], NULL); return true; }
     if (strncmp(a, "--ggpo-", 7) != 0 || *i + 1 >= argc) return false;
     static const struct { const char *flag; size_t off, cap; } f[] = {
         { "lobby",     offsetof(ggl_auto_t, url),       sizeof g_ggl_auto.url },
