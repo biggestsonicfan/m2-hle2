@@ -65,9 +65,16 @@ jobs:
           packaging/batocera/add-to-batocera.sh "$RUNNER_TEMP/batocera" --rev "$M2HLE_REV"
           git -C "$RUNNER_TEMP/batocera" diff --exit-code
 
+      # the Python batocera's own image has (its packages pin it exactly)
+      - name: Read batocera's Python version
+        id: py
+        run: |
+          v=$(sed -n 's/^requires-python *= *"[=~>]*\([0-9.]*\).*/\1/p' "$RUNNER_TEMP/batocera/python-src/python-batocera-common/pyproject.toml")
+          echo "version=${v:-3.x}" | tee -a "$GITHUB_OUTPUT"
+
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: ${{ steps.py.outputs.version }}
 
       # What batocera-es-system.mk runs, on every emulator and core batocera
       # has (EMULATOR_INFO_PATHS_ALL rather than one board's).
