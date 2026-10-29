@@ -58,9 +58,9 @@ the package has none, as none of batocera's libretro packages has one.
 
 ## CI
 
-`.github/workflows/batocera.yml` runs on a change to these files or to the
-build, once a week (batocera moves too), and by hand. It never builds all of
-batocera (hours, and tens of GB):
+`.github/workflows/batocera.yml` runs as part of the canary (`canary.yml`
+calls it on every push and PR), once a week on its own (batocera moves too),
+and by hand. It never builds all of batocera (hours, and tens of GB):
 
 - **es-data**: adds the package to today's batocera.linux master (twice, to
   prove the script changes nothing the second time), runs batocera's own
@@ -73,9 +73,11 @@ batocera (hours, and tens of GB):
   its dependencies, but batocera's whole tree as an external pulls in every
   package's Config.in and its own defconfigs. It runs
   `make libretro-m2hle`, which downloads the tarballs as batocera would, and checks the
-  core: the machine, only `retro_*` exported, the stamped `.info`. The two cores are
-  artifacts for 14 days, not releases: players get the core from batocera's own
-  image, or from the canary's `m2hle-libretro-linux-*` today.
+  core: the machine, only `retro_*` exported, the stamped `.info`. The canary
+  publishes the two cores as `m2hle-libretro-batocera-x86_64.zip` and
+  `m2hle-libretro-batocera-aarch64.zip` (the `.so` and its `.info`), beside its
+  other cores. A failed batocera build doesn't hold the canary back; that zip
+  keeps its previous build.
 
 `ci/Config.in` defines the two batocera symbols the `.mk` reads
 (`BR2_PACKAGE_BATOCERA_TARGET_X86_64_ANY`, `BR2_PACKAGE_BATOCERA_GLES3`). In
