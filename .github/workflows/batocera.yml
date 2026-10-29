@@ -65,23 +65,24 @@ jobs:
           packaging/batocera/add-to-batocera.sh "$RUNNER_TEMP/batocera" --rev "$M2HLE_REV"
           git -C "$RUNNER_TEMP/batocera" diff --exit-code
 
-      # the Python batocera's own image has (its packages pin it exactly)
-      - name: Read batocera's Python version
-        id: py
+      # The Python batocera's own image has: its packages pin it exactly, to a
+      # patch release setup-python may not carry, uv's standalone builds do.
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Make a venv on batocera's Python
         run: |
           v=$(sed -n 's/^requires-python *= *"[=~>]*\([0-9.]*\).*/\1/p' "$RUNNER_TEMP/batocera/python-src/python-batocera-common/pyproject.toml")
-          echo "version=${v:-3.x}" | tee -a "$GITHUB_OUTPUT"
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ steps.py.outputs.version }}
+          echo "batocera's Python: ${v:-any}"
+          uv venv --python "${v:-3}" "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
 
       # What batocera-es-system.mk runs, on every emulator and core batocera
       # has (EMULATOR_INFO_PATHS_ALL rather than one board's).
       - name: Build the ES data
         run: |
           B="$RUNNER_TEMP/batocera"
-          pip install "$B/python-src/python-batocera-common" "$B/python-src/batocera-es-system"
+          uv pip install "$B/python-src/python-batocera-common" "$B/python-src/batocera-es-system"
           OUT="$RUNNER_TEMP/es"
           mkdir -p "$OUT/defaults"
           cp "$B/python-src/batocera-launch/resources/defaults/config.yml" "$OUT/defaults/"
