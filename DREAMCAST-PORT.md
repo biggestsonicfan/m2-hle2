@@ -2652,6 +2652,59 @@ panel's FT row overwrites it two seconds later, so `tools/hud_read.py --raw`
 over screenshots taken every 0.6 s while the LV row's frame is between 1200
 and 1750 is how a bench catches it.
 
+## The page cache back, and the fight's code kept (#1877)
+
+The SD log (#1876) showed the master merge had taken the page cache from
+1196 KB back down to 940 KB, and that a fight read the drive all the time.
+Three changes, each with the frame-3000 hash 0518ec84 unchanged (Flycast's
+libretro core with the serial port, `DC_STATS_DBGIO=1`, `HASH_FRAME=3000`;
+the bench rows B2 `ld` (page loads), `cd` (of them, the program ROM's) and
+B3 `brd` (drive reads from boot to frame 3500)):
+
+- **Memory.** `GEO3D_IA_MAX_VPS=4096` (STF's largest mesh is 2070 pairs;
+  the default 8192 is for the other games) and `SOUND_BOARD=0` (the 68000
+  and SCSP the Dreamcast never runs: its sound is `dc_sound.h`) give the
+  cache 1024 KB back.
+- **The clock sees the bus.** A frame `pg_bus_in` puts in the bus's direct
+  `rd_page` tables is read with no fault, so `ref` stayed 0 and the clock
+  evicted the program's hottest pages first. `pg_victim` now unmaps a frame
+  it gives a second chance: the next read faults (no drive read, the frame is
+  still there) and sets `ref` again.
+- **Pinning.** `DC_PG_TRACE=1` prints a line per page read off the disc
+  (frame, region, page, `ip`). After the clock fix a dozen program ROM pages
+  still came back ~14 times each, every ~400 frames: code under the vblank
+  handler that runs more rarely than the clock comes round. A program ROM
+  page loaded for the 4th time is now pinned (`PG_CODE_PIN_AFTER`, up to
+  `PG_CODE_PINS` 16, 256 KB). Pinning after 6 loads was no better.
+
+| build | cache KB | B2 ld | B2 cd | B3 brd | text |
+|---|---|---|---|---|---|
+| 0e03d81 (#1876) | 940 | 1285 | 818 | 3705 | 2,234,340 |
+| + memory | 1964 | 264 | 106 | 1960 | 2,106,204 |
+| + clock fix | 1964 | 177 | 28 | 1701 | |
+| + pinning | 1964 | 167 | 11 | 1683 | |
+| + `AOT_OS=1` | 2476 | 99 | 8 | 1590 | 1,533,020 |
+
+To frame 6500 pinning takes the program ROM's loads from 314 to 222, but
+the 256 KB it holds cost the packs (region 6) 100 loads in the attract, so
+the run's total is 4% higher; the fight is where it pays. Compressing pages
+on the disc (the third step considered) is not needed at these counts.
+
+**`AOT_OS=1`** compiles the AOT code at `-Os` (`#pragma GCC optimize`
+around the generated file, `src/core/i960_aot.h`): 573 KB less text, the
+board the same. Flycast charges it 3.5% more slice (more instructions); it
+does not model the I-cache, whose stalls were 19% of a console's cycles in
+the SD log (#1876), so whether it pays is a console's `HUD=prof` bench to say,
+and it is off by default. Canary: `dreamcast/stf-speed` and
+`dreamcast/stf-speed-os`, the A/B pair, SD log on.
+
+Not done, for the same reason: hand-written SH-4 for `dp_decode`,
+`dp_face_colour` and the store-queue submission (they already use `ftrv`,
+`pref`, the store queues and the ramp memo; a rewrite needs the console's
+counters to show it won), and the operand cache's RAM mode (it halves the
+D-cache, whose stalls were 31%, to keep 8 KB of `cpu` and `bus` state; a
+loss as likely as a gain without hardware to time it).
+
 ## Next optimization targets
 
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
@@ -2669,7 +2722,8 @@ and 1750 is how a bench catches it.
 - **The i960 slice (~13 ms a frame in the bench after #509).** A third of a
   fight's frame: Gems' C, the compiled code, the COP, and 7% still
   interpreted. `AOT_COVER` is 0.995 since #1038 freed the memory for it; the
-  next step is smaller compiled code (104 bytes of SH-4 an instruction), and
+  next step is smaller compiled code (`AOT_OS=1`, #1877, waits on a
+console bench; 104 bytes of SH-4 an instruction), and
   the rest of the board's text (what `sh-elf-nm --size-sort` lists that STF
   never calls) is more cache. Keeping the hot `cpu` / `bus` state in the 8 KB
   operand-cache RAM mode.

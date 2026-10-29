@@ -49,7 +49,8 @@ make -C dreamcast OUT=/tmp/dc AOT="<PS3>/stf_rom/rom_code1.bin"
 # git submodule update --init --recursive vendor/gems-c) builds in Sega's
 # C from Sonic Gems Collection; GEMS= leaves it out. Its gems_all.h is made by
 # its gen_all.py (python3) when make starts. OPTAB=1 dispatches the interpreter through a handler table (off: it
-# saves under 1% here and costs 136 KB).
+# saves under 1% here and costs 136 KB). AOT_OS=1 compiles the AOT code for
+# size (-Os: 573 KB less, more page cache; DREAMCAST-PORT.md #1877).
 # The build is Sonic the Fighters alone (-DM2HLE_STF_ONLY, DREAMCAST-PORT.md
 # #1038): the other games' profiles and their cores (the SHARC interpreter,
 # the TGPs, the 315-5881) are out, as are the native replay recorders
