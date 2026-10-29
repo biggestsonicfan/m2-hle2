@@ -2705,6 +2705,34 @@ counters to show it won), and the operand cache's RAM mode (it halves the
 D-cache, whose stalls were 31%, to keep 8 KB of `cpu` and `bus` state; a
 loss as likely as a gain without hardware to time it).
 
+## The console's log after #1877 (#1880)
+
+The owner ran `dreamcast/stf-speed` (fd4835f, -O2, cache 1964 KB) on a
+console through the attract into the demo fight: M2LOG002.TXT, against
+M2LOG001.TXT (0e03d81, #1876, cache 940 KB) over the same run. From 36 s
+after boot (the attract's first scene loaded) to the end of each log:
+
+| log | build | windows | under 6 fps | a frame over 500 ms | page loads | drive ms | fps |
+|---|---|---|---|---|---|---|---|
+| M2LOG001 | 0e03d81 | 129 | 32 | 35 | 3250 | 108,493 | 10.5 |
+| M2LOG002 | fd4835f | 119 | 6 | 6 | 879 | 46,354 | 12.7 |
+
+The six slow windows left are scene loads (3D lists of 60-630, between 36 and
+100 s); after 104 s, in the fight, there are none. In M2LOG001 the fight fell
+to 2-5 fps every half minute, 50-70 page loads a window, with `bio` at
+60-75%. In M2LOG002 the fight loads 0-26 pages a window, and the code pins
+fill (`pin=16`) by 86 s.
+
+The fight's steady frame did not move: 66/75/95 ms (min/avg/max) in both
+logs, 4 vblanks at best, 13 fps. With the disc out of the way, that is the
+next limit, and the log says where it goes (window 119, M2LOG002): `drw`
+40%, `gem` 12%, `geo` 11%, `aot` 11%, `cop` 5%, `bio` 5.5% (ADX streaming:
+7 reads, 155 ms, no page loads); by function `dp_decode` 25% and
+`dp_face_colour` 10%. The counters: D-cache stalls 29-30% of cycles,
+I-cache 24-25%. So 3 vblanks (20 fps) means a quarter off the frame,
+and the draw path is where most of it is. `AOT_OS=1` aims at the I-cache's
+quarter; its disc (`dreamcast/stf-speed-os`) has not been on a console yet.
+
 ## Next optimization targets
 
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
