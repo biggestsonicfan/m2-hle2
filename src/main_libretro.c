@@ -535,6 +535,7 @@ static void lr_attach_sound(void) {
     sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
     if (state.romset.samples && state.romset.samples_size > 0)
         sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+    sound_load_dsb2(state.romset.mpegcpu, state.romset.mpegcpu_size, state.romset.mpeg, state.romset.mpeg_size);
 }
 
 /* A cold boot of the loaded set: what load does once the ROM files are read,

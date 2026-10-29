@@ -21,7 +21,8 @@
  * (src/mame/sega/model2.cpp); the controls are its INPUT_PORTS. What MAME
  * runs beside the CRX board and nothing here models yet is left out, each
  * game saying so: Manx TT's Model 1 sound board (the DX's extra voices),
- * the DSB MPEG boards' music (stcc, topskatr), the comm board's program.
+ * Sega Touring Car's DSB MPEG music (Top Skater's DSB2 is board/dsb2.h),
+ * the comm board's program.
  * Every game's country is REGION_TODO until someone looks for its setting.
  */
 #ifndef PROFILES_M2_LIBRARY_H
@@ -654,7 +655,7 @@ static const rom_part_t waverunr_parts[] = {
 };
 #define WAVERUNR_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x2000000, [ROM_TEXTURES] = 0x1000000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
 
-/* MAME's dsb2:mpegcpu, dsb2:mpeg: no board here reads them. */
+/* With MAME's dsb2:mpegcpu and dsb2:mpeg, the music board (board/dsb2.h). */
 static const rom_part_t topskatr_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19755a.15", 0xb80633b9, "epr-19756a.16", 0x472046a2),
     ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "mpr-19735.11", 0x8e509266, "mpr-19736.12", 0x094e0a0d),
@@ -665,8 +666,13 @@ static const rom_part_t topskatr_parts[] = {
     ROM_SWAP16(ROM_AUDIOCPU, 0x0000000, "mpr-19759.31", 0x573530f2),
     ROM_SWAP16(ROM_SAMPLES, 0x0000000, "mpr-19745.32", 0x7082a0af),
     ROM_SWAP16(ROM_SAMPLES, 0x0400000, "mpr-19746.34", 0x657b5977),
+    ROM_SWAP16(ROM_MPEGCPU, 0x0000000, "mpr-19760.2s", 0x2e41ca15),
+    ROM_BYTES(ROM_MPEG, 0x0000000, "mpr-19747.18s", 0x6e895aaa),
+    ROM_BYTES(ROM_MPEG, 0x0400000, "mpr-19748.20s", 0xfcd74de3),
+    ROM_BYTES(ROM_MPEG, 0x0800000, "mpr-19749.22s", 0x842ca1eb),
+    ROM_BYTES(ROM_MPEG, 0x0c00000, "mpr-19750.24s", 0xcd95d0bf),
 };
-#define TOPSKATR_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x400000, [ROM_TEXTURES] = 0x800000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
+#define TOPSKATR_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x400000, [ROM_TEXTURES] = 0x800000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000, [ROM_MPEGCPU] = 0x20000, [ROM_MPEG] = 0x1000000
 
 static const rom_part_t bel_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-20225.15", 0x4abc6b59, "epr-20226.16", 0x43e05b3a),
