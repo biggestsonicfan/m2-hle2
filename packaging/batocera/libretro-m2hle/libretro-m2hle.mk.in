@@ -1,0 +1,85 @@
+################################################################################
+#
+# libretro-m2hle
+#
+################################################################################
+# Written by packaging/batocera/add-to-batocera.sh from m2-hle2 @M2HLE_DESCRIBE@:
+# re-run it to move to a newer m2-hle2 rather than editing the hashes by hand.
+
+LIBRETRO_M2HLE_VERSION = @M2HLE_COMMIT@
+LIBRETRO_M2HLE_SITE = $(call github,biggestsonicfan,m2-hle2,$(LIBRETRO_M2HLE_VERSION))
+LIBRETRO_M2HLE_LICENSE = Non-commercial, MIT (GGPO, miniz), Lua (MIT), sokol (zlib)
+LIBRETRO_M2HLE_EMULATOR_INFO = m2hle.libretro.core.yml
+LIBRETRO_M2HLE_SUPPORTS_IN_SOURCE_BUILD = NO
+
+ifeq ($(BR2_PACKAGE_RETROARCH),y)
+LIBRETRO_M2HLE_DEPENDENCIES = retroarch
+endif
+
+# GitHub's tarball of m2-hle2 has no submodules. These are the commits
+# m2-hle2 @M2HLE_COMMIT_SHORT@ pins, the ones the core's build reads; the
+# others (the desktop's ImGui, the noclip viewer, the Gems/Ages C) stay out.
+LIBRETRO_M2HLE_SOKOL_VERSION = @SOKOL@
+LIBRETRO_M2HLE_MINIZ_VERSION = @MINIZ@
+LIBRETRO_M2HLE_STB_VERSION = @STB@
+LIBRETRO_M2HLE_LUA_VERSION = @LUA@
+LIBRETRO_M2HLE_GGPO_VERSION = @GGPO@
+
+LIBRETRO_M2HLE_EXTRA_DOWNLOADS = \
+	https://github.com/floooh/sokol/archive/$(LIBRETRO_M2HLE_SOKOL_VERSION)/sokol-$(LIBRETRO_M2HLE_SOKOL_VERSION).tar.gz \
+	https://github.com/richgel999/miniz/archive/$(LIBRETRO_M2HLE_MINIZ_VERSION)/miniz-$(LIBRETRO_M2HLE_MINIZ_VERSION).tar.gz \
+	https://github.com/nothings/stb/archive/$(LIBRETRO_M2HLE_STB_VERSION)/stb-$(LIBRETRO_M2HLE_STB_VERSION).tar.gz \
+	https://github.com/lua/lua/archive/$(LIBRETRO_M2HLE_LUA_VERSION)/lua-$(LIBRETRO_M2HLE_LUA_VERSION).tar.gz \
+	https://github.com/pond3r/ggpo/archive/$(LIBRETRO_M2HLE_GGPO_VERSION)/ggpo-$(LIBRETRO_M2HLE_GGPO_VERSION).tar.gz
+
+# $(1): the submodule, $(2): its commit
+define LIBRETRO_M2HLE_UNPACK
+	mkdir -p $(@D)/vendor/$(1)
+	gzip -dc $(LIBRETRO_M2HLE_DL_DIR)/$(1)-$(2).tar.gz | \
+		$(TAR) --strip-components=1 -C $(@D)/vendor/$(1) $(TAR_OPTIONS) -
+endef
+
+define LIBRETRO_M2HLE_EXTRACT_SUBMODULES
+	$(call LIBRETRO_M2HLE_UNPACK,sokol,$(LIBRETRO_M2HLE_SOKOL_VERSION))
+	$(call LIBRETRO_M2HLE_UNPACK,miniz,$(LIBRETRO_M2HLE_MINIZ_VERSION))
+	$(call LIBRETRO_M2HLE_UNPACK,stb,$(LIBRETRO_M2HLE_STB_VERSION))
+	$(call LIBRETRO_M2HLE_UNPACK,lua,$(LIBRETRO_M2HLE_LUA_VERSION))
+	$(call LIBRETRO_M2HLE_UNPACK,ggpo,$(LIBRETRO_M2HLE_GGPO_VERSION))
+endef
+LIBRETRO_M2HLE_POST_EXTRACT_HOOKS += LIBRETRO_M2HLE_EXTRACT_SUBMODULES
+
+LIBRETRO_M2HLE_CONF_OPTS += -DCMAKE_BUILD_TYPE=Release
+LIBRETRO_M2HLE_CONF_OPTS += -DM2HLE_FRONTEND=libretro
+LIBRETRO_M2HLE_CONF_OPTS += -DM2HLE_BUILD_TESTS=OFF
+LIBRETRO_M2HLE_CONF_OPTS += -DM2HLE_VERSION=@M2HLE_DESCRIBE@
+# Not in the tarball, and nothing the core needs: no Python at configure time.
+LIBRETRO_M2HLE_CONF_OPTS += -DM2HLE_GEMS_DIR= -DM2HLE_AGES_DIR=
+
+# OpenGL 4.1 core on x86_64 (and wherever GLES is missing), OpenGL ES 3
+# elsewhere, as the canary's Linux cores.
+ifeq ($(BR2_PACKAGE_BATOCERA_TARGET_X86_64_ANY),y)
+LIBRETRO_M2HLE_GL = libgl
+else ifeq ($(BR2_PACKAGE_HAS_LIBGLES),y)
+LIBRETRO_M2HLE_GL = libgles
+else
+LIBRETRO_M2HLE_GL = libgl
+endif
+LIBRETRO_M2HLE_DEPENDENCIES += $(LIBRETRO_M2HLE_GL)
+ifeq ($(LIBRETRO_M2HLE_GL),libgles)
+LIBRETRO_M2HLE_CONF_OPTS += -DM2HLE_LIBRETRO_GLES=ON
+else
+LIBRETRO_M2HLE_CONF_OPTS += -DM2HLE_LIBRETRO_GLES=OFF
+endif
+
+# The .info is m2-hle2's own: libretro-core-info does not carry one.
+define LIBRETRO_M2HLE_INSTALL_TARGET_CMDS
+	$(INSTALL) -D -m 0755 $(LIBRETRO_M2HLE_BUILDDIR)/m2hle_libretro.so \
+		$(TARGET_DIR)/usr/lib/libretro/m2hle_libretro.so
+	mkdir -p $(TARGET_DIR)/usr/share/libretro/info
+	sed 's/^display_version = .*/display_version = "@M2HLE_DESCRIBE@"/' \
+		$(@D)/packaging/libretro/m2hle_libretro.info \
+		> $(TARGET_DIR)/usr/share/libretro/info/m2hle_libretro.info
+endef
+
+$(eval $(cmake-package))
+$(eval $(emulator-info-package))

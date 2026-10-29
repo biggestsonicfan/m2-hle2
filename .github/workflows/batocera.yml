@@ -1,0 +1,211 @@
+name: batocera
+
+# The libretro core as a batocera.linux package (packaging/batocera, Pinboard
+# #1904): put into today's batocera.linux master the way a PR to batocera would
+# put it there, then
+#   es-data    batocera's own ES generator lists it as a Sega Model 2 core;
+#   buildroot  batocera's buildroot builds the package, from this commit's
+#              GitHub tarball, for an x86_64 PC (OpenGL) and an ARM board
+#              (OpenGL ES 3).
+# Nothing is published: the cores are artifacts, for a look.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'packaging/batocera/**'
+      - 'packaging/libretro/m2hle_libretro.info'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.gitmodules'
+      - '.github/workflows/batocera.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'packaging/batocera/**'
+      - 'packaging/libretro/m2hle_libretro.info'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.gitmodules'
+      - '.github/workflows/batocera.yml'
+  workflow_dispatch:
+  # batocera.linux moves under the package too: once a week, whatever changed.
+  schedule:
+    - cron: '0 5 * * 1'
+
+concurrency:
+  group: batocera-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The commit the package downloads: a PR's head, not the merge GitHub makes.
+  M2HLE_REV: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  es-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0        # add-to-batocera.sh stamps rNNN-<sha> and reads the submodule commits
+          submodules: false
+          ref: ${{ env.M2HLE_REV }}
+
+      - name: Fetch batocera.linux
+        run: git clone --depth 1 https://github.com/batocera-linux/batocera.linux.git "$RUNNER_TEMP/batocera"
+
+      - name: Add libretro-m2hle
+        run: |
+          packaging/batocera/add-to-batocera.sh "$RUNNER_TEMP/batocera" --rev "$M2HLE_REV"
+          git -C "$RUNNER_TEMP/batocera" diff --stat
+          # twice changes nothing
+          git -C "$RUNNER_TEMP/batocera" add -A
+          packaging/batocera/add-to-batocera.sh "$RUNNER_TEMP/batocera" --rev "$M2HLE_REV"
+          git -C "$RUNNER_TEMP/batocera" diff --exit-code
+
+      # The Python batocera's own image has: its packages pin it exactly, to a
+      # patch release setup-python may not carry, uv's standalone builds do.
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Make a venv on batocera's Python
+        run: |
+          v=$(sed -n 's/^requires-python *= *"[=~>]*\([0-9.]*\).*/\1/p' "$RUNNER_TEMP/batocera/python-src/python-batocera-common/pyproject.toml")
+          echo "batocera's Python: ${v:-any}"
+          uv venv --python "${v:-3}" "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+
+      # What batocera-es-system.mk runs, on every emulator and core batocera
+      # has (EMULATOR_INFO_PATHS_ALL rather than one board's).
+      - name: Build the ES data
+        run: |
+          B="$RUNNER_TEMP/batocera"
+          uv pip install "$B/python-src/python-batocera-common" "$B/python-src/batocera-es-system"
+          OUT="$RUNNER_TEMP/es"
+          mkdir -p "$OUT/defaults"
+          cp "$B/python-src/batocera-launch/resources/defaults/config.yml" "$OUT/defaults/"
+          cp "$B/python-src/batocera-launch/resources/defaults/config-x86_64.yml" "$OUT/defaults/config-arch.yml" 2>/dev/null || true
+          (cd "$B" && find "$PWD/package/batocera" -name '*.emulator.yml' -o -name '*.core.yml' | sort) | tr '\n' ' ' > "$OUT/info_files.txt"
+          grep -q 'libretro-m2hle/m2hle.libretro.core.yml' "$OUT/info_files.txt"
+          batocera-build-es-data \
+            --es-systems-yml="$B/package/batocera/emulationstation/batocera-es-system/es_systems.yml" \
+            --locales-dir="$B/package/batocera/emulationstation/batocera-es-system/locales" \
+            --roms-dir="$B/package/batocera/emulationstation/batocera-es-system/roms" \
+            --defaults="$OUT/defaults" \
+            --keys-dir="$B/package/batocera" \
+            --output="$OUT" \
+            --arch=x86_64 \
+            "$OUT/info_files.txt"
+
+      - name: Check the Sega Model 2 system offers m2hle
+        run: |
+          OUT="$RUNNER_TEMP/es"
+          python3 - "$OUT/es_systems.cfg" "$OUT/es_features.cfg" <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+          systems = ET.parse(sys.argv[1]).getroot()
+          model2 = next(s for s in systems.iter('system') if s.findtext('name') == 'model2')
+          cores = [(e.get('name'), c.text) for e in model2.iter('emulator') for c in e.iter('core')]
+          print('model2:', cores, model2.findtext('extension'))
+          assert ('libretro', 'm2hle') in cores, 'no libretro/m2hle core on model2'
+          assert '.zip' in model2.findtext('extension').split()
+          features = ET.parse(sys.argv[2]).getroot()
+          core = next(c for c in features.iter('core') if c.get('name') == 'm2hle')
+          print('m2hle features:', core.get('features'))
+          EOF
+
+  buildroot:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            machine: 'x86-64'
+          - arch: aarch64
+            machine: 'ARM aarch64'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+          ref: ${{ env.M2HLE_REV }}
+
+      # buildroot's own host requirements (docs: "System requirements").
+      - name: Install buildroot's host tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bzip2 cpio file patch perl rsync unzip wget \
+            python3 python3-setuptools libncurses-dev
+
+      # batocera's buildroot fork at the commit batocera.linux master pins.
+      - name: Fetch batocera.linux and its buildroot
+        id: br
+        run: |
+          git clone --depth 1 https://github.com/batocera-linux/batocera.linux.git "$RUNNER_TEMP/batocera"
+          git -C "$RUNNER_TEMP/batocera" submodule update --init --depth 1 buildroot
+          git -C "$RUNNER_TEMP/batocera" submodule status buildroot
+          echo "rev=$(git -C "$RUNNER_TEMP/batocera" rev-parse HEAD:buildroot)" >> "$GITHUB_OUTPUT"
+
+      # A BR2_EXTERNAL named BATOCERA holding only the package (packaging/batocera/README.md
+      # says why not the whole batocera tree).
+      - name: Assemble the external tree
+        run: |
+          packaging/batocera/add-to-batocera.sh "$RUNNER_TEMP/batocera" --rev "$M2HLE_REV"
+          EXT="$RUNNER_TEMP/ext"
+          mkdir -p "$EXT/package"
+          cp packaging/batocera/ci/external.desc packaging/batocera/ci/external.mk packaging/batocera/ci/Config.in "$EXT/"
+          cp "$RUNNER_TEMP/batocera/package/batocera/pkg-emulator-info.mk" "$EXT/"
+          cp -r "$RUNNER_TEMP/batocera/package/batocera/emulators/retroarch/libretro/libretro-m2hle" "$EXT/package/"
+          cat "$EXT/package/libretro-m2hle/libretro-m2hle.mk"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dl
+          key: batocera-dl-${{ matrix.arch }}-${{ steps.br.outputs.rev }}
+          restore-keys: batocera-dl-${{ matrix.arch }}-
+
+      - name: Configure
+        run: |
+          cp packaging/batocera/ci/${{ matrix.arch }}_defconfig "$RUNNER_TEMP/defconfig"
+          echo "BR2_DL_DIR=\"$RUNNER_TEMP/dl\"" >> "$RUNNER_TEMP/defconfig"
+          make -C "$RUNNER_TEMP/batocera/buildroot" O="$RUNNER_TEMP/out" \
+            BR2_EXTERNAL="$RUNNER_TEMP/ext" BR2_DEFCONFIG="$RUNNER_TEMP/defconfig" defconfig
+          # every line of the defconfig made it through (a symbol that
+          # vanished upstream would otherwise be dropped without a word)
+          while IFS= read -r line; do
+            case "$line" in BR2_*) grep -qxF -- "$line" "$RUNNER_TEMP/out/.config" || { echo "not in .config: $line"; exit 1; } ;; esac
+          done < "$RUNNER_TEMP/defconfig"
+
+      - name: Build libretro-m2hle
+        run: make -C "$RUNNER_TEMP/batocera/buildroot" O="$RUNNER_TEMP/out" libretro-m2hle
+
+      - name: Check the core
+        run: |
+          T="$RUNNER_TEMP/out/target"
+          CORE="$T/usr/lib/libretro/m2hle_libretro.so"
+          INFO="$T/usr/share/libretro/info/m2hle_libretro.info"
+          file "$CORE" | tee /dev/stderr | grep -q 'ELF 64-bit LSB .*${{ matrix.machine }}'
+          grep '^display_version' "$INFO"
+          ! grep -q '^display_version = "dev"' "$INFO"
+          BIN="$RUNNER_TEMP/out/host/bin"
+          READELF=$(ls "$BIN"/*-readelf | head -1); NM=$(ls "$BIN"/*-nm | head -1)
+          "$READELF" -d "$CORE" | awk '/NEEDED/ { print $NF }'
+          # only the retro_* API exported, as the canary's cores
+          other=$("$NM" -D --defined-only "$CORE" | awk '$2 == "T" && $3 !~ /^retro_/' | wc -l)
+          [ "$other" -eq 0 ] || { "$NM" -D --defined-only "$CORE" | awk '$2 == "T" && $3 !~ /^retro_/'; exit 1; }
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp "$RUNNER_TEMP/out/target/usr/lib/libretro/m2hle_libretro.so" \
+             "$RUNNER_TEMP/out/target/usr/share/libretro/info/m2hle_libretro.info" dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m2hle-batocera-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 14
