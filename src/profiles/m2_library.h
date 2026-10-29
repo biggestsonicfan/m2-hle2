@@ -949,7 +949,7 @@ M2LIB_PROFILE(waverunr, "Wave Runner (Japan, Revision A)", BOARD_MODEL2C_CRX, WA
               .analog = { .ch = { IO5649_AN_STEER, IO5649_AN_STEER, IO5649_AN_ACCEL_REV,
                                   IO5649_AN_AXIS2_REV }, .in_high = 0x00080000, M2LIB_AXES });
 M2LIB_PROFILE(topskatr, "Top Skater (Export, Revision A)", BOARD_MODEL2C_CRX, TOPSKATR_INPUT,
-              .io_5649 = true, .wheel = { M2LIB_STEER },
+              .geo_vertex_matrix = true, .io_5649 = true, .wheel = { M2LIB_STEER },
               .analog = { .ch = { IO5649_AN_STEER, IO5649_AN_AXIS2 }, M2LIB_AXES });
 M2LIB_PROFILE(bel, "Behind Enemy Lines", BOARD_MODEL2C_CRX,
               M2LIB_GUNSTICK_INPUT(0x08, 0x04, 0x00001000, 0x00002000), .io_5649 = true, M2LIB_GUNSTICKS);

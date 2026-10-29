@@ -222,6 +222,15 @@ typedef struct {
     /* Direct data (GEO 0x02/0x12) instead of an object: its words after the
      * command, at direct_off in geo3d_state_t.direct_words. 0: an object. */
     uint32_t direct_off, direct_len;
+    /* An object whose vertices pick their matrix (g_geol_vertex_matrix): the
+     * board matrices it was drawn with, raw[0] for a vertex whose x has its
+     * low bit clear and raw[1] for one with it set, its command (0x11: records
+     * without normals) and its polygon count. `matrix` is then the identity:
+     * geo3d_vsel_mesh puts the corners in eye space. */
+    bool     vsel;
+    uint8_t  vsel_cmd;
+    uint32_t vsel_count;
+    float    vsel_raw[2][12];
     /* Debug fields populated by the scanner */
     uint32_t dbg_mesh_ptr;
     float    dbg_pos[3];
@@ -1233,6 +1242,102 @@ typedef struct {
  * own commands from there. */
 static geo_held_t g_geol_held;
 
+/* Top Skater's program (game_quirks_t.geo_vertex_matrix) gives the walk a
+ * second matrix, the way m2emulator 1.1a runs it for "tops" (0x4c5d8c patches
+ * its command table 0x573340): 0x1B writes it, 0x1C copies the matrix into it
+ * and reads nothing, and every object vertex whose x word has its low bit set
+ * is drawn with it (0x4b9cb0). An 0x11 object's records carry no normal: the
+ * normal is the eye-space corners' cross product (0x4bb400). The matrix
+ * outlives a list, as m2emulator's does: most of the game's lists draw with
+ * one written lists before. */
+static int   g_geol_vertex_matrix;
+static float g_geol_raw2[12] = { 1,0,0, 0,1,0, 0,0,1, 0,0,0 };
+
+static inline void geo3d__vsel_put(uint8_t *o, uint32_t v) {
+    o[0] = (uint8_t)v; o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)(v >> 16); o[3] = (uint8_t)(v >> 24);
+}
+
+static inline void geo3d__vsel_putf(uint8_t *o, float f) {
+    uint32_t v;
+    memcpy(&v, &f, 4);
+    geo3d__vsel_put(o, v);
+}
+
+/* A corner at in, by the matrix its x word's low bit picks, into eye space. */
+static inline void geo3d__vsel_point(const uint8_t *in, const float raw[2][12], float out[3]) {
+    const float *m = raw[read_u32_le(in) & 1u];
+    const float x = read_float_le(in), y = read_float_le(in + 4), z = read_float_le(in + 8);
+    out[0] = m[0] * x + m[3] * y + m[6] * z + m[9];
+    out[1] = m[1] * x + m[4] * y + m[7] * z + m[10];
+    out[2] = m[2] * x + m[5] * y + m[8] * z + m[11];
+}
+
+/* An object of a vertex-select program (captured_model_t.vsel) rewritten into
+ * the records the decoder walks (VERTEX_PAIR_SIZE each: two corners, then the
+ * next polygon's attribute and normal), corners and normals in eye space, so
+ * it draws with the identity. The object ends at its count or at a polygon
+ * whose attribute has no corners (attr & 3 == 0), as 0x4bb400 stops there.
+ * Returns the bytes written, 0 when the mesh does not fit in src. */
+static inline size_t geo3d_vsel_mesh(const uint8_t *src, size_t src_size, bool no_normals,
+                                     uint32_t count, const float raw[2][12],
+                                     uint8_t *out, size_t out_size) {
+    size_t at = 0, o = 0;
+    float c[4][3];                                     /* P0, P1 carried; P2, P3 new */
+    if (src_size < 24 || out_size < VERTEX_PAIR_SIZE) return 0;
+    geo3d__vsel_point(src, raw, c[0]);
+    geo3d__vsel_point(src + 12, raw, c[1]);
+    at = 24;
+    for (int k = 0; k < 2; k++)
+        for (int j = 0; j < 3; j++) geo3d__vsel_putf(out + o + 12 * k + 4 * j, c[k][j]);
+    o += 24;
+    if (count == 0) count = 0xFFFFFu;                  /* none: to the end (MAME geo_object_data) */
+    for (uint32_t n = 0; n < count && n + 1 < GEO3D_IA_MAX_VPS; n++) {
+        const size_t rec = no_normals ? 4 : 16;
+        if (at + rec > src_size || o + VERTEX_PAIR_SIZE + 16 > out_size) break;
+        const uint32_t attr = read_u32_le(src + at);
+        if ((attr & 3u) == 0) break;
+        const bool tri = (attr & 3u) == 2;
+        const size_t pts = (no_normals && tri) ? 12 : 24;
+        if (at + rec + pts > src_size) break;
+        float nv[3];
+        if (!no_normals) {                             /* rotated by the matrix (0x4b9df0) */
+            const float *m = raw[0];
+            const float x = read_float_le(src + at + 4), y = read_float_le(src + at + 8),
+                        z = read_float_le(src + at + 12);
+            nv[0] = m[0] * x + m[3] * y + m[6] * z;
+            nv[1] = m[1] * x + m[4] * y + m[7] * z;
+            nv[2] = m[2] * x + m[5] * y + m[8] * z;
+        }
+        geo3d__vsel_point(src + at + rec, raw, c[2]);
+        if (pts == 24) geo3d__vsel_point(src + at + rec + 12, raw, c[3]);
+        else memcpy(c[3], c[2], sizeof c[3]);
+        if (no_normals) {
+            /* (P0 - P1) x (P2 - P1), unit length; the board's records hold the
+             * opposite of the normal the walk uses (0x4bb400 negates them). */
+            const float a[3] = { c[0][0] - c[1][0], c[0][1] - c[1][1], c[0][2] - c[1][2] };
+            const float b[3] = { c[2][0] - c[1][0], c[2][1] - c[1][1], c[2][2] - c[1][2] };
+            nv[0] = a[1] * b[2] - a[2] * b[1];
+            nv[1] = a[2] * b[0] - a[0] * b[2];
+            nv[2] = a[0] * b[1] - a[1] * b[0];
+            const float len = sqrtf(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]);
+            for (int j = 0; j < 3; j++) nv[j] = len != 0.0f ? -nv[j] / len : -nv[j];
+        }
+        geo3d__vsel_put(out + o, attr);
+        for (int j = 0; j < 3; j++) geo3d__vsel_putf(out + o + 4 + 4 * j, nv[j]);
+        for (int k = 0; k < 2; k++)
+            for (int j = 0; j < 3; j++) geo3d__vsel_putf(out + o + 16 + 12 * k + 4 * j, c[2 + k][j]);
+        o += 40;
+        at += rec + pts;
+        switch ((attr >> 8) & 3u) {                    /* the corners the next one links to */
+            case 0: case 2: memcpy(c[0], c[2], sizeof c[0]); memcpy(c[1], c[3], sizeof c[1]); break;
+            case 1:         memcpy(c[1], c[2], sizeof c[1]); break;
+            default:        memcpy(c[0], c[3], sizeof c[0]); break;
+        }
+    }
+    memset(out + o, 0, 16);                            /* the end: an attribute of 0 */
+    return o + 16;
+}
+
 static inline uint32_t geo3d__geol_arg(const uint32_t *words, uint32_t nw, uint32_t p, uint32_t k) {
     return p + 1u + k < nw ? words[p + 1u + k] : 0u;
 }
@@ -1295,6 +1400,15 @@ static inline void geo3d__geol_object(geo3d_state_t *geo, int *count, const geo3
     H[4] =  M[1]; H[5] =  M[4]; H[6]  = -M[7]; H[7]  =  M[10];
     H[8] = -M[2]; H[9] = -M[5]; H[10] =  M[8]; H[11] = -M[11];
     cm->has_matrix = true;
+    if (g_geol_vertex_matrix) {
+        cm->vsel       = true;
+        cm->vsel_cmd   = (uint8_t)((op >> 23) & 0x1Fu);
+        cm->vsel_count = geo3d__geol_arg(words, nw, p, 3);
+        memcpy(cm->vsel_raw[0], s->raw, sizeof cm->vsel_raw[0]);
+        memcpy(cm->vsel_raw[1], g_geol_raw2, sizeof cm->vsel_raw[1]);
+        static const float I[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
+        memcpy(H, I, sizeof I);
+    }
     geo3d__geol_place(s, cm, (op >> 29) & 3u, geo3d__geol_arg(words, nw, p, 0), geo3d__geol_arg(words, nw, p, 1));
     cm->dbg_mesh_ptr = oba;
     cm->dbg_pos[0] = M[9]; cm->dbg_pos[1] = M[10]; cm->dbg_pos[2] = M[11];
@@ -1365,10 +1479,22 @@ static inline int geo3d__geol_state(geo3d__geol_t *s, uint32_t cmd, const uint32
         case 0x0A: case 0x1A:                              /* light vector */
             for (uint32_t k = 0; k < 3; k++) s->light[k] = u32_as_float(A(k));
             return 3;
-        case 0x0B: case 0x1B:                              /* matrix */
+        case 0x1B:                                         /* the second matrix */
+            if (g_geol_vertex_matrix) {
+                for (uint32_t k = 0; k < 12; k++) g_geol_raw2[k] = u32_as_float(A(k));
+                return 12;
+            }
+            /* fall through */
+        case 0x0B:                                         /* matrix */
             for (uint32_t k = 0; k < 12; k++) s->raw[k] = u32_as_float(A(k));
             return 12;
-        case 0x0C: case 0x1C:                              /* translation only */
+        case 0x1C:
+            if (g_geol_vertex_matrix) {                    /* the matrix into the second */
+                memcpy(g_geol_raw2, s->raw, sizeof g_geol_raw2);
+                return 0;
+            }
+            /* fall through */
+        case 0x0C:                                         /* translation only */
             for (uint32_t k = 0; k < 3; k++) s->raw[9 + k] = u32_as_float(A(k));
             return 3;
         default: return -1;

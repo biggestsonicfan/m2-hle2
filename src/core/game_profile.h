@@ -199,6 +199,12 @@ typedef struct {
      * directly. STF/FV leave this false (their 3D is HLE'd from the COP stream). */
     bool     geo_displaylist;
 
+    /* The game's GEO program has Top Skater's second matrix: 0x1B writes it,
+     * 0x1C copies the matrix into it, a vertex whose x word has its low bit
+     * set is drawn with it, and an 0x11 object's records hold no normals
+     * (geo3d.h, g_geol_vertex_matrix; m2emulator 1.1a runs "tops" so). */
+    bool     geo_vertex_matrix;
+
     /* Take an interrupt whose pin has no irq_handler through the program's own
      * interrupt table, as the processor does (hle_irq_vector_handler): the
      * vector from the interrupt control register, the handler from the table
