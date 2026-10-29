@@ -338,12 +338,12 @@ FAT first partition, as a PC formats one; each boot makes the next free
 since boot:
 
 ```
-     19 m2-hle2 sdlog M2LOG007.TXT (partition type 0c, 64 MB)
+     19 m2-hle2 sdlog M2LOG007.TXT (partition type 0c, 64 MB, cluster 512 B, sync 5000 ms)
      21 pager: sfight_console, 5059 ROM pages, 2288 KB cache, ...
      83 [INFO] sfight_install: initial IP = 0x000000B0
    2223 frame 10 4.7 fps (shown 4.7) slice 202 ms 3d 11+0 ms
    ...
-   2231 sd M2LOG007.TXT in=1 kb=0 wr=1 ms=1 max=1 drop=0 err=0
+   2231 sd M2LOG007.TXT in=1 kb=0 wr=1 ms=1 max=1 drop=0 err=0 sy=0
 ```
 
 What goes in: the boot's lines, the board's log (`[INFO]`, `[WARN]`, ...), every
@@ -352,12 +352,22 @@ first, whole and without their check; not the per-frame `LV`), and the halt
 message with the log's last lines; a stop (a failed assert, the watchdog's hang)
 writes its reason and return addresses, as the blue screen shows them, and waits
 for them to reach the card first (up to 3 s). It all goes through a dbgio device
-(`dc_sdlog.h`) into 32 KB of RAM; a thread writes that to the card once a
-second and syncs the FAT, so a pulled card or power loses about a second.
+(`dc_sdlog.h`) into 32 KB of RAM; a thread appends that to the file once a
+second and syncs the FAT every 5 s (`DC_SDLOG_SYNC_MS`), so a pulled card or
+power loses up to 5 s. A stop asks for a sync at once.
+
+The sync is what costs: KallistiOS's FAT keeps whole clusters in its cache and
+writes a dirty one back whole: the log's last cluster and its directory's, 64 KB
+a sync on a big card's 32 KB clusters however little was added. A sync a second
+took ~190 ms of every second on a console (Pinboard #1876's first log, a
+244 GB card), with the SH-4 driving the pins and the disc reads waiting behind
+the G1 lock. The first line now names the cluster size (`cluster 32768 B`); a
+card formatted with smaller clusters makes each sync cheaper still.
 
 The `sd` line (in the log, and on screen in row 15 without `HUD=prof`) is the
-log's own cost: KB printed `in`, KB written `kb`, writes `wr`, their total `ms`
-and longest `max`, bytes lost to a full buffer `drop`, write errors `err`. The
+log's own cost: KB printed `in`, KB written `kb`, writer rounds `wr`, their
+total `ms` and longest `max`, bytes lost to a full buffer `drop`, write errors
+`err`, FAT syncs `sy`. The
 SPI is the SH-4 setting the port's pins a bit at a time, so on a console that
 time is the game's; Flycast charges almost nothing for it, so measure on the
 console. No card, or one KallistiOS cannot mount, and the game runs as it would
