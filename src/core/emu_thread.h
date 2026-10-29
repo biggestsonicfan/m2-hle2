@@ -33,6 +33,8 @@
 #include "hle_hooks.h"   /* hle_interrupt, g_active_profile */
 #include "sky_eye.h"     /* SKY EYE mode's stage hold (Pinboard #265) */
 #include "irq_timer.h"   /* board IRQ controller + timers */
+#include "../board/lightgun.h"  /* emu_ctx_init tells the gun and the wheel whose hands */
+#include "../board/io_5649.h"   /* drive the board (emu_board_remote) */
 #include "../board/sound.h"  /* sound_run_slice: the 68000 + SCSP */
 #include "../net/netplay.h"  /* the lockstep frame gate (inert unless a session is up) */
 
