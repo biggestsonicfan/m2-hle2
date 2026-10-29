@@ -73,6 +73,8 @@ typedef struct {
     uint32_t trk, trk2, dsp, efsdl, smptbl, preload, songs, vinit_w, vinit_l;
     uint64_t boot_fixed;    /* the init's delay loops and its fixed copies: reset -> the first interrupt,
                              * less SHLE_INIT_CYCLES and the copies the game's sizes */
+    uint32_t engines;       /* Sega Rally's engine sounds (sound_hle_rally.h) */
+    bool rally;             /* epr-17890: its own voices, records and engines */
 } v95_build_t;
 
 static const v95_build_t k_v95_builds[] = {
@@ -80,8 +82,21 @@ static const v95_build_t k_v95_builds[] = {
     { 0x60C6A6u, 0x6032C6u, 0x60C3E6u, 0x6053AAu, 0x60C4A6u, 0x60C726u, 0x602676u, 0x602B26u, 0x600C48u, 0x60179Cu,
       0x603066u, 0x6030A6u, 0x60493Eu, 0x605368u, 0x605B26u, 0x608DF0u, 0x608E12u, 0x6006E6u, 0x600726u,
       25380238ull },
+    { 0x603F24u, 0x60882Eu, 0x603C64u, 0, 0x603D24u, 0x603FA4u, 0x6057E4u, 0x605C94u, 0x600D5Cu, 0x601A5Eu,
+      0x606236u, 0x6061D4u, 0x606384u, 0x608804u, 0x609C24u, 0x60B40Eu, 0x602F8Eu, 0x60078Cu, 0x6007CCu,
+      139972ull, 0x606DAEu, true },
 };
 #define V95_B (&k_v95_builds[g_shle_drv->v95])
+#define V95_SEQ_STRIDE (V95_B->rally ? 0x10u : 0x20u)
+
+/* Sega Rally's own (sound_hle_rally.h) */
+static bool rl_midi_byte(uint8_t b);
+static uint32_t rl_timer_b_body(void);
+static void rl_dispatch_event(uint8_t st, uint32_t p);
+static void rl_rec_step(unsigned k);
+static void rl_boot_tracks(void);
+static void rl_boot_engines(void);
+static void rl_samples(uint8_t d0, uint32_t top);
 
 /* Board time, clock periods (medians off the 68000 under a song and effects,
  * vf2: tools/grade-sound-hle.py --v95) */
@@ -137,6 +152,7 @@ static void v95_led(void) {                            /* 0x60049E */
 
 /* Int3 (0x600526), a MIDI byte: false for 0xFF, which restarts the driver */
 static bool v95_midi_byte(uint8_t b) {
+    if (V95_B->rally) return rl_midi_byte(b);
     if (b == 0xFF) return false;
     if (b >= 0xF0) return true;
     uint8_t d1;
@@ -205,6 +221,7 @@ static void v95_free(uint32_t v) {
 
 /* Int1, timer B (0x6005FE): the release countdowns; the voices freed */
 static uint32_t v95_timer_b_body(void) {
+    if (V95_B->rally) return rl_timer_b_body();
     uint32_t n = 0;
     for (uint32_t v = V95_VOICES; v < V95_VEND; v += 16) {
         if (!(shle_rb(v + 2) & 1)) continue;
@@ -757,6 +774,8 @@ static void v95_event(uint32_t t, uint32_t p) {       /* 0x60081A */
     }
 }
 
+#include "sound_hle_rally.h"
+
 /* ---- the sequencers (timer A) ------------------------------------------------------ */
 
 /* a status 0xFx: sysex and meta events skipped; false at the end of the track (FF 2F) */
@@ -803,7 +822,7 @@ static bool v95_seq_end(uint32_t s, uint32_t *a3) {
         return true;
     }
     if (l == 0xFFFFFFF2u) {                             /* every sequence off */
-        for (uint32_t k = 0; k < 0x100; k++) shle_wb(V95_SEQS + k, 0);
+        for (uint32_t k = 0; k < 8u * V95_SEQ_STRIDE; k++) shle_wb(V95_SEQS + k, 0);
         return false;
     }
     *a3 = l;
@@ -852,7 +871,7 @@ static void v95_fade(void) {                           /* 0x6021BA */
 static void v95_timer_a_body(void) {                   /* 0x601F16 */
     if (shle_rb(V95_QN) >= 0xFF) return;
     v95_fade();
-    for (uint32_t s = V95_SEQS; s < V95_SEQS + 0x100; s += 0x20) v95_seq_step(s);
+    for (uint32_t s = V95_SEQS; s < V95_SEQS + 8u * V95_SEQ_STRIDE; s += V95_SEQ_STRIDE) v95_seq_step(s);
 }
 
 /* ---- the main loop ------------------------------------------------------------------ */
@@ -868,7 +887,8 @@ static void v95_dispatch(uint64_t now) {               /* 0x6007A6, one at a rec
         g_shle.events++;
         g_shle.cost = V95_COST_EVENT;
         g_shle.stall = false;
-        for (uint32_t t = V95_TRACKS; t < V95_TRACKS + 20u * 16u; t += 16)
+        if (V95_B->rally) rl_dispatch_event(st, p + 1);
+        else for (uint32_t t = V95_TRACKS; t < V95_TRACKS + 20u * 16u; t += 16)
             if ((shle_rb(t) & 0x80) && shle_rb(t + 1) == (st & 0xF)) v95_event(t, p + 1);
         shle_ww(V95_QR, (r + 4u) & 0xFFFu);
         uint64_t from = g_shle.busy_until > now ? g_shle.busy_until : now;
@@ -946,7 +966,7 @@ static void v95_boot_scsp(void) {                      /* 0x60028E (the timers' 
     scsp_t *s = &g_sound.scsp;
     shle_sw8(0x401, 0);
     uint32_t a = shle_ml(V95_B->dsp + 2);
-    for (uint32_t k = 0; k < 0x500; k++) shle_sw8(0x700 + k, shle_mb(a + k));
+    for (uint32_t k = 0; k < 0x500; k++) shle_sw8(0x700 + k, V95_B->rally ? 0 : shle_mb(a + k));   /* Rally's starts empty */
     shle_sw16(0x402, 312);
     for (uint32_t k = 0; k < 32; k++) {
         shle_sw8(k * 0x20u + 0xB, 0xFF);
@@ -974,11 +994,12 @@ static void v95_boot(uint64_t at) {
     sound_ctrl_w(&g_sound, 0x18);
     memset(g_sound.ram + 0x1000, 0, 0x3F00);            /* 0x600320 */
     shle_wb(V95_LED, 0xEF);
-    v95_boot_tracks();
+    if (V95_B->rally) rl_boot_tracks(); else v95_boot_tracks();
     for (uint32_t k = 0; k < 32; k++) {                 /* 0x6003A8: the voices' slots and windows */
         uint32_t v = V95_VOICES + k * 16u;
         shle_ww(v, shle_mw(V95_B->vinit_w + k * 2u));
-        shle_wl(v + 0xC, shle_ml(V95_B->vinit_l + k * 4u));
+        if (V95_B->rally) shle_wb(v + 0xD, shle_mb(V95_B->vinit_l + k));   /* a byte: the window's page */
+        else shle_wl(v + 0xC, shle_ml(V95_B->vinit_l + k * 4u));
     }
     for (uint32_t k = 0; k < 32; k++) {                 /* 0x6003CC: the records */
         uint32_t r = V95_RECS + k * 0x20u;
@@ -987,7 +1008,8 @@ static void v95_boot(uint64_t at) {
         shle_wb(r + 0x16, k * 8u + 8u);
     }
     v95_efsdl(0);
-    v95_samples(0);
+    if (V95_B->rally) { rl_samples(0, 0x7FFFFu); rl_boot_engines(); }
+    else v95_samples(0);
     sound_ctrl_w(&g_sound, 0x10);
     g_shle.boot_at = at + V95_B->boot_fixed + g_shle.cost;
 }
@@ -1010,7 +1032,7 @@ static void v95_pass(scsp_t *s, uint64_t now) {
     shle_clear_step(s, now);
     if (!g_shle.booted || now < g_shle.stall_until) return;
     g_shle.chunks = 0;
-    for (unsigned k = 0; k < 32; k++) v95_rec_step(k);
+    for (unsigned k = 0; k < 32; k++) { if (V95_B->rally) rl_rec_step(k); else v95_rec_step(k); }
     g_shle.pass_rem += g_shle.chunks * SHLE_CHUNK_CYCLES;
     g_shle.pass_left += g_shle.pass_rem / SOUND_CYCLES_PER_SAMPLE;
     g_shle.pass_rem %= SOUND_CYCLES_PER_SAMPLE;

@@ -129,6 +129,7 @@ static const shle_drv_t k_shle_drvs[] = {
     { "pltkids",  0xE728311Au, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 2 },
     /* epr-17574 (Virtua Fighter 2) */
     { "vf2",      0x6DA14067u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 1 },
+    { "srallyc",  0xF1EFC2C5u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 2 },
 };
 static const shle_drv_t *g_shle_drv = &k_shle_drvs[0];
 

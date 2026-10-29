@@ -23,6 +23,7 @@ Usage:
   --crx: the board runs CRX_drv (Dynamite Cop, House of the Dead, Motor
          Raid), whose state is at 0x300-0xFFF (snd_replay's $SND_RAM_BASE)
   --v95: the board runs Sega's 1994-95 driver (Virtua Fighter 2, Sega Rally)
+  --rally: with --v95, Sega Rally's build (16-byte sequencers, its engines)
   $ROMDIR as snd_replay wants it (sfight.zip and schamp.zip)
 
 numpy only. Nothing it writes belongs in the repo.
@@ -160,9 +161,16 @@ V95_REGIONS = {'globals': [0x251E, 0x251F, 0x252E],
                'sequencers': [0x3000 + s * 32 + b for s in range(8) for b in range(32) if not 2 <= b <= 7],
                'tracks': list(range(0x4000, 0x4150)),
                'controllers': list(range(0x4200, 0x4250))}
+# Sega Rally's build (sound_hle_rally.h): sequencers of 16 bytes, the engines
+# but their slots (+10..+1E, whichever voice was free)
+RALLY_REGIONS = {'globals': [0x251E, 0x251F, 0x252E, 0x2521, 0x252F],
+                 'sequencers': [0x3000 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 7],
+                 'engines': [0x2600 + e * 32 + b for e in range(16) for b in list(range(16)) + [31]],
+                 'tracks': list(range(0x4000, 0x4150)),
+                 'controllers': list(range(0x4200, 0x4250))}
 
 
-def state(pa, pb, skip, crx=False, v95=False):
+def state(pa, pb, skip, crx=False, v95=False, rally=False):
     A = np.fromfile(pa + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     B = np.fromfile(pb + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     n, hold = min(len(A), len(B)), int(1.0 * 57.524)
@@ -173,7 +181,7 @@ def state(pa, pb, skip, crx=False, v95=False):
     # busy with it for a while (a song's preload holds its track set-up 0.3 s),
     # so a difference counts only when it lasts a second.
     base = CRX_BASE if crx else 0x1000
-    regions = CRX_REGIONS if crx else V95_REGIONS if v95 else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
+    regions = CRX_REGIONS if crx else RALLY_REGIONS if rally else V95_REGIONS if v95 else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
                'sequencers': [0x2000 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 7],
                'tracks': list(range(0x3000, 0x3140)),
                'controllers': list(range(0x3200, 0x3250)) + list(range(0x3270, 0x3290))}   # not SC08's TL save
@@ -206,7 +214,9 @@ def main():
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--crx', action='store_true')
     ap.add_argument('--v95', action='store_true')
+    ap.add_argument('--rally', action='store_true')
     args = ap.parse_args()
+    args.v95 = args.v95 or args.rally
     if args.crx:
         os.environ['SND_RAM_BASE'] = hex(CRX_BASE)
     os.makedirs(args.out, exist_ok=True)
@@ -233,7 +243,7 @@ def main():
             print(f'   audio: {len(rows)} windows; loudness C/board {loud.min():.3f}-{loud.max():.3f}; '
                   f'envelope correlation median {np.median(corr):.3f}, worst {corr.min():.3f}; '
                   'bands (dB) ' + ' '.join(f'{np.median(db[:, i]):+.2f}' for i in range(len(BANDS))))
-        diffs = state(pa, pb, restarts(inp), args.crx, args.v95)
+        diffs = state(pa, pb, restarts(inp), args.crx, args.v95, args.rally)
         print(f'   state: {len(diffs)} driver RAM differences lasting over a second')
         for d in diffs[:8]:
             print('     ' + d)

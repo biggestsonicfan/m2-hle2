@@ -499,8 +499,8 @@ STF's and CRX_drv and unlike either: no header at 0x608000, its tables at fixed
 places in its code. `src/board/sound_hle_v95.h` (`v95` = 1 in its `shle_drv_t`,
 the tables in `k_v95_builds`); its header has the RAM map and the voice, track
 and record fields. Sega Rally's epr-17890 is a later build of the same driver,
-68% the same code and 700 lines longer, and stays on the 68000 for now; no other
-set in the container runs either build.
+68% the same code and 700 lines longer (its own section below); no other set in
+the container runs either build.
 
 - *Levels.* Timer A (level 2) runs eight sequencers (0 the music, 1-7 effects)
   from the song table and queues their events; timer B (level 1) counts the
@@ -535,6 +535,43 @@ p95 2.7 ms; loudness 0.97-1.02 of the board's, envelope correlation median 0.90
 (worst 0.80). det_digest vf2 (2400 frames, a coin and a fight) is frame for frame
 the 68000's in the i960 columns; the sound board costs 39% less (90 s replay:
 2.83 s of CPU on the 68000, 1.73 s in C).
+
+### Sega Rally's build (Pinboard #1868)
+
+srallyc's epr-17890 runs in `src/board/sound_hle_rally.h`,
+which `sound_hle_v95.h` includes and calls where `v95_build_t.rally` says so;
+the queue, the sequencers, the DSP and send controllers and the board's time
+stay vf2's. Its header has what the build adds to the RAM map.
+
+- *Sequencers* are 16 bytes, not 32 (`V95_SEQ_STRIDE`); an effect restarts on
+  the sequencer that plays its id if its flag 0x10 says so.
+- *A MIDI log.* Each event in is logged, 4 bytes, at fp+0x2200 = 0x3200 (index
+  at 0x3300). Written at 0x2200 it lands on records 16-23 and the streams copy
+  to garbage.
+- *Engines.* A? 7x commands drive 16 engines at 0x2600 (32 bytes each): up to
+  15 layers keyed by the engine's value, each layer's slot at +0x10 (an indexed
+  displacement, hex in objdump), the sound at +0xF, the last value at +0x1F.
+  Starting one car's engine stops the other's (0/7, B/D); 2 and 9 set the cut,
+  3 and 5 pick the sound while the engine is idle.
+- *Voices* count down a word at +0xE in timer B; drums have a group (0x250A)
+  and a priority (0x250C); effects take up to 16 voices. A stolen effect clears
+  the engine byte at 0x2600 + ((v + 0xA) & 15), a board bug kept.
+- *Loops.* A streamed sample's loop is kept per slot at 0x2A00; a loop shorter
+  than a chunk wraps inside the window.
+- *Boot.* No delay loop: `boot_fixed` is 139,972, which puts the first A and B
+  within 54 and 234 clocks of the board's (8,662,074 and 27,105,774). The boot
+  zeroes the DSP and preloads the samples.
+
+`grade-sound-hle.py --rally` (bytes 2-7 of the 16-byte sequencers skipped, the
+engines' bytes 0-15 and 31 compared) on two captures: a race (9000 frames: coin,
+the pickers, then accelerating and steering) 3565 of 3565 key-ons within 30 ms,
+median -1.30 ms, p95 12.9 ms, loudness 0.986-1.008, envelope correlation median
+0.74 (worst 0.55), seven state differences, all effect sequencer picks from
+timing; the attract 3816 of 3816, median +2.47 ms, p95 3.8 ms, correlation median
+0.91, none. det_digest srallyc (2400 frames) is frame for frame the 68000's in
+the i960 columns; 60 s of the race replay take 1.53 s of CPU on the 68000, 0.84 s
+in C (-45%). The layer cost (`RL_COST_LAYER`) is a guess: the race's p95 is where
+to tune it.
 
 ## The voices in C (`--sound-synth`)
 
