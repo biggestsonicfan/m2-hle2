@@ -151,8 +151,9 @@ static inline void rollback_layout(i960_cpu_t *cpu, memory_bus_t *bus) {
     rollback__add("M2SCSP", &g_sound.scsp, sizeof g_sound.scsp, rollback__pack_scsp, true);
     rollback__add("SHLE", &g_shle, sizeof g_shle, NULL, false);
     rollback__add("SSYN", &g_ssyn, sizeof g_ssyn, NULL, false);
-    if (g_dsb2.present) {                              /* Top Skater's music board */
-        rollback__add("DSB2.cpu", &g_dsb2.m68k.cpu, sizeof g_dsb2.m68k.cpu, NULL, false);
+    if (g_dsb2.present) {                              /* Top Skater's or Touring Car's music board */
+        if (g_dsb2.z80) rollback__add("DSB2.cpu", &g_dsb2.zcpu, sizeof g_dsb2.zcpu, NULL, false);
+        else            rollback__add("DSB2.cpu", &g_dsb2.m68k.cpu, sizeof g_dsb2.m68k.cpu, NULL, false);
         rollback__add("DSB2", &g_dsb2.st, sizeof g_dsb2.st, rollback__pack_dsb2, true);
     }
     for (int i = 0; i < g_savestate_extra_n; i++)

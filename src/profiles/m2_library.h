@@ -21,8 +21,8 @@
  * (src/mame/sega/model2.cpp); the controls are its INPUT_PORTS. What MAME
  * runs beside the CRX board and nothing here models yet is left out, each
  * game saying so: Manx TT's Model 1 sound board (the DX's extra voices),
- * Sega Touring Car's DSB MPEG music (Top Skater's DSB2 is board/dsb2.h),
- * the comm board's program.
+ * the comm board's program. Touring Car's and Top Skater's MPEG music
+ * boards are board/dsb2.h.
  * Every game's country is REGION_TODO until someone looks for its setting.
  */
 #ifndef PROFILES_M2_LIBRARY_H
@@ -527,7 +527,8 @@ static const rom_part_t overrev_parts[] = {
 };
 #define OVERREV_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x800000, [ROM_TEXTURES] = 0x400000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
 
-/* MAME's dsbz80:mpegcpu, cpu4, dsbz80:mpeg, drive: no board here reads them. */
+/* With MAME's dsbz80:mpegcpu and dsbz80:mpeg, the Z80 music board
+ * (board/dsb2.h); cpu4 and drive: no board here reads them. */
 static const rom_part_t stcc_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19570.15", 0x9d6a1965, "epr-19571.16", 0x97254d16),
     ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "mpr-19257.11", 0xac28ee24, "mpr-19258.12", 0xf5ba7d78),
@@ -558,8 +559,13 @@ static const rom_part_t stcc_parts[] = {
     ROM_SWAP16(ROM_AUDIOCPU, 0x0000000, "epr-19274.31", 0x2dcc08ae),
     ROM_SWAP16(ROM_SAMPLES, 0x0000000, "mpr-19259.32", 0x4d55dbfc),
     ROM_SWAP16(ROM_SAMPLES, 0x0400000, "mpr-19261.34", 0xb88878ff),
+    ROM_BYTES(ROM_MPEGCPU, 0x0000000, "epr-19275.2s", 0xee809d3f),
+    ROM_BYTES(ROM_MPEG, 0x0000000, "mpr-19262.57s", 0x922aed7a),
+    ROM_BYTES(ROM_MPEG, 0x0200000, "mpr-19263.58s", 0xa256f4cd),
+    ROM_BYTES(ROM_MPEG, 0x0400000, "mpr-19264.59s", 0xb6c51d0f),
+    ROM_BYTES(ROM_MPEG, 0x0600000, "mpr-19265.60s", 0x7d98700a),
 };
-#define STCC_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x1000000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
+#define STCC_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x1000000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000, [ROM_MPEGCPU] = 0x20000, [ROM_MPEG] = 0x800000
 
 static const rom_part_t skisuprg_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-19489.15", 0x1df948a7, "epr-19490.16", 0xe6fc24d3),
@@ -937,8 +943,8 @@ M2LIB_PROFILE(sgt24h, "Super GT 24h", BOARD_MODEL2B_CRX, M2LIB_WHEEL_INPUT, M2LI
 M2LIB_CLONE(overrevb, "Over Rev (Model 2B, Revision B)", BOARD_MODEL2B_CRX, "overrev.zip",
             M2LIB_WHEEL_INPUT, M2LIB_REV_PEDALS);
 
-/* Model 2C. Touring Car and Top Skater have a DSB MPEG board for their music,
- * not here: the CRX's own sound is. */
+/* Model 2C. Touring Car and Top Skater have a DSB MPEG board for their music
+ * beside the CRX's own sound (board/dsb2.h). */
 M2LIB_PROFILE(overrev, "Over Rev (Model 2C, Revision A)", BOARD_MODEL2C_CRX, M2LIB_WHEEL_INPUT,
               M2LIB_REV_PEDALS);
 M2LIB_PROFILE(stcc, "Sega Touring Car Championship (newer)", BOARD_MODEL2C_CRX, M2LIB_WHEEL_INPUT,

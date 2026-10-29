@@ -1,5 +1,8 @@
 /*
- * dsb2.h — Sega's Digital Sound Board 2: the MPEG music beside the SCSP.
+ * dsb2.h — Sega's Digital Sound Boards: the MPEG music beside the SCSP.
+ *
+ * Two boards, one serial line and one decoder: the DSB2 (a 68000, Top
+ * Skater) and the Z80 DSB before it (Sega Touring Car), below the DSB2.
  *
  * Top Skater (Model 2C) plays its music off a second sound board: a 68000
  * with its own program (romset.mpegcpu, mpr-19760) that listens to the same
@@ -33,6 +36,24 @@
  * made at. The SCSP makes its samples late and in runs (scsp.h, "The chip's
  * own time"), so the bytes the serial line delivers are queued here and handed
  * to the 8251 one at a time, a byte time apart, as the line would.
+ *
+ * The Z80 DSB (Sega Touring Car) is MAME's src/mame/sega/dsbz80.cpp: a Z80 at
+ * 4 MHz, ROM 0x0000-0x7FFF (the first 32 KB of romset.mpegcpu), RAM
+ * 0x8000-0xFFFF, and on its I/O ports (the low byte):
+ *
+ *   0xE0       play: 0 stop, 1 once, 2 looping
+ *   0xE2-0xE4  the start address, high byte first; reads give the decoder's
+ *              position. Written while playing, it is the loop's start.
+ *   0xE5-0xE7  the end address; written while playing, the loop's end
+ *   0xE8       volume: ~data & 0x7F
+ *   0xE9       0 stereo, 1 left on both, 2 right on both
+ *   0xF0-0xF1  i8251 (data, control)
+ *
+ * IRQ0 (IM 1) is the UART's RxRDY. The program also writes ports 0xEA and
+ * 0xEB, which MAME leaves unmapped, as they are here. A looping window that ends starts again
+ * at the loop's start, and takes the loop's end if one was written. Which
+ * board a set has is told by its program (dsb2_load): a 68000's begins with
+ * its reset vectors, the PC even and inside the ROM; the Z80's with code.
  */
 #ifndef DSB2_H
 #define DSB2_H
@@ -45,6 +66,7 @@
 #include "m68k.h"
 #include "m68k_exec.h"
 #include "mpeg_l2.h"
+#include "z80.h"
 
 #define DSB2_CPU_HZ     8000000u
 #define DSB2_OUT_HZ     44100u        /* SOUND_RATE */
@@ -55,6 +77,8 @@
 /* One byte on the 31.25 kbaud line (10 bits), in the 68000's clocks. */
 #define DSB2_BYTE_CLKS  (DSB2_CPU_HZ / 3125u)
 #define DSB2_TIMER_CLKS (DSB2_CPU_HZ / 1000u)
+#define DSBZ80_CPU_HZ   4000000u
+#define DSBZ80_BYTE_CLKS (DSBZ80_CPU_HZ / 3125u)
 
 enum { DSB2_IDLE, DSB2_START_HI, DSB2_START_MD, DSB2_START_LO, DSB2_END_HI, DSB2_END_MD, DSB2_END_LO };
 
@@ -71,8 +95,9 @@ typedef struct {
     uint8_t  sys_ctl;
     int32_t  budget;
     uint32_t cyc_frac;
-    /* the decoder */
+    /* the decoder; `playing` is the Z80 board's play mode (1 once, 2 looping) */
     int      command, playing;
+    uint32_t lp_start, lp_end;        /* the Z80 board's loop */
     uint32_t start, end, mp_start, mp_end;
     int      mp_vol, mp_pan;
     int      mp_pos;                  /* in bits */
@@ -91,7 +116,10 @@ typedef struct {
     const uint8_t *rom;               /* romset.mpegcpu (the caller keeps it) */
     const uint8_t *mpeg;              /* romset.mpeg */
     uint32_t       mpeg_size;
+    bool           z80;               /* the Z80 DSB (dsbz80), not the DSB2 */
     m68k_state_t   m68k;
+    z80_state_t    zcpu;
+    z80_bus_t      zbus;
     dsb2_state_t   st;
 } dsb2_t;
 
@@ -205,6 +233,97 @@ static inline void dsb2_map(dsb2_t *d) {
     d->m68k.mem_ctx = d;
 }
 
+/* ---- The Z80 DSB (MAME dsbz80.cpp) ------------------------------------ */
+
+static uint8_t dsbz80_read(void *user, uint16_t a) {
+    dsb2_t *d = (dsb2_t *)user;
+    return a < 0x8000u ? d->rom[a] : d->st.ram[a - 0x8000u];
+}
+
+static void dsbz80_write(void *user, uint16_t a, uint8_t v) {
+    dsb2_t *d = (dsb2_t *)user;
+    if (a >= 0x8000u) d->st.ram[a - 0x8000u] = v;
+}
+
+static uint8_t dsbz80_in(void *user, uint16_t port) {
+    dsb2_t *d = (dsb2_t *)user;
+    dsb2_state_t *s = &d->st;
+    uint8_t p = (uint8_t)port;
+    if (p == 0xF0 || p == 0xF1) {
+        uint8_t v = dsb2_uart_read(s, p & 1u);
+        z80_set_irq(&d->zcpu, s->rxrdy);               /* RxRDY is the line, at once */
+        return v;
+    }
+    if (p >= 0xE2 && p <= 0xE4) {                      /* mpeg_pos_r */
+        uint32_t at = (uint32_t)s->mp_pos >> 3;
+        return (uint8_t)(at >> (8 * (0xE4 - p)));
+    }
+    dsb2_warn("Z80 in from unmapped port", p, 0);
+    return 0xFF;
+}
+
+/* MAME mpeg_start_w / mpeg_end_w: the third byte lands; while playing it is
+ * the loop's. */
+static inline void dsbz80_addr_w(uint32_t *a, int byte, uint8_t v) {
+    int sh = 8 * (2 - byte);
+    *a = (*a & ~(0xFFu << sh)) | (uint32_t)v << sh;
+}
+
+static void dsbz80_out(void *user, uint16_t port, uint8_t v) {
+    dsb2_t *d = (dsb2_t *)user;
+    dsb2_state_t *s = &d->st;
+    uint8_t p = (uint8_t)port;
+    if (p == 0xF0 || p == 0xF1) { dsb2_uart_write(s, p & 1u, v); z80_set_irq(&d->zcpu, s->rxrdy); return; }
+    if (p == 0xE0) {                                   /* mpeg_trigger_w */
+        s->playing = v;
+        if (v == 0) s->audio_pos = s->audio_avail = 0;
+        else if (v == 1 || v == 2) {
+            s->mp_pos = (int)((s->mp_start & 0xFFFFFFu) * 8u);
+            LOG_INFO("dsbz80: plays 0x%06X-0x%06X%s at %u ms", s->mp_start, s->mp_end, v == 2 ? ", looping" : "",
+                     (unsigned)(d->zcpu.cycles / (DSBZ80_CPU_HZ / 1000u)));
+        }
+        return;
+    }
+    if (p >= 0xE2 && p <= 0xE4) {
+        dsbz80_addr_w(&s->start, p - 0xE2, v);
+        if (p == 0xE4) { if (s->playing == 0) s->mp_start = s->start; else s->lp_start = s->start; }
+        return;
+    }
+    if (p >= 0xE5 && p <= 0xE7) {
+        dsbz80_addr_w(&s->end, p - 0xE5, v);
+        if (p == 0xE7) { if (s->playing == 0) s->mp_end = s->end; else s->lp_end = s->end; }
+        return;
+    }
+    if (p == 0xE8) { s->mp_vol = ~v & 0x7F; return; }
+    if (p == 0xE9) { s->mp_pan = v & 3; return; }
+    if (p == 0xEA || p == 0xEB) return;                /* unmapped in MAME too */
+    dsb2_warn("Z80 out to unmapped port", p, v);
+}
+
+static inline void dsbz80_map(dsb2_t *d) {
+    d->zbus = (z80_bus_t){ .read = dsbz80_read, .in = dsbz80_in, .write = dsbz80_write,
+                           .out = dsbz80_out, .user = d };
+}
+
+static inline void dsbz80_run_cpu(dsb2_t *d, int32_t clocks) {
+    dsb2_state_t *s = &d->st;
+    z80_state_t *z = &d->zcpu;
+    s->budget += clocks;
+    while (s->budget > 0) {
+        uint64_t now = z->cycles;
+        if (s->rxq_r != s->rxq_w && now >= s->rx_next) {
+            uint8_t b = s->rxq[s->rxq_r++ & (DSB2_RX_FIFO - 1u)];
+            s->rx_next = now + DSBZ80_BYTE_CLKS;
+            if (s->rxe) { s->rx_data = b; s->rxrdy = 1; }
+        }
+        z80_set_irq(z, s->rxrdy);
+        int32_t run = s->budget;                       /* up to the next byte's landing */
+        if (s->rxq_r != s->rxq_w && s->rx_next - now < (uint64_t)run) run = (int32_t)(s->rx_next - now);
+        if (run < 1) run = 1;
+        s->budget -= z80_run(z, &d->zbus, run);
+    }
+}
+
 /* Back to power-on: the board boots from its vectors. Keeps the ROMs. */
 static inline void dsb2_reset(void) {
     dsb2_t *d = &g_dsb2;
@@ -214,7 +333,9 @@ static inline void dsb2_reset(void) {
     d->st.timer_at = DSB2_TIMER_CLKS;
     mpa_init(&d->st.mpa, d->mpeg);
     memset(&d->m68k, 0, sizeof d->m68k);
+    z80_reset(&d->zcpu);
     if (!d->present) return;
+    if (d->z80) { dsbz80_map(d); return; }
     dsb2_map(d);
     m68k_reset(&d->m68k);
     m68k_startup(&d->m68k);
@@ -227,8 +348,14 @@ static inline void dsb2_load(const uint8_t *rom, size_t rom_size, const uint8_t 
     d->rom = d->present ? rom : NULL;
     d->mpeg = d->present ? mpeg : NULL;
     d->mpeg_size = d->present ? (uint32_t)mpeg_size : 0;
+    /* A 68000 program starts with its stack and reset PC (big-endian here). */
+    uint32_t pc = d->present ? (uint32_t)rom[4] << 24 | (uint32_t)rom[5] << 16 | (uint32_t)rom[6] << 8 | rom[7] : 0;
+    d->z80 = d->present && ((pc & 1u) || pc >= DSB2_ROM_SIZE);
     dsb2_reset();
-    if (d->present)
+    if (d->present && d->z80)
+        LOG_INFO("dsbz80: Z80 MPEG board, program %u KB, data %u MB",
+                 (unsigned)(rom_size >> 10), (unsigned)(mpeg_size >> 20));
+    else if (d->present)
         LOG_INFO("dsb2: MPEG board, program %u KB, data %u MB, SSP=0x%08X PC=0x%08X",
                  (unsigned)(rom_size >> 10), (unsigned)(mpeg_size >> 20), d->m68k.cpu.ssp, d->m68k.cpu.pc);
 }
@@ -287,6 +414,11 @@ static inline void dsb2_mpeg_next(dsb2_t *d, int16_t *l, int16_t *r) {
             s->audio_pos = 0;
             s->audio_avail = n;
             s->audio_ch = ch;
+        } else if (d->z80 && s->playing == 2) {          /* MAME dsbz80: loop */
+            s->audio_pos = s->audio_avail = 0;
+            if ((uint32_t)s->mp_pos == s->lp_start * 8u) s->playing = 0;   /* nothing decodable there */
+            s->mp_pos = (int)(s->lp_start * 8u);
+            if (s->lp_end) s->mp_end = s->lp_end;
         } else {
             s->audio_pos = s->audio_avail = 0;          /* the end of the window */
             s->playing = 0;
@@ -306,10 +438,12 @@ static inline void dsb2_mpeg_next(dsb2_t *d, int16_t *l, int16_t *r) {
 static inline void dsb2_sample(int16_t *l, int16_t *r) {
     dsb2_t *d = &g_dsb2;
     dsb2_state_t *s = &d->st;
-    s->cyc_frac += DSB2_CPU_HZ % DSB2_OUT_HZ;
-    int32_t n = (int32_t)(DSB2_CPU_HZ / DSB2_OUT_HZ);
+    uint32_t hz = d->z80 ? DSBZ80_CPU_HZ : DSB2_CPU_HZ;
+    s->cyc_frac += hz % DSB2_OUT_HZ;
+    int32_t n = (int32_t)(hz / DSB2_OUT_HZ);
     if (s->cyc_frac >= DSB2_OUT_HZ) { s->cyc_frac -= DSB2_OUT_HZ; n++; }
-    dsb2_run_cpu(d, n);
+    if (d->z80) dsbz80_run_cpu(d, n);
+    else        dsb2_run_cpu(d, n);
 
     s->phase += DSB2_MPEG_HZ;
     while (s->phase >= DSB2_OUT_HZ) {
@@ -329,11 +463,13 @@ static inline void dsb2_sample(int16_t *l, int16_t *r) {
 
 typedef struct {
     m68k_cpu_t   cpu;
+    z80_state_t  zcpu;                /* the Z80 DSB's */
     dsb2_state_t st;
 } dsb2_save_t;
 
 static inline void dsb2_save(dsb2_save_t *o) {
     o->cpu = g_dsb2.m68k.cpu;
+    o->zcpu = g_dsb2.zcpu;
     o->st = g_dsb2.st;
     o->st.mpa.base = NULL;
 }
@@ -341,9 +477,11 @@ static inline void dsb2_save(dsb2_save_t *o) {
 static inline void dsb2_restore(const dsb2_save_t *o) {
     if (!g_dsb2.present) return;
     g_dsb2.m68k.cpu = o->cpu;
+    g_dsb2.zcpu = o->zcpu;
     g_dsb2.st = o->st;
     g_dsb2.st.mpa.base = g_dsb2.mpeg;
-    dsb2_map(&g_dsb2);
+    if (g_dsb2.z80) dsbz80_map(&g_dsb2);
+    else            dsb2_map(&g_dsb2);
 }
 
 #endif /* DSB2_H */
