@@ -199,7 +199,7 @@ static void report(uint32_t n, uint32_t nm, size_t next) {
         printf("sound HLE (Model 1): phase %u, %llu bytes in, %llu messages, %llu meta events; UART dropped %u, overruns %u\n",
                g_shle.m1.phase, (unsigned long long)g_shle.m1.irqs, (unsigned long long)g_shle.m1.events,
                (unsigned long long)g_shle.m1.metas, (unsigned)g_sound.m1.rx_dropped, (unsigned)g_sound.m1.rx_overruns);
-    else if (g_sound_hle_want) printf("sound HLE: driver not known (code hash %08X); the board ran\n", shle_code_hash());
+    if (!g_shle.on && g_sound_hle_want) printf("sound HLE: driver not known (code hash %08X); the board ran\n", shle_code_hash());
     if (g_ssyn.on) printf("sound synth: %llu samples, %llu key-ons\n", (unsigned long long)g_ssyn.samples, (unsigned long long)g_ssyn.keyons);
     printf("replayed: %u records, %u marks; 68000 pc 0x%06X; irqs L1 %llu L2 %llu L3 %llu; midi fed %zu\n",
            n, nm, g_sound.m68k.cpu.pc, (unsigned long long)g_sound.irqs[1],

@@ -530,9 +530,10 @@ the container runs either build.
 
 `grade-sound-hle.py --v95` on a synthetic stimulus (the attract sends its few
 bytes before the driver boots): all 31 songs, drum effects on 9-14, CCs, bends,
-fades and stops, 115 s. 2294 of 2294 key-ons within 30 ms, median -0.29 ms,
-p95 2.7 ms; loudness 0.97-1.02 of the board's, envelope correlation median 0.90
-(worst 0.80). det_digest vf2 (2400 frames, a coin and a fight) is frame for frame
+fades and stops, 115 s. 2294 of 2294 key-ons within 30 ms, median -0.35 ms,
+p95 2.5 ms; loudness 0.94-1.02 of the board's, envelope correlation median 0.91
+(worst 0.80), three state differences (a counter at 0x252E one off for about a
+second). det_digest vf2 (2400 frames, a coin and a fight) is frame for frame
 the 68000's in the i960 columns; the sound board costs 39% less (90 s replay:
 2.83 s of CPU on the 68000, 1.73 s in C).
 
@@ -564,14 +565,30 @@ stay vf2's. Its header has what the build adds to the RAM map.
 
 `grade-sound-hle.py --rally` (bytes 2-7 of the 16-byte sequencers skipped, the
 engines' bytes 0-15 and 31 compared) on two captures: a race (9000 frames: coin,
-the pickers, then accelerating and steering) 3565 of 3565 key-ons within 30 ms,
-median -1.30 ms, p95 12.9 ms, loudness 0.986-1.008, envelope correlation median
-0.74 (worst 0.55), seven state differences, all effect sequencer picks from
-timing; the attract 3816 of 3816, median +2.47 ms, p95 3.8 ms, correlation median
-0.91, none. det_digest srallyc (2400 frames) is frame for frame the 68000's in
-the i960 columns; 60 s of the race replay take 1.53 s of CPU on the 68000, 0.84 s
-in C (-45%). The layer cost (`RL_COST_LAYER`) is a guess: the race's p95 is where
-to tune it.
+the pickers, then accelerating and steering) 99.9% of 3565 key-ons within 30 ms,
+median +0.68 ms, p95 2.8 ms, loudness 0.987-1.008, envelope correlation median
+0.78 (worst 0.55), three state differences (effect sequencer picks); the attract
+3816 of 3816, median +0.69 ms, p95 1.9 ms, correlation median 0.96, none.
+det_digest srallyc (2400 frames) is frame for frame the 68000's in the i960
+columns; 60 s of the race replay take 1.53 s of CPU on the 68000, 0.84 s in C
+(-45%).
+
+Timer A's ticks set the music's clock, so its gaps are what the race's p95 was
+(12.9 ms with one flat layer cost; Pinboard #1875). Traced on the board (records
+of A's entry, 44-50 s of the race, 30-36 s of the attract), A's gap is 12,756
+clocks at least, and how much more depends on where the tick lands: about 8 in
+the idle loop or a pass over the slots, 14 in event code, 38.5 in a stream's
+chunk copy (its `movem.l` run, 0x602AE0-0x602BA8), and about 330 when it comes
+in under a MIDI byte's handler (450 clocks a byte, 870 when the byte ends a
+message). So `v95_build_t` has the build's own `reload_a` (150 for Rally, 155
+for vf2), `midi_msg` (the 420 a message adds) and `refill_wait` (33: the chunk
+copy's share of a pass, a filter over a pass's length, scaled by its wait; 0
+keeps vf2's fit), and a timer due before the middle of a sample in which a byte
+came is taken before the byte. The engine loop costs by what each layer does
+(`RL_COST_CALL` 200 an engine, `SKIP` 100 / `OFF` 220 a layer out of range,
+`MOVE` 630, `LAYER` 900 a key-on), timed on the board in a race. C's mean A gap
+is then the board's to 0.2 clocks in both captures (race 12,777.6, attract
+12,768.5).
 
 ### Daytona USA's Model 1 driver (Pinboard #1875)
 

@@ -75,16 +75,20 @@ typedef struct {
                              * less SHLE_INIT_CYCLES and the copies the game's sizes */
     uint32_t engines;       /* Sega Rally's engine sounds (sound_hle_rally.h) */
     bool rally;             /* epr-17890: its own voices, records and engines */
+    uint32_t reload_a;      /* timer A's handler entered -> its reload written, and the mean wait
+                             * for the instruction it comes in (vf2's A: 12770 a tick) */
+    uint32_t midi_msg;      /* Int3's extra for a byte that ends a message (queued, logged) */
+    uint32_t refill_wait;   /* a timer's extra wait in a refill's movem.l (0: none, vf2's fit) */
 } v95_build_t;
 
 static const v95_build_t k_v95_builds[] = {
     { 0 },
     { 0x60C6A6u, 0x6032C6u, 0x60C3E6u, 0x6053AAu, 0x60C4A6u, 0x60C726u, 0x602676u, 0x602B26u, 0x600C48u, 0x60179Cu,
       0x603066u, 0x6030A6u, 0x60493Eu, 0x605368u, 0x605B26u, 0x608DF0u, 0x608E12u, 0x6006E6u, 0x600726u,
-      25380238ull },
+      25380238ull, 0, false, 155u, 0, 0 },
     { 0x603F24u, 0x60882Eu, 0x603C64u, 0, 0x603D24u, 0x603FA4u, 0x6057E4u, 0x605C94u, 0x600D5Cu, 0x601A5Eu,
       0x606236u, 0x6061D4u, 0x606384u, 0x608804u, 0x609C24u, 0x60B40Eu, 0x602F8Eu, 0x60078Cu, 0x6007CCu,
-      139972ull, 0x606DAEu, true },
+      139972ull, 0x606DAEu, true, 150u, 420u, 33u },
 };
 #define V95_B (&k_v95_builds[g_shle_drv->v95])
 #define V95_SEQ_STRIDE (V95_B->rally ? 0x10u : 0x20u)
@@ -100,8 +104,6 @@ static void rl_samples(uint8_t d0, uint32_t top);
 
 /* Board time, clock periods (medians off the 68000 under a song and effects,
  * vf2: tools/grade-sound-hle.py --v95) */
-#define V95_RELOAD_AT_A  155u      /* timer A's handler entered -> its reload written, and the mean
-                                    * wait for the instruction it comes in (the board's A: 12770 a tick) */
 #define V95_RELOAD_AT_B  150u
 #define V95_DUR_MIDI     453u
 #define V95_DUR_A        1059u     /* the fade and the eight sequencers, nothing queued */
@@ -1033,9 +1035,18 @@ static void v95_pass(scsp_t *s, uint64_t now) {
     if (!g_shle.booted || now < g_shle.stall_until) return;
     g_shle.chunks = 0;
     for (unsigned k = 0; k < 32; k++) { if (V95_B->rally) rl_rec_step(k); else v95_rec_step(k); }
-    g_shle.pass_rem += g_shle.chunks * SHLE_CHUNK_CYCLES;
+    uint32_t rc = g_shle.chunks * SHLE_CHUNK_CYCLES;
+    g_shle.pass_rem += rc;
     g_shle.pass_left += g_shle.pass_rem / SOUND_CYCLES_PER_SAMPLE;
     g_shle.pass_rem %= SOUND_CYCLES_PER_SAMPLE;
+    /* the refills' share of the main loop's time, for a timer's wait in a
+     * movem.l (shle_entry): a pass weighs by its length, and the share is
+     * scaled to this loop's wait (refill_wait, not SHLE_REFILL_WAIT) */
+    if (!V95_B->refill_wait) return;
+    uint32_t len = V95_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE + rc;
+    int64_t f = (int64_t)(((uint64_t)rc << 16) * V95_B->refill_wait / SHLE_REFILL_WAIT / len);
+    int64_t fr = g_shle.refill_frac;
+    g_shle.refill_frac = (uint32_t)(fr + (f - fr) * len / (16 * V95_PASS_SAMPLES * SOUND_CYCLES_PER_SAMPLE));
 }
 
 /* ---- the board's time ------------------------------------------------------------------------- */
@@ -1067,10 +1078,12 @@ static bool v95_events_midi(uint64_t now) {
         uint8_t b = s->mi[s->mi_r];
         s->mi_r = (uint8_t)((s->mi_r + 1) & 31);
         s->mi_taken++;
-        g_shle.l2_free = (g_shle.l2_free > now ? g_shle.l2_free : now) + V95_DUR_MIDI;
-        v95_suspend(now, V95_DUR_MIDI);
-        bool idle = !shle_rb(V95_QN);
+        uint8_t qn = shle_rb(V95_QN);
         if (!v95_midi_byte(b)) { v95_restart(now); return false; }
+        uint32_t dur = V95_DUR_MIDI + (shle_rb(V95_QN) != qn ? V95_B->midi_msg : 0u);
+        g_shle.l2_free = (g_shle.l2_free > now ? g_shle.l2_free : now) + dur;
+        v95_suspend(now, dur);
+        bool idle = !qn;
         if (idle && shle_rb(V95_QN)) g_shle.busy_until += V95_EVENT_LEAD;
     }
     return true;
@@ -1083,7 +1096,7 @@ static bool v95_events_timer(uint64_t now) {
     if (e > now) return false;
     g_shle.enq = 0;
     if (a) {
-        g_shle.due_a = (e + V95_RELOAD_AT_A + shle_period(206, 0)) * SHLE_T16;
+        g_shle.due_a = (e + V95_B->reload_a + shle_period(206, 0)) * SHLE_T16;
         bool idle = !shle_rb(V95_QN);
         v95_timer_a_body();
         uint32_t dur = V95_DUR_A + g_shle.enq * V95_DUR_EVENT;
@@ -1102,6 +1115,10 @@ static bool v95_events_timer(uint64_t now) {
 
 static void v95_events(uint64_t now) {
     if (!g_shle.booted && !v95_events_boot(now)) return;
+    /* a byte came some time in this sample: a timer due before the middle of
+     * it was in its handler first, not held up behind the byte's */
+    if (g_sound.scsp.mi_r != g_sound.scsp.mi_w)
+        for (int guard = 0; guard < 16 && v95_events_timer(now - SOUND_CYCLES_PER_SAMPLE / 2); guard++) {}
     if (!v95_events_midi(now)) return;
     for (int guard = 0; guard < 16 && v95_events_timer(now); guard++) {}
     v95_dispatch(now);

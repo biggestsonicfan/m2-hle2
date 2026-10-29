@@ -34,7 +34,14 @@
 #define RL_ENG      0x2600u
 #define RL_LOOPS    0x2A00u
 
-#define RL_COST_LAYER 900u          /* an engine layer's update */
+/* an engine's update, by the path each layer takes (0x602374, timed on the
+ * board in a race): the call, a layer out of range that was off, one let go,
+ * one moved, one keyed (and V95_COST_KEYON) */
+#define RL_COST_CALL  200u
+#define RL_COST_SKIP  100u
+#define RL_COST_OFF   220u
+#define RL_COST_MOVE  630u
+#define RL_COST_LAYER 900u
 
 /* ---- MIDI in, the LED ---------------------------------------------------------- */
 
@@ -729,18 +736,24 @@ static void rl_engine(uint32_t n, uint8_t val) {
     if ((int16_t)idx <= (int16_t)shle_mw(V95_B->engines) && val != shle_rb(a0 + 31)) {
         uint32_t a2 = shle_ml(V95_B->engines + 2 + idx * 4u);
         uint32_t cnt = shle_mw(a2) + 1u;
+        g_shle.cost += RL_COST_CALL;
         shle_wb(a0 + 31, val);
         if (!val) rl_layers_off(a0, cnt);
         for (uint32_t k = 0; val && k < cnt; k++) {
             uint32_t L = a2 + 2 + k * 14u;
-            g_shle.cost += RL_COST_LAYER;
-            if (val < shle_mb(L + 2)) { rl_layer_off(a0, k, false); continue; }
-            if ((int8_t)val > (int8_t)shle_mb(L + 3)) { rl_layer_off(a0, k, true); continue; }
+            bool out = val < shle_mb(L + 2) || (int8_t)val > (int8_t)shle_mb(L + 3);
+            if (out) {
+                g_shle.cost += shle_rb(a0 + k) ? RL_COST_OFF : RL_COST_SKIP;
+                rl_layer_off(a0, k, val >= shle_mb(L + 2));
+                continue;
+            }
             if (shle_rb(a0 + k)) {
+                g_shle.cost += RL_COST_MOVE;
                 uint32_t slot = shle_rw(V95_VOICES + (shle_rb(a0 + 0x10 + k) & 31u) * 16u);
                 shle_ww(V95_RECS + slot + 0x1A, rl_layer_sound(L, val, slot));
                 continue;
             }
+            g_shle.cost += RL_COST_LAYER;
             uint32_t v = rl_engine_voice();
             if (v) rl_engine_keyon(a0, k, L, val, v);
         }
