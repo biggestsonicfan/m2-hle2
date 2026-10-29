@@ -2756,6 +2756,53 @@ at 3 vblanks; 30 fps needs the game's 22 ms down as well as the 3D.
 FACESTOP's disc also has less page cache (1452 KB against 1964), so outside
 those windows the fight loaded 20-30 pages a window (`bio` 20-35%).
 
+## The scan split on the console (#1884)
+
+The owner ran `dreamcast/stf-split` (2e098ed, SCANSPLIT) through the attract
+into the demo fight: M2LOG004.TXT, 311 s. Over the same quiet fight windows
+as #1883 (from 104 s, no page loads, `bio` under 5%: 12 windows) it reads as
+M2LOG002 did, 13.0 fps, 76.7 ms a frame, `sc` 36.1, so the marks cost
+nothing to see. The scan by part, ms a drawn frame (X0/X1):
+
+| `wk` | `rn` | `me` | `fu` | `sp` | `xf` | `cc` | `pj` | **`fa`** | sum | models | faces |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1.1 | 0.2 | 1.3 | 3.2 | 0.3 | 1.2 | 0.8 | 1.9 | **26.2** | 36.2 | 80 | 2678 |
+
+The face loop is 72% of the scan, as in Flycast (#535: 71%). With #1883's
+FACESTOP (`sc` 13.8) the loop up to the cull is about 4 ms and everything
+after it about 22 ms: ~15 µs a submitted face, ~3000 cycles.
+
+The same disc's bench (frames 3500-3900, the log's last rows) against
+Flycast's, run here at 10dcb30 (the same code plus #1884's X2 timing, through
+the serial port; ms over the 400 frames):
+
+| frames 3500-3900 | total | sl / dr | `wk` | `rn` | `me` | `fu` | `sp` | `xf` | `cc` | `pj` | `fa` | sum | faces |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| console, M2LOG004 | 32331 | 10747 / 21494 | 429 | 86 | 1659 | 1292 | 160 | 476 | 268 | 714 | 10476 | 15560 | 1,038,331 |
+| Flycast, 10dcb30 | 14511 | 5185 / 8538 | 233 | 35 | 211 | 465 | 63 | 294 | 337 | 447 | 4621 | 6706 | 1,214,247 |
+| console / Flycast | 2.2 | 2.1 / 2.5 | 1.8 | 2.5 | 7.9 | 2.8 | 2.5 | 1.6 | 0.8 | 1.6 | 2.3 | 2.3 | 0.86 |
+
+- The console is 2.2 times Flycast's clock over the bench: no Flycast bench
+  number is a console one. 30 fps in Flycast (13333 ms) would be ~30 s
+  (13 fps) here.
+- The face loop costs 10.1 µs a face on the console, 3.8 in Flycast (2.7
+  times). The FP parts (`xf`, `pj`) are only 1.6 times; `me` (the strip pack's
+  meshes, read off the disc in this window) 7.9 times.
+- The sampler puts `dp_face_colour` (the ramp walk inlined) at 9.5% of the
+  fight's frame, 7.3 ms, against Flycast's X2 below: 539 ms over the bench,
+  1.5 µs a call over 360,534 calls, 12,920 ramp walks (153 ms, 11.8 µs each),
+  about 0.75 ms a drawn frame. That is ~10 times, where the loop is 2.7.
+  Nothing in its code is slow on Flycast's clock: no PVR writes on the
+  knee path, no library calls in the hit path. Whether the console makes more
+  calls (more memo or ramp-cache misses) or each one costs more (the 112 KB
+  `g_dp_ramp`, the 48 KB colorxlat read 48 times a walk against a 16 KB
+  operand cache) is what X2 is for.
+- `scif_spi_write_d`, the SD log's own writes, is 1.5 ms a frame (2%).
+
+10dcb30 adds the X2 row to SCANSPLIT (dc_scansplit.h, README): two TMU2
+reads round each `dp_face_colour` call and each ramp walk, and counts of the
+memo and ramp-cache lookups. The new `dreamcast/stf-split` has it.
+
 ## Next optimization targets
 
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
