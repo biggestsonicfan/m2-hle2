@@ -492,6 +492,157 @@ sets, hotdp and pltkids (`--sound-hle`, 1200-1800 frames). The sound board costs
 hotd (90 s replay: 3.19 s of CPU on the 68000, 1.95 s in C) and 43% less in
 dynamcop (3.13 to 1.79).
 
+### Virtua Fighter 2's driver (Pinboard #1868)
+
+vf2's epr-17574 (the clones borrow it) runs Sega's 1994-95 driver, older than
+STF's and CRX_drv and unlike either: no header at 0x608000, its tables at fixed
+places in its code. `src/board/sound_hle_v95.h` (`v95` = 1 in its `shle_drv_t`,
+the tables in `k_v95_builds`); its header has the RAM map and the voice, track
+and record fields. Sega Rally's epr-17890 is a later build of the same driver,
+68% the same code and 700 lines longer (its own section below); no other set in
+the container runs either build.
+
+- *Levels.* Timer A (level 2) runs eight sequencers (0 the music, 1-7 effects)
+  from the song table and queues their events; timer B (level 1) counts the
+  releasing voices down and frees them; MIDI in (level 3) queues the i960's.
+  The main loop streams the 32 records and takes one queued event at each record
+  that is not streaming. The handlers never lower the mask.
+- *Voices.* 32, one slot each. Music voices are numbered by age (+9), effects
+  (drum notes on channels 9-14) by their own (+5), five effects at most: a sixth
+  takes the oldest. With all 32 on, a note takes the oldest music voice. Channel
+  15's drum notes 0xB6/0xB8 choke its 0xBA.
+- *Samples.* A note's sample entry is read over the bus: an index past 0x7FF/20
+  lands below the table, at 0xFFxxxx, in sample ROM, and the RR and drum flags
+  come from there. Preloaded samples play from sound RAM; the rest stream 0x200
+  bytes at a time.
+- *Board costs* (68000 trace): timer A 1059 + ~390 an event queued; B 2361; a
+  MIDI byte 453; an event ~2160 to dispatch, a note-on with its key-on 7231,
+  without 2769, a note-off ~4900, a bend 4580, CC 16 (master volume) ~55,000 since
+  it runs once per matching track. An event that lands in an empty queue waits
+  3300 more before the loop reaches it (`V95_EVENT_LEAD`).
+- *Timer phase.* The first A and B come 33,188,953 clocks after power-on
+  (`boot_fixed`). B reloads at its entry, so each wait behind an A or a MIDI
+  byte moves every later B. 80,000 clocks off at boot put B 62% of a period out of
+  phase. A voice's release then ended before a drum note on one side and after it
+  on the other, and the voice order differed from then on. B still random-walks
+  ±25,000 clocks (handler lengths differ by tens of clocks), one state
+  difference in 115 s.
+
+`grade-sound-hle.py --v95` on a synthetic stimulus (the attract sends its few
+bytes before the driver boots): all 31 songs, drum effects on 9-14, CCs, bends,
+fades and stops, 115 s. 2294 of 2294 key-ons within 30 ms, median -0.35 ms,
+p95 2.5 ms; loudness 0.94-1.02 of the board's, envelope correlation median 0.91
+(worst 0.80), three state differences (a counter at 0x252E one off for about a
+second). det_digest vf2 (2400 frames, a coin and a fight) is frame for frame
+the 68000's in the i960 columns; the sound board costs 39% less (90 s replay:
+2.83 s of CPU on the 68000, 1.73 s in C).
+
+### Sega Rally's build (Pinboard #1868)
+
+srallyc's epr-17890 runs in `src/board/sound_hle_rally.h`,
+which `sound_hle_v95.h` includes and calls where `v95_build_t.rally` says so;
+the queue, the sequencers, the DSP and send controllers and the board's time
+stay vf2's. Its header has what the build adds to the RAM map.
+
+- *Sequencers* are 16 bytes, not 32 (`V95_SEQ_STRIDE`); an effect restarts on
+  the sequencer that plays its id if its flag 0x10 says so.
+- *A MIDI log.* Each event in is logged, 4 bytes, at fp+0x2200 = 0x3200 (index
+  at 0x3300). Written at 0x2200 it lands on records 16-23 and the streams copy
+  to garbage.
+- *Engines.* A? 7x commands drive 16 engines at 0x2600 (32 bytes each): up to
+  15 layers keyed by the engine's value, each layer's slot at +0x10 (an indexed
+  displacement, hex in objdump), the sound at +0xF, the last value at +0x1F.
+  Starting one car's engine stops the other's (0/7, B/D); 2 and 9 set the cut,
+  3 and 5 pick the sound while the engine is idle.
+- *Voices* count down a word at +0xE in timer B; drums have a group (0x250A)
+  and a priority (0x250C); effects take up to 16 voices. A stolen effect clears
+  the engine byte at 0x2600 + ((v + 0xA) & 15), a board bug kept.
+- *Loops.* A streamed sample's loop is kept per slot at 0x2A00; a loop shorter
+  than a chunk wraps inside the window.
+- *Boot.* No delay loop: `boot_fixed` is 139,972, which puts the first A and B
+  within 54 and 234 clocks of the board's (8,662,074 and 27,105,774). The boot
+  zeroes the DSP and preloads the samples.
+
+`grade-sound-hle.py --rally` (bytes 2-7 of the 16-byte sequencers skipped, the
+engines' bytes 0-15 and 31 compared) on two captures: a race (9000 frames: coin,
+the pickers, then accelerating and steering) 99.9% of 3565 key-ons within 30 ms,
+median +0.68 ms, p95 2.8 ms, loudness 0.987-1.008, envelope correlation median
+0.78 (worst 0.55), three state differences (effect sequencer picks); the attract
+3816 of 3816, median +0.69 ms, p95 1.9 ms, correlation median 0.96, none.
+det_digest srallyc (2400 frames) is frame for frame the 68000's in the i960
+columns; 60 s of the race replay take 1.53 s of CPU on the 68000, 0.84 s in C
+(-45%).
+
+Timer A's ticks set the music's clock, so its gaps are what the race's p95 was
+(12.9 ms with one flat layer cost; Pinboard #1875). Traced on the board (records
+of A's entry, 44-50 s of the race, 30-36 s of the attract), A's gap is 12,756
+clocks at least, and how much more depends on where the tick lands: about 8 in
+the idle loop or a pass over the slots, 14 in event code, 38.5 in a stream's
+chunk copy (its `movem.l` run, 0x602AE0-0x602BA8), and about 330 when it comes
+in under a MIDI byte's handler (450 clocks a byte, 870 when the byte ends a
+message). So `v95_build_t` has the build's own `reload_a` (150 for Rally, 155
+for vf2), `midi_msg` (the 420 a message adds) and `refill_wait` (33: the chunk
+copy's share of a pass, a filter over a pass's length, scaled by its wait; 0
+keeps vf2's fit), and a timer due before the middle of a sample in which a byte
+came is taken before the byte. The engine loop costs by what each layer does
+(`RL_COST_CALL` 200 an engine, `SKIP` 100 / `OFF` 220 a layer out of range,
+`MOVE` 630, `LAYER` 900 a key-on), timed on the board in a race. C's mean A gap
+is then the board's to 0.2 clocks in both captures (race 12,777.6, attract
+12,768.5).
+
+### Daytona USA's Model 1 driver (Pinboard #1875)
+
+Daytona's sound board is the Model 1 one (docs/invariants/model1-boards.md),
+not an SCSP, but its 68000 driver runs in C the same way:
+`src/board/sound_hle_m1.h`, picked by its code hash (0x46E0A5F3, `shle_drv_t.m1`,
+matched only on a Model 1 board) and run by `m1hle_run` in `sound.h`. The two
+MultiPCMs and the YM3438 stay emulated; the port writes them through the
+board's own paths (`sound_m1_pcm_write`, the YM at the sample's time), so
+captures read the same. The header has the RAM map.
+
+- *The main loop is the clock.* There is no timer interrupt: the loop polls
+  timer B's flag three times a pass (the tick: the sequencers and the drum
+  countdowns) and between the polls runs the engine voices, every 64 passes
+  the engines' other voices, then the releases and one ring message. Timer B
+  is free-running (its 0x27 write doesn't reload it), so the board loses a
+  tick only when a poll is later than a period (11,520 clocks).
+- *Costs.* Each part's length is measured from MAME's board (`M1H_*`): a note
+  on 3988 clocks after the dispatch's 900, a voice-loop step 62 (+260 for a
+  voice whose registers are written), a release 2490 (a drum's 458), CC 0x10
+  260 a channel. A pass's effects land where it starts, and a message's key-on
+  `M1H_D_LEAD` (4700) into its dispatch. The UART's interrupt is taken at the
+  sample and delays the part under way.
+- *Engines.* CC 0x17 and the engine block drive six raw voices on chip 2
+  (`k_m1h_engines`), at the pitch and level the index at 0xF01050 picks.
+- It writes nothing back to the i960 (the UART's TX is never used): det_digest
+  daytona (2400 frames) is the 68000's frame for frame in every column.
+
+`grade-sound-hle.py --m1` on two captures: the attract 2320 of 2320 key-ons
+within 30 ms, median -1.46 ms, p95 3.8 ms, envelope correlation median 0.955;
+a race (coin, start, driving) 5716 of 5716, median -0.51 ms, p95 2.1 ms,
+correlation median 0.69; no driver RAM differences over a second in either.
+150 s of the race replay take 2.97 s of CPU on the 68000, 1.46 s in C (-51%).
+
+**Virtua Cop's build** (epr-18022, 0x5857DA20, `shle_drv_t.m1` 2) is in
+`src/board/sound_hle_vcop.h`, on the same bus helpers. It is Daytona's driver
+rearranged: 20 channels, 12-byte voices, the drums on MIDI channel 15 (with a
+hi-hat choke and a countdown pass over the 56 voices every 36 ticks), eight
+32-byte sequencers at 0xF02000, and no engines. Its main loop polls timer B
+once a pass: set, the tick (YM 0x27, the countdowns, the sequencers); clear,
+the two chips' releases and one ring message. Its "engine" command (A0 70+)
+walks three records at 0xF017A0 that nothing writes, so it plays nothing;
+the port walks them the same way. Costs (`VCH_*`): a pass 3132 clocks idle,
+a tick 1044 with four sequencers waiting (+52 each), a note on 6190 from the
+dispatch, a note off 4956, a release 2632, CC 0x10 2083 a channel (+630 a
+voice it writes); a message's key-on lands `VCH_D_LEAD` (5900) into it.
+`grade-sound-hle.py --m1` (`SND_SET` the vcop set): the attract 3286 of 3286
+key-ons within 30 ms, median -4.67 ms, p95 7.2 ms; a shooting stage 3181 of
+3181, median -0.10 ms, p95 10.3 ms; envelope correlation medians 0.93 and
+0.96; no driver RAM differences over a second. The residue is the tick: the
+board loses one more tick than C about every ten seconds, from passes that
+land just over a period. det_digest vcop (2400 frames) is the 68000's frame
+for frame; the shooting replay's sound board takes 61% less CPU.
+
 ## The voices in C (`--sound-synth`)
 
 `src/board/sound_synth.h` takes the next step (Pinboard #1737): under the

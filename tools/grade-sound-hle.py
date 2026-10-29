@@ -22,6 +22,10 @@ Usage:
   inputs: tools/snd_stimuli.py's (bgm, sfx, sys, fuzz) or a MAME capture
   --crx: the board runs CRX_drv (Dynamite Cop, House of the Dead, Motor
          Raid), whose state is at 0x300-0xFFF (snd_replay's $SND_RAM_BASE)
+  --v95: the board runs Sega's 1994-95 driver (Virtua Fighter 2, Sega Rally)
+  --rally: with --v95, Sega Rally's build (16-byte sequencers, its engines)
+  --m1: the Model 1 sound board (Daytona USA, Virtua Cop): MultiPCM slot
+        writes in place of the SCSP's, a 10 MHz clock ($SND_M1=1 for snd_replay)
   $ROMDIR as snd_replay wants it (sfight.zip and schamp.zip)
 
 numpy only. Nothing it writes belongs in the repo.
@@ -35,6 +39,7 @@ import sys
 import numpy as np
 
 CLK = 11289600.0
+M1 = False
 RATE = 44100
 MARK = RATE * 1000 // 57524             # snd_replay's RAM dump interval, samples
 
@@ -57,8 +62,47 @@ def records(prefix):
     return a[:len(a) // 4 * 4].reshape(-1, 4)
 
 
+def times(a):
+    """The records' clock in seconds; t is 32 bits, which 10 MHz wraps in 7 minutes."""
+    t = a[:, 2].astype(np.int64)
+    t += np.concatenate(([0], np.cumsum(np.diff(t) < -(1 << 31)))) << 32
+    return t / CLK
+
+
+def keyons_m1(prefix):
+    """keyons on the Model 1 board: tag 5, a MultiPCM slot register (chip << 16 |
+    slot << 8 | reg). A key-on is register 4 bit 7 rising; what it plays is the
+    chip, the sample (reg 1, reg 2 bit 0), the pitch (regs 2, 3), pan and level."""
+    a = records(prefix)
+    tag, off = a[:, 0] >> 24, a[:, 0] & 0xFFFFFF
+    ts = times(a)
+    reg = np.zeros((2, 28, 11), dtype=np.int64)
+    on = {}
+    ons, holds = [], []
+    for i in np.nonzero(tag == 5)[0]:
+        o, d = int(off[i]), int(a[i, 1]) & 0xFF
+        c, k, r = o >> 16, (o >> 8) & 0xFF, o & 0xFF
+        if k >= 28 or r >= 11:
+            continue
+        was = reg[c, k, 4] & 0x80
+        reg[c, k, r] = d
+        if r != 4:
+            continue
+        t = ts[i]
+        if d & 0x80 and not was:
+            R = reg[c, k]
+            on[c, k] = t
+            ons.append((t, (c, int(R[1]) | (int(R[2]) & 1) << 8, (int(R[3]) << 8 | int(R[2])) & 0xFFFE,
+                            int(R[0]) >> 4, int(R[5]) >> 1)))
+        elif not d & 0x80 and was and (c, k) in on:
+            holds.append(t - on.pop((c, k)))
+    return ons, holds
+
+
 def keyons(prefix):
     """(time, what it plays) of each key-on, and (key-on time, held) of each note."""
+    if M1:
+        return keyons_m1(prefix)
     a = records(prefix)
     tag, off = a[:, 0] >> 24, a[:, 0] & 0xFFFFFF
     reg = np.zeros((32, 16), dtype=np.int64)
@@ -141,7 +185,8 @@ def audio(a, b, win=10.0):
 def restarts(inp):
     a = records(inp)
     tag = a[:, 0] >> 24
-    return [a[i, 2] / CLK for i in np.nonzero(tag == 1)[0] if (a[i, 1] & 0xFF) == 0xFF]
+    ts = times(a)
+    return [ts[i] for i in np.nonzero(tag == 1)[0] if (a[i, 1] & 0xFF) == 0xFF]
 
 
 # CRX_drv's: sequencers but their countdown and position, engine records,
@@ -153,7 +198,29 @@ CRX_REGIONS = {'globals': [0xC04, 0xC18, 0xC19, 0xC1A] + [a for a in range(0xED7
                'tracks': [0xC40 + t * 32 + b for t in range(20) for b in range(16)]}
 
 
-def state(pa, pb, skip, crx=False):
+# the 1994-95 driver's (sound_hle_v95.h): the voice counts and master volume,
+# sequencers but their countdown and position, tracks, controllers and bends
+V95_REGIONS = {'globals': [0x251E, 0x251F, 0x252E],
+               'sequencers': [0x3000 + s * 32 + b for s in range(8) for b in range(32) if not 2 <= b <= 7],
+               'tracks': list(range(0x4000, 0x4150)),
+               'controllers': list(range(0x4200, 0x4250))}
+# Sega Rally's build (sound_hle_rally.h): sequencers of 16 bytes, the engines
+# but their slots (+10..+1E, whichever voice was free)
+RALLY_REGIONS = {'globals': [0x251E, 0x251F, 0x252E, 0x2521, 0x252F],
+                 'sequencers': [0x3000 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 7],
+                 'engines': [0x2600 + e * 32 + b for e in range(16) for b in list(range(16)) + [31]],
+                 'tracks': list(range(0x4000, 0x4150)),
+                 'controllers': list(range(0x4200, 0x4250))}
+
+
+# the Model 1 driver's (sound_hle_m1.h): master volume and the sequence
+# controller, the 16 MIDI channels, the sequencers
+M1_REGIONS = {'globals': [0x101E, 0x1037],
+              'channels': list(range(0x1300, 0x13A0)),
+              'sequencers': [0x2000 + s * 32 + b for s in range(16) for b in range(32) if not 2 <= b <= 7]}
+
+
+def state(pa, pb, skip, crx=False, v95=False, rally=False):
     A = np.fromfile(pa + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     B = np.fromfile(pb + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     n, hold = min(len(A), len(B)), int(1.0 * 57.524)
@@ -164,13 +231,13 @@ def state(pa, pb, skip, crx=False):
     # busy with it for a while (a song's preload holds its track set-up 0.3 s),
     # so a difference counts only when it lasts a second.
     base = CRX_BASE if crx else 0x1000
-    regions = CRX_REGIONS if crx else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
+    regions = M1_REGIONS if M1 else CRX_REGIONS if crx else RALLY_REGIONS if rally else V95_REGIONS if v95 else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
                'sequencers': [0x2000 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 7],
                'tracks': list(range(0x3000, 0x3140)),
                'controllers': list(range(0x3200, 0x3250)) + list(range(0x3270, 0x3290))}   # not SC08's TL save
     out = []
     for name, cols in regions.items():
-        cols = np.array(cols) - (CRX_BASE if crx else 0)   # the CRX lists are addresses, STF's dump offsets
+        cols = np.array(cols) - (CRX_BASE if crx else 0x1000 if v95 or M1 else 0)   # the CRX and v95 lists are addresses, STF's dump offsets
         D = A[:n][:, cols] != B[:n][:, cols]
         for j, col_addr in enumerate(cols):
             col, k = D[:, j], 0
@@ -196,7 +263,15 @@ def main():
     ap.add_argument('inputs', nargs='+')
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--crx', action='store_true')
+    ap.add_argument('--v95', action='store_true')
+    ap.add_argument('--rally', action='store_true')
+    ap.add_argument('--m1', action='store_true')
     args = ap.parse_args()
+    if args.m1:
+        global M1, CLK
+        M1, CLK = True, 1e7
+        os.environ['SND_M1'] = '1'
+    args.v95 = args.v95 or args.rally
     if args.crx:
         os.environ['SND_RAM_BASE'] = hex(CRX_BASE)
     os.makedirs(args.out, exist_ok=True)
@@ -208,6 +283,9 @@ def main():
         (oa, ha), (ob, hb) = keyons(pa), keyons(pb)
         e30, e250 = match(oa, ob, 0.030), match(oa, ob, 0.250)
         print(f'== {name}: {len(oa)} key-ons on the board, {len(ob)} in C')
+        if not len(e250) or not len(ha) or not len(hb):
+            print('   no notes to match (no MIDI in after the driver booted?)')
+            continue
         print(f'   notes: {100 * len(e30) / max(1, len(oa)):.1f}% within 30 ms, '
               f'{100 * len(e250) / max(1, len(oa)):.1f}% within 250 ms; '
               f'timing (C - board) median {np.median(e250):+.2f} ms, p95 |err| {np.percentile(abs(e250), 95):.1f} ms')
@@ -220,7 +298,7 @@ def main():
             print(f'   audio: {len(rows)} windows; loudness C/board {loud.min():.3f}-{loud.max():.3f}; '
                   f'envelope correlation median {np.median(corr):.3f}, worst {corr.min():.3f}; '
                   'bands (dB) ' + ' '.join(f'{np.median(db[:, i]):+.2f}' for i in range(len(BANDS))))
-        diffs = state(pa, pb, restarts(inp), args.crx)
+        diffs = state(pa, pb, restarts(inp), args.crx, args.v95, args.rally)
         print(f'   state: {len(diffs)} driver RAM differences lasting over a second')
         for d in diffs[:8]:
             print('     ' + d)

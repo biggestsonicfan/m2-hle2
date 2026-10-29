@@ -101,6 +101,12 @@ typedef struct {
     /* CRX_drv: another driver altogether, sound_hle_crx.h (its builds,
      * k_crx_builds: 1 Ver3.2.8, 2 Ver3.4.9); the fields above are STF's. */
     uint8_t     crx;
+    /* Sega's 1994-95 driver (Virtua Fighter 2, Sega Rally): sound_hle_v95.h,
+     * k_v95_builds. */
+    uint8_t     v95;
+    /* The Model 1 sound board's 68000 driver: sound_hle_m1.h (1 Daytona USA,
+     * 2 Virtua Cop, sound_hle_vcop.h). */
+    uint8_t     m1;
 } shle_drv_t;
 
 #define SHLE_TABLES_STF   0x602106u, 0x602D9Eu, 0x603CFAu, 0x604B04u, 0x604FB4u, 0x605BE4u, 0x605CA4u, 0x605E24u, 0x601100u
@@ -124,6 +130,13 @@ static const shle_drv_t k_shle_drvs[] = {
     { "dynamcop", 0xBCFE5C9Bu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 1 },
     /* epr-21276 (Pilot Kids, both sets): CRX_drv Ver3.4.9 */
     { "pltkids",  0xE728311Au, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 2 },
+    /* epr-17574 (Virtua Fighter 2) */
+    { "vf2",      0x6DA14067u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 1 },
+    { "srallyc",  0xF1EFC2C5u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 2 },
+    /* the Model 1 board's epr-16486..: Daytona USA */
+    { "daytona",  0x46E0A5F3u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 0, 1 },
+    /* epr-18022: Virtua Cop (sound_hle_vcop.h) */
+    { "vcop",     0x5857DA20u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 0, 2 },
 };
 static const shle_drv_t *g_shle_drv = &k_shle_drvs[0];
 
@@ -206,6 +219,17 @@ static const shle_drv_t *g_shle_drv = &k_shle_drvs[0];
 #define SHLE_COST_KEYON   8000u
 #define SHLE_COST_BYTE    23u
 
+/* sound_hle_m1.h's driver: where it is in its init or main loop */
+typedef struct {
+    uint8_t  phase;          /* M1H_OFF, M1H_BOOT (the init's stages), M1H_RUN */
+    uint8_t  stage;          /* the init's next stage */
+    uint8_t  seg;            /* the main loop's next part */
+    uint64_t t0;             /* clock period the init started */
+    uint64_t dc;             /* the driver's clock: the next part starts here */
+    uint32_t a0, a1;         /* the MIDI ring's write and read offsets (0..0xFFF) */
+    uint64_t irqs, events, metas;
+} m1hle_t;
+
 typedef struct {
     bool     on;             /* the HLE runs the sound board */
     bool     booted;         /* past the driver's boot delay */
@@ -236,6 +260,7 @@ typedef struct {
     uint32_t cost;           /* clock periods the event being dispatched keeps it busy */
     uint64_t events, keyons, unknown, chunks_total;
     bool     warned_fm;
+    m1hle_t  m1;
 } shle_t;
 
 static shle_t g_shle;
@@ -2039,8 +2064,8 @@ static bool shle_driver_known(void) {
     if (!g_sound.rom_loaded) return false;
     uint32_t h = shle_code_hash();
     for (size_t i = 0; i < sizeof k_shle_drvs / sizeof k_shle_drvs[0]; i++) {
-        if (k_shle_drvs[i].hash != h) continue;
-        if (k_shle_drvs[i].crx) { g_shle_drv = &k_shle_drvs[i]; return true; }
+        if (k_shle_drvs[i].hash != h || !k_shle_drvs[i].m1 != !g_sound.model1) continue;
+        if (k_shle_drvs[i].crx || k_shle_drvs[i].v95 || k_shle_drvs[i].m1) { g_shle_drv = &k_shle_drvs[i]; return true; }
         for (uint32_t p = SHLE_P_SMPTBL; p <= SHLE_P_VELOCITY; p += 4)
             if ((shle_ml(p) >> 19) != (0x600000u >> 19)) return false;
         g_shle_drv = &k_shle_drvs[i];
@@ -2085,6 +2110,8 @@ static inline uint64_t shle_behind_a(uint64_t e, uint64_t fa, uint64_t ea) {
 }
 
 #include "sound_hle_crx.h"
+#include "sound_hle_v95.h"
+#include "sound_hle_m1.h"
 
 /* The driver's boot, at clock period `now`: false until it has come. */
 static bool shle_events_boot(uint64_t now) {
@@ -2175,6 +2202,7 @@ static bool shle_events_timer(uint64_t now) {
  * turn has come, then the main loop's dispatch. */
 static void shle_events(uint64_t now) {
     if (g_shle_drv->crx) { crx_events(now); return; }
+    if (g_shle_drv->v95) { v95_events(now); return; }
     if (!g_shle.booted && !shle_events_boot(now)) return;
     if (!shle_events_midi(now)) return;
     for (int guard = 0; guard < 16 && shle_events_timer(now); guard++) {}
@@ -2183,6 +2211,7 @@ static void shle_events(uint64_t now) {
 
 static inline uint64_t shle_next_due(void) {
     if (g_shle_drv->crx) return crx_next_due();
+    if (g_shle_drv->v95) return v95_next_due();
     if (!g_shle.booted) return g_shle.restart_at && g_shle.restart_at < g_shle.boot_at ? g_shle.restart_at : g_shle.boot_at;
     uint64_t d = shle_entry(g_shle.due_b), x = shle_entry(g_shle.due_c), y = shle_entry_a();
     if (x < d) d = x;
@@ -2222,6 +2251,7 @@ static void shle_refill_pass(void) {
 /* The main loop's pass over the slots, every SHLE_PASS_SAMPLES samples. */
 static void shle_pass(scsp_t *s, uint64_t now) {
     if (g_shle_drv->crx) { crx_pass(s, now); return; }
+    if (g_shle_drv->v95) { v95_pass(s, now); return; }
     g_shle.pass_left = SHLE_PASS_SAMPLES;
     shle_clear_step(s, now);
     if (g_shle.booted && now >= g_shle.stall_until) shle_refill_pass();
@@ -2259,7 +2289,10 @@ static inline void shle_reset(void) {
      * board -- by then the host has also handed over the sample ROMs, which
      * the boot's preload copies from. */
     g_shle.booted = g_shle.quick = false;
+    g_shle.m1.phase = M1H_OFF;
+    if (g_shle.on && g_shle_drv->m1) { m1hle_restart(g_sound.m68k.cpu.cycles); return; }
     if (g_shle.on && g_shle_drv->crx) { crx_restart(g_sound.m68k.cpu.cycles); return; }
+    if (g_shle.on && g_shle_drv->v95) { v95_restart(g_sound.m68k.cpu.cycles); return; }
     g_shle.restart_at = g_sound.m68k.cpu.cycles + SHLE_INIT_CYCLES;
     g_shle.clear_at = g_sound.m68k.cpu.cycles + SHLE_CLEAR_DELAY;
     g_shle.cleared = 0;
