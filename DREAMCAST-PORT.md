@@ -2803,6 +2803,45 @@ the serial port; ms over the 400 frames):
 reads round each `dp_face_colour` call and each ramp walk, and counts of the
 memo and ramp-cache lookups. The new `dreamcast/stf-split` has it.
 
+## X2 on the console: the water's ramps (#1885)
+
+The owner played a fight on the new `dreamcast/stf-split` (10dcb30): M2LOG005.TXT,
+119 s, no bench (the log ends at frame 1475). The fight is not Flycast's attract
+fight: `SN bgm` is 8 then 5 where #1884's Flycast run had 16. Over its quiet
+windows (from 24, `bio` under 10%: 12 windows), 12.8 fps, 79 ms a frame:
+
+| | calls (`cn`) | ramp lookups (`rl`) | walks (`wn`) | miss | `dp_face_colour` | walks' share |
+|---|---|---|---|---|---|---|
+| console, M2LOG005 fight | 720 | 696 | 296 | 43% | 7.1 ms | 5.3 ms |
+| Flycast, #1884 attract fight | 400-950 | the same | 5-50 | 1-8% | 0.5-1.3 ms | 0.1-0.6 ms |
+| both, the intro (windows 6-9 / 3-4) | 199 | 190 | 74 | 39% | | |
+
+- The cache behaves the same on both machines: the intro scene gives the same
+  calls, lookups and walks to the unit on the console and in Flycast. The
+  console's tenfold `dp_face_colour` (#1884) is this stage's, not the console's.
+- Each walk costs 18 us on the console (11.8 in Flycast); the rest of a call
+  2.5 us (1.1). The walks are 5.3 of the 7.1 ms.
+- 43% of the lookups miss on every frame, even in windows whose face counts
+  do not move (25-30: 2683 faces, 721 calls, 302-306 walks). The likely
+  reason: the sea's and river's lumabase is animated on frame_counter
+  (`transmap_change`, NOCLIP-SYNC.md), so every water face has a new `T->lb`,
+  and so a new `g_dp_ramp` key, on each drawn frame. No cache size holds a
+  key that has not been seen before. To make the walk itself cheaper, a
+  per-frame table of `dp_shade(c5, li)` (64 `li` for each of the few water
+  colours) would replace its 16 shade calls with lookups. At best that saves
+  ~4-5 ms of the 79 (about 6%).
+
+Where the fight's frame goes (the sampler, G0/G1, % of 79 ms): `geo` 30.4 (the
+scan; `DR sc` 33 ms), `drw` 15.6, `gem` 12.4, `kos` 10.1, `aot` 9.9, `til` 4.8,
+`960` 3.9, `cop` 3.8, `bio` 4.0, `lib` 2.4, `dsc` 1.1, `snd` 0.7. With no 3D scan
+at all a frame would still be ~55 ms (18 fps); 30 fps (33 ms) needs 58% off
+everything, the board's own code (`aot`, `gem`, `960`, `cop`: 30%, 24 ms)
+included. In this fight, on this hardware, 15-18 fps is a realistic ceiling for
+the present design; 30 fps is not.
+
+The log also has 512 KB less page cache than Flycast's serial build of the same
+code (`profile ... cache 1452 KB, heap 512 KB` against 1964 / 704 KB).
+
 ## Next optimization targets
 
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
