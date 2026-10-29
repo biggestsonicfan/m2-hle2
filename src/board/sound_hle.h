@@ -2279,8 +2279,13 @@ static void shle_run(uint32_t n) {
     else           scsp_sync(s);
 }
 
-/* Take the HLE for this board, or leave it: at a reset (sound_reset). */
+/* Take the HLE for this board, or leave it: at a reset (sound_reset). The
+ * whole driver state goes, as at the process's start: its timers, busy
+ * windows and refill share carried over from the last session made a second
+ * netplay match in one process start on another sound board than its peer's
+ * (Pinboard #1891). */
 static inline void shle_reset(void) {
+    memset(&g_shle, 0, sizeof g_shle);
     g_shle.on = (g_sound_hle_want || g_sound_synth_want) && shle_driver_known();
     ssyn_reset(g_shle.on && g_sound_synth_want);
     g_shle.events = g_shle.keyons = g_shle.unknown = 0;
