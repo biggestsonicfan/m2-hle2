@@ -54,6 +54,12 @@
 #ifndef SOUND_RAM_SIZE
 #define SOUND_RAM_SIZE            0x80000u
 #endif
+/* 0: a build with no sound board (the Dreamcast's plays cues off the disc). It
+ * never loads the sound ROM, so sound_run would step nothing; 0 lets the linker
+ * drop the 68000, the SCSP and their tables too (#1877). */
+#ifndef SOUND_BOARD
+#define SOUND_BOARD               1
+#endif
 #define SOUND_RATE                44100u
 #define SOUND_CYCLES_PER_SAMPLE   256
 #ifndef SOUND_IPL_LEAD
@@ -1240,7 +1246,7 @@ static inline bool sound_thread_on(void) { return SOUND_THREAD && g_sound_thr.st
  * sound thread if `hand_off` and it can, else here and now. Emu thread only. */
 static inline void sound_advance(uint32_t n, bool hand_off) {
     sound_settle();
-    if (!n || !g_sound.rom_loaded || g_sound.detached) return;   /* sound_run would step nothing */
+    if (!SOUND_BOARD || !n || !g_sound.rom_loaded || g_sound.detached) return;   /* sound_run would step nothing */
     g_sound.out_due = g_sound.out_total + n;
     g_sound.out_pub = g_sound.out_w;
     if (hand_off && sound_thread_usable()) {

@@ -119,8 +119,12 @@ static volatile uint32_t g_geo3d_facestop_sink;
  * logo (model 2411) is ~2527 pairs (5054 verts) — at 2001 the decoder truncated
  * it mid-mesh and the "rs" was cut off.  Air Walkers' intro city (model 555)
  * is 5441 records in one mesh, so 4096 cut it too (Pinboard #1458); the board
- * has no such cap, it walks to the end record. 8192, with headroom. */
+ * has no such cap, it walks to the end record. 8192, with headroom.
+ * A build for one game can set it lower: STF's largest mesh is 2070 pairs, and
+ * the Dreamcast build's 4096 gives its demand pager back ~600 KB (#1877). */
+#ifndef GEO3D_IA_MAX_VPS
 #define GEO3D_IA_MAX_VPS   8192
+#endif
 #define GEO3D_IA_MAX_VERTS (GEO3D_IA_MAX_VPS * 2)
 #define GEO3D_IA_MAX_IDX   (4 + GEO3D_IA_MAX_VPS * 4)
 
