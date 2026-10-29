@@ -213,7 +213,12 @@ static int pg_victim(void) {
         g->hand = i + 1 < g->nframes ? i + 1 : 0;
         pg_frame_t *f = &g->fr[i];
         if (f->pinned) continue;
-        if (f->ref) { f->ref = 0; continue; }
+        /* A frame in the bus's tables is read without coming here, so ref
+         * alone says nothing of it after its load: the hottest code pages went
+         * at every second pass and straight back off the disc, each ~28 times
+         * in 6500 frames (#1877). Taken out of the tables, its next read sets
+         * ref again (pg_bus_in finds it resident: no disc). */
+        if (f->ref) { f->ref = 0; pg_unslot(f); continue; }
         bool recent = false;
         for (uint32_t k = 0; k < PG_RECENT; k++) recent |= g->recent[k] == i;
         if (recent) continue;
