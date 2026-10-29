@@ -573,6 +573,41 @@ the i960 columns; 60 s of the race replay take 1.53 s of CPU on the 68000, 0.84 
 in C (-45%). The layer cost (`RL_COST_LAYER`) is a guess: the race's p95 is where
 to tune it.
 
+### Daytona USA's Model 1 driver (Pinboard #1875)
+
+Daytona's sound board is the Model 1 one (docs/invariants/model1-boards.md),
+not an SCSP, but its 68000 driver runs in C the same way:
+`src/board/sound_hle_m1.h`, picked by its code hash (0x46E0A5F3, `shle_drv_t.m1`,
+matched only on a Model 1 board) and run by `m1hle_run` in `sound.h`. The two
+MultiPCMs and the YM3438 stay emulated; the port writes them through the
+board's own paths (`sound_m1_pcm_write`, the YM at the sample's time), so
+captures read the same. The header has the RAM map.
+
+- *The main loop is the clock.* There is no timer interrupt: the loop polls
+  timer B's flag three times a pass (the tick: the sequencers and the drum
+  countdowns) and between the polls runs the engine voices, every 64 passes
+  the engines' other voices, then the releases and one ring message. Timer B
+  is free-running (its 0x27 write doesn't reload it), so the board loses a
+  tick only when a poll is later than a period (11,520 clocks).
+- *Costs.* Each part's length is measured from MAME's board (`M1H_*`): a note
+  on 3988 clocks after the dispatch's 900, a voice-loop step 62 (+260 for a
+  voice whose registers are written), a release 2490 (a drum's 458), CC 0x10
+  260 a channel. A pass's effects land where it starts, and a message's key-on
+  `M1H_D_LEAD` (4700) into its dispatch. The UART's interrupt is taken at the
+  sample and delays the part under way.
+- *Engines.* CC 0x17 and the engine block drive six raw voices on chip 2
+  (`k_m1h_engines`), at the pitch and level the index at 0xF01050 picks.
+- It writes nothing back to the i960 (the UART's TX is never used): det_digest
+  daytona (2400 frames) is the 68000's frame for frame in every column.
+
+`grade-sound-hle.py --m1` on two captures: the attract 2320 of 2320 key-ons
+within 30 ms, median -1.46 ms, p95 3.8 ms, envelope correlation median 0.955;
+a race (coin, start, driving) 5716 of 5716, median -0.51 ms, p95 2.1 ms,
+correlation median 0.69; no driver RAM differences over a second in either.
+150 s of the race replay take 2.97 s of CPU on the 68000, 1.46 s in C (-51%).
+Virtua Cop's build (0x5857DA20) shares the core (0x000-0x17FA) but has
+12-byte voices, eight sequencers and no engines: not ported yet.
+
 ## The voices in C (`--sound-synth`)
 
 `src/board/sound_synth.h` takes the next step (Pinboard #1737): under the

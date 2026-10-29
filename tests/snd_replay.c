@@ -16,6 +16,8 @@
  *   $SND_SET: another game's board instead, a directory of region images
  *     (m2hle --export-roms; only audiocpu.bin and samples.bin are read)
  *   $SND_RAM_BASE: the .ram.bin dump's first address (default 0x1000)
+ *   $SND_M1=1: the set is a Model 1 sound board's (Daytona USA, Virtua Cop;
+ *     model1_sound.h): its clock is 10 MHz, not 11.2896
  */
 #define NDEBUG 1
 #include "test_rom_dir.h"
@@ -29,6 +31,14 @@
 const game_profile_t *g_active_profile = &sfight_profile;
 
 typedef struct { uint64_t t; uint8_t b; } midi_t;
+
+static int    s_m1;                 /* $SND_M1: the Model 1 board */
+static double s_clk = 11289600.0;   /* the board's 68000 clock */
+
+/* The output sample a clock period falls in. */
+static uint64_t clock_sample(uint64_t t) {
+    return s_m1 ? t * SOUND_RATE / M1SND_CPU_HZ : t >> 8;
+}
 
 /* $SND_TRACE=<file>: every 68000 instruction between $SND_TRACE_FROM and
  * $SND_TRACE_TO seconds as records of [u32 pc][u32 clock low][u32 clock high],
@@ -101,6 +111,7 @@ static int load_board(const char *romdir) {
     if ((set ? romset_load_dir(&rs, set) : sfight_load(&rs, child, parent)) != 0 || !rs.audiocpu || !rs.samples) {
         fprintf(stderr, "ROM load failed (%s)\n", set ? set : romdir); return 1;
     }
+    sound_select_board(s_m1);
     if (getenv("SND_HLE")) g_sound_hle_want = atoi(getenv("SND_HLE"));
     if (getenv("SND_SYNTH")) g_sound_synth_want = atoi(getenv("SND_SYNTH"));   /* the voices in C too (sound_synth.h) */
     if (getenv("SCSP_EXACT")) g_scsp_exact = atoi(getenv("SCSP_EXACT"));   /* the DSP every sample (scsp.h, "A quiet DSP") */
@@ -109,8 +120,8 @@ static int load_board(const char *romdir) {
     sound_load_samples(rs.samples, (uint32_t)rs.samples_size);
     if (getenv("SND_TRACE")) {
         s_trace = fopen(getenv("SND_TRACE"), "wb");
-        s_trace_from = (uint64_t)(atof(getenv("SND_TRACE_FROM") ? getenv("SND_TRACE_FROM") : "0") * 11289600.0);
-        s_trace_to   = (uint64_t)(atof(getenv("SND_TRACE_TO")   ? getenv("SND_TRACE_TO")   : "1e9") * 11289600.0);
+        s_trace_from = (uint64_t)(atof(getenv("SND_TRACE_FROM") ? getenv("SND_TRACE_FROM") : "0") * s_clk);
+        s_trace_to   = (uint64_t)(atof(getenv("SND_TRACE_TO")   ? getenv("SND_TRACE_TO")   : "1e9") * s_clk);
         if (s_trace) g_sound_step_trace = trace_step;
     }
     return 0;
@@ -149,7 +160,7 @@ static size_t replay(const midi_t *midi, size_t nmidi, uint64_t total, FILE *wav
     for (uint64_t smp = 0; smp < total; smp++) {
         /* bytes the i960 wrote during this sample go down the UART's line at
          * the clock period it wrote them */
-        while (next < nmidi && (midi[next].t >> 8) <= smp) {
+        while (next < nmidi && clock_sample(midi[next].t) <= smp) {
             sndcap_put(1, 0x9C0000, midi[next].b | 0xFF0000u, 0);
             sound_uart_write(&g_sound, midi[next].b, midi[next].t);
             next++;
@@ -184,6 +195,10 @@ static void report(uint32_t n, uint32_t nm, size_t next) {
     if (g_shle.on) printf("sound HLE: %llu events, %llu key-ons, %llu unknown\n",
                           (unsigned long long)g_shle.events, (unsigned long long)g_shle.keyons, (unsigned long long)g_shle.unknown);
     if (g_shle.on) printf("sound HLE: %llu refill chunks\n", (unsigned long long)g_shle.chunks_total);
+    if (g_shle.on && g_shle_drv->m1)
+        printf("sound HLE (Model 1): phase %u, %llu bytes in, %llu messages, %llu meta events; UART dropped %u, overruns %u\n",
+               g_shle.m1.phase, (unsigned long long)g_shle.m1.irqs, (unsigned long long)g_shle.m1.events,
+               (unsigned long long)g_shle.m1.metas, (unsigned)g_sound.m1.rx_dropped, (unsigned)g_sound.m1.rx_overruns);
     else if (g_sound_hle_want) printf("sound HLE: driver not known (code hash %08X); the board ran\n", shle_code_hash());
     if (g_ssyn.on) printf("sound synth: %llu samples, %llu key-ons\n", (unsigned long long)g_ssyn.samples, (unsigned long long)g_ssyn.keyons);
     printf("replayed: %u records, %u marks; 68000 pc 0x%06X; irqs L1 %llu L2 %llu L3 %llu; midi fed %zu\n",
@@ -202,9 +217,11 @@ int main(int argc, char **argv) {
     size_t nmidi, nrec;
     uint64_t t_last;
     if (load_midi(in, &midi, &nmidi, &nrec, &t_last)) return 1;
-    uint64_t total = seconds > 0 ? (uint64_t)(seconds * SOUND_RATE) : (t_last >> 8) + 1;
+    s_m1 = getenv("SND_M1") && atoi(getenv("SND_M1"));
+    if (s_m1) s_clk = M1SND_CPU_HZ;
+    uint64_t total = seconds > 0 ? (uint64_t)(seconds * SOUND_RATE) : clock_sample(t_last) + 1;
     printf("capture: %zu records, %zu MIDI bytes, %.2f s; replaying %.2f s\n",
-           nrec, nmidi, (double)t_last / 11289600.0, (double)total / SOUND_RATE);
+           nrec, nmidi, (double)t_last / s_clk, (double)total / SOUND_RATE);
 
     if (load_board(romdir)) return 1;
     uint32_t (*marks)[4];

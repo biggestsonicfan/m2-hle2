@@ -207,7 +207,14 @@ static void sound_scsp_sink(void *ud, int16_t l, int16_t r);   /* the chip's sam
  * that register (data = value | folded repeats << 16), 4 an interrupt taken
  * (offset = level) — and per frame a mark, sound RAM 0x1000-0x4FFF and the
  * SCSP register block as little-endian words. t is the 68000's clock-period
- * count, the unit MAME's capture uses. The slot monitor (0x408) is left out on
+ * count, the unit MAME's capture uses.
+ *
+ * On the Model 1 board (Daytona, Virtua Cop) the chips' writes take tags of
+ * their own -- 5 a MultiPCM slot register (offset = chip << 16 | slot << 8 |
+ * register, the slot the chip's, 0-27), 6 a YM3438 register (offset = its
+ * address, 0x100 up the second bank), 7 a sample bank (offset = the chip) --
+ * and the block after each mark is the two chips' slot registers, 28 x 11
+ * bytes a chip. t counts the board's 10 MHz clock there. The slot monitor (0x408) is left out on
  * both sides: the driver polls it ~50,000 times a second.
  *
  * t is 32 bits, and at 11.2896 MHz that wraps after 380.4 seconds. A capture
@@ -292,6 +299,14 @@ static inline void sndcap_frame(uint32_t frame, uint32_t frame_counter) {
     mk[0] = frame; mk[1] = frame_counter; mk[2] = (uint32_t)g_sound.m68k.cpu.cycles; mk[3] = c->n;
     fwrite(g_sound.ram + (c->ram_base ? c->ram_base : 0x1000u), 1, 0x4000, c->ramf);
     uint8_t regs[1072] = {0};
+    if (g_sound.model1) {
+        for (int c = 0; c < 2; c++)
+            for (int k = 0; k < M1SND_VOICES; k++)
+                memcpy(regs + (c * M1SND_VOICES + k) * 11, g_sound.m1.pcm[c].slots[k].regs, 11);
+        fwrite(regs, 1, sizeof regs, c->regsf);
+        if (c->nmarks > c->want) sndcap_stop();
+        return;
+    }
     for (uint32_t o = 0; o < 0x430u; o += 2) {
         if (o >= 0x404u && o < 0x40Au) continue;
         uint16_t w = ssyn_scsp_peek16(o);
@@ -636,16 +651,28 @@ static uint32_t sound_m1_read(void *ctx, uint32_t a, int sz) {
     return sound_m1_bus_read((sound_state_t *)ctx, a, sz, 0);
 }
 
+/* MultiPCM `chip`'s register `reg` (0 data, 1 slot, 2 address); the second
+ * plays the samples past the first's. The C driver (sound_hle_m1.h) writes
+ * through here too. */
+static inline void sound_m1_pcm_write(sound_state_t *ss, int chip, uint32_t reg, uint8_t v) {
+    uint32_t n1 = ss->samples_size < M1SND_PCM_SIZE ? ss->samples_size : M1SND_PCM_SIZE;
+    uint32_t n2 = ss->samples_size > M1SND_PCM_SIZE ? ss->samples_size - M1SND_PCM_SIZE : 0;
+    mpcm_t *p = &ss->m1.pcm[chip];
+    if (sndcap_on() && reg == 0 && p->cur_slot >= 0 && p->address < 11)
+        sndcap_put(5, ((uint32_t)chip << 16) | ((uint32_t)p->cur_slot << 8) | (uint32_t)p->address, v, ss->m68k.cpu.pc);
+    if (chip) mpcm_write(p, n2 ? ss->samples + M1SND_PCM_SIZE : NULL, n2, reg, v);
+    else      mpcm_write(p, ss->samples, n1, reg, v);
+}
+
 /* A chip's register write: the UART, the two MultiPCMs (the second plays the
  * samples past the first's), the YM3438. */
 static inline void sound_m1_dev_write(sound_state_t *ss, uint32_t a, uint32_t reg, uint32_t v) {
-    uint32_t n1 = ss->samples_size < M1SND_PCM_SIZE ? ss->samples_size : M1SND_PCM_SIZE;
-    uint32_t n2 = ss->samples_size > M1SND_PCM_SIZE ? ss->samples_size - M1SND_PCM_SIZE : 0;
-    if (a >= 0xC20000u && a < 0xC20004u)      m1snd_uart_write(&ss->m1, reg, (uint8_t)v);
-    else if (a >= 0xC40000u && a < 0xC40008u) mpcm_write(&ss->m1.pcm[0], ss->samples, n1, reg, (uint8_t)v);
-    else if (a >= 0xC60000u && a < 0xC60008u) mpcm_write(&ss->m1.pcm[1], n2 ? ss->samples + M1SND_PCM_SIZE : NULL, n2, reg, (uint8_t)v);
-    else if (a >= 0xD00000u && a < 0xD00008u) {
+    if (a >= 0xC20000u && a < 0xC20004u) { m1snd_uart_write(&ss->m1, reg, (uint8_t)v); return; }
+    if (a >= 0xC40000u && a < 0xC40008u) { sound_m1_pcm_write(ss, 0, reg, (uint8_t)v); return; }
+    if (a >= 0xC60000u && a < 0xC60008u) { sound_m1_pcm_write(ss, 1, reg, (uint8_t)v); return; }
+    if (a >= 0xD00000u && a < 0xD00008u) {
         m1ym_advance(&ss->m1.ym, sound_m1_ym_clock(ss));
+        if (sndcap_on() && (reg & 1u)) sndcap_put(6, ss->m1.ym.addr, (uint8_t)v, ss->m68k.cpu.pc);
         m1ym_write(&ss->m1.ym, reg, (uint8_t)v);
     }
 }
@@ -665,6 +692,7 @@ static void sound_m1_write(void *ctx, uint32_t a, uint32_t v, int sz) {
     if ((a & ~1u) == 0xC50000u || (a & ~1u) == 0xC70000u) {
         uint32_t w = sz == 2 ? v : (a & 1u) ? v : v << 8;
         ss->m1.pcm[a >= 0xC70000u].bank = w & 3u;
+        if (sndcap_on()) sndcap_put(7, a >= 0xC70000u, w & 3u, ss->m68k.cpu.pc);
         return;
     }
     uint32_t reg;
@@ -1060,6 +1088,7 @@ static inline int sound_step_m1(m68k_state_t *m) {
     if (g_sound.uart.count) sound_uart_service(&g_sound, sampled);
     if (g_sound.m1.rxrdy && m68k_ipl(&m->cpu) < 2 && m68k_interrupt(m, 2)) {
         g_sound.irqs[2]++;
+        if (sndcap_on()) sndcap_put(4, 2, 0, m->cpu.pc);
     } else if (m->cpu.stopped) {
         m->cpu.cycles += (uint64_t)g_sound.budget;
         g_sound.budget = 0;
@@ -1089,10 +1118,29 @@ static void sound_run_m1(uint32_t n) {
     hprof_leave(zone);
 }
 
+/* The Model 1 board under the HLE (sound_hle_m1.h) for n output samples. */
+static void m1hle_run(uint32_t n) {
+    m68k_state_t *m = &g_sound.m68k;
+    int64_t t0 = emu_now_us();
+    int zone = hprof_enter(HPROF_M68K);
+    for (uint32_t i = 0; i < n; i++) {
+        m->cpu.cycles += (uint64_t)m1snd_sample_cycles(&g_sound.m1);
+        uint64_t now = m->cpu.cycles;
+        if (g_sound.uart.count) sound_uart_service(&g_sound, now);
+        m1hle_events(now);
+        int16_t l, r;
+        m1snd_sample(&g_sound.m1, g_sound.samples, g_sound.samples ? g_sound.samples_size : 0, &l, &r);
+        sound_out_push(l, r);
+    }
+    g_emu_times.sound_us      += emu_now_us() - t0;
+    g_emu_times.sound_samples += n;
+    hprof_leave(zone);
+}
+
 /* Run the board for n output samples. */
 static void sound_run(uint32_t n) {
     if (!g_sound.rom_loaded || g_sound.detached) return;
-    if (g_sound.model1) { sound_run_m1(n); return; }
+    if (g_sound.model1) { if (g_shle.on) m1hle_run(n); else sound_run_m1(n); return; }
     if (g_shle.on) { sound_run_hle(n); return; }
     m68k_state_t *m = &g_sound.m68k;
     int64_t run_t0 = emu_now_us();
