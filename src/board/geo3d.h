@@ -1586,6 +1586,7 @@ static inline bool geo3d_scan_geo_list(geo3d_state_t *geo, const geo3d_list_t *l
         uint32_t op = words[p];
         if (op & 0x80000000u) { p = (op & 0x1FFFFu) >> 2; continue; }   /* jump */
         uint32_t cmd = (op >> 23) & 0x1F;
+        /* 0x1F is END too: the GEO firmware's slot 0x1F is 0x0F's handler (CLAUDE.md, polygon decoder). */
         if (cmd == 0x0F || cmd == 0x1F) { ended = true; break; }
         p += 1u + geo3d__geol_command(geo, &count, &s, list, p, rom);
     }
