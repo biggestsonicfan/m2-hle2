@@ -2077,6 +2077,8 @@ static bool lr_run_rpcn(uint32_t local_held) {
  *   ws=1                                  the match over the lobby's WebSocket, not UDP
  *   twitch=1                              pass is a Twitch flow's token (the core writes it)
  *   synclog=DIR                           each check frame's board, part by part (desync hunts)
+ *   lan_host=PORT                         no lobby: host a direct match on PORT (UDP; LAN, Tailscale)
+ *   lan_join=IP:PORT                      no lobby: join the machine hosting at IP:PORT
  *
  * A Twitch sign-in writes the account and its token back to the file, so the
  * next load signs straight in. Every later Twitch sign-in to the account (the
@@ -2087,7 +2089,12 @@ static bool lr_run_rpcn(uint32_t local_held) {
  *
  * A match is a cold boot of both boards (emu_ggpo_tick runs it, one frame a
  * retro_run); each machine is one player, so port 2 is not read, and reset and
- * state loads are refused, as in an RPCN session. */
+ * state loads are refused, as in an RPCN session.
+ *
+ * lan_host / lan_join (Pinboard #1891, net/ggpo_lan.h) skip the lobby: the
+ * match is straight to the other machine's address, a LAN's or a Tailscale
+ * tailnet's. RetroArch's own netplay (online play "RetroArch") already goes
+ * straight to an address too. */
 #ifdef M2HLE_GGPO
 
 static struct {
@@ -2099,6 +2106,8 @@ static struct {
     char   code_said[16];        /* the Twitch code last shown */
     char   in_said[GGL_NAME_MAX];
     ggl_stage_t stage_said;
+    char   lan_host[8];          /* lan_host=: a direct match, no lobby */
+    char   lan_join[256];        /* lan_join= */
     bool   picking;              /* L + R's list is up */
     int    pick;                 /* its cursor, an index into the free players */
     uint32_t pad_was;
@@ -2114,6 +2123,8 @@ static void lr_ggpo_cfg_line(const char *k, const char *v) {
     else if (!strcmp(k, "accept"))    snprintf(a->accept, sizeof a->accept, "%s", v);
     else if (!strcmp(k, "ws"))        a->ws_match = atoi(v) != 0;
     else if (!strcmp(k, "twitch"))    g_lrg.from_twitch = atoi(v) != 0;
+    else if (!strcmp(k, "lan_host"))  snprintf(g_lrg.lan_host, sizeof g_lrg.lan_host, "%s", v);
+    else if (!strcmp(k, "lan_join"))  snprintf(g_lrg.lan_join, sizeof g_lrg.lan_join, "%s", v);
     else if (!strcmp(k, "synclog"))   snprintf(g_ggpo_cfg.synclog_dir, sizeof g_ggpo_cfg.synclog_dir, "%s", v);
 }
 
@@ -2140,6 +2151,9 @@ static void lr_ggpo_cfg_write(const char *user, const char *pass) {
                "# With no user, the core signs in with Twitch and writes the account here.\n");
     fprintf(f, "url=%s\nuser=%s\npass=%s\ntwitch=1\nchallenge=%s\naccept=%s\nws=%d\n",
             a->url[0] ? a->url : GGL_DEFAULT_URL, user, pass, a->challenge, a->accept, a->ws_match ? 1 : 0);
+    fprintf(f, "# lan_host=PORT or lan_join=IP:PORT: a direct match, no lobby\n");
+    if (g_lrg.lan_host[0]) fprintf(f, "lan_host=%s\n", g_lrg.lan_host);
+    if (g_lrg.lan_join[0]) fprintf(f, "lan_join=%s\n", g_lrg.lan_join);
     fclose(f);
 }
 
@@ -2154,7 +2168,9 @@ static void lr_ggpo_init(void) {
     lr_ggpo_cfg_read();
     snprintf(g_ggl_auto.game, sizeof g_ggl_auto.game, "%s", g_active_profile ? g_active_profile->id : "m2");
     netplay_set_reset_hook(lr_netplay_reset_cb, NULL);   /* the cold boot: lr_install_board */
-    ggl_post(GGL_CMD_CONNECT, g_ggl_auto.url[0] ? g_ggl_auto.url : GGL_DEFAULT_URL, "");
+    if (g_lrg.lan_host[0]) ggl_post(GGL_CMD_LAN_HOST, g_lrg.lan_host, "");
+    else if (g_lrg.lan_join[0]) ggl_post(GGL_CMD_LAN_JOIN, g_lrg.lan_join, "");
+    else ggl_post(GGL_CMD_CONNECT, g_ggl_auto.url[0] ? g_ggl_auto.url : GGL_DEFAULT_URL, "");
     lr_log(RETRO_LOG_INFO, "ggpo: settings %s", g_lrg.cfg[0] ? g_lrg.cfg : "(no save directory)");
 }
 
@@ -2196,6 +2212,12 @@ static void lr_ggpo_say(const ggl_status_t *st) {
         snprintf(msg, sizeof msg, "GGPO: match against %s", st->opponent);
     else if (st->stage == GGL_FAILED)
         snprintf(msg, sizeof msg, "GGPO: %s", st->error[0] ? st->error : "the lobby is gone");
+    else if (st->stage == GGL_LAN_HOST)
+        snprintf(msg, sizeof msg, "GGPO: hosting; the other player joins %s", st->url);
+    else if (st->stage == GGL_LAN_JOIN)
+        snprintf(msg, sizeof msg, "GGPO: asking %s for a match", st->url);
+    else if (st->stage == GGL_OFF && g_lrg.lan_join[0])
+        snprintf(msg, sizeof msg, "GGPO: the match is over; load the game again to join again");
     else return;
     lr_notify(msg, 5000);
 }
@@ -2226,6 +2248,7 @@ static void lr_ggpo_refused(const ggl_status_t *st) {
 /* Sign-in that the file does not settle: Twitch when it names nobody, and the
  * account a flow got us saved. The join is the lobby's own: g_ggl_auto.game. */
 static void lr_ggpo_signin(const ggl_status_t *st) {
+    if (g_lrg.lan_host[0] || g_lrg.lan_join[0]) return;   /* no lobby */
     if (st->login_refused && !g_lrg.refusal_said) lr_ggpo_refused(st);
     if (st->stage == GGL_CONNECTED && !g_ggl_auto.user[0] && !g_lrg.twitch_asked) {
         g_lrg.twitch_asked = true;
@@ -2315,7 +2338,7 @@ static bool lr_ggpo_pad(const ggl_status_t *st) {
     }
     g_lrg.in_said[0] = '\0';
     if (st->stage != GGL_CHANNEL) {
-        if (lr_hit && st->stage != GGL_MATCH) lr_ggpo_not_in(st);
+        if (lr_hit && st->stage != GGL_MATCH && st->stage < GGL_LAN_HOST) lr_ggpo_not_in(st);
         g_lrg.picking = false;
         return false;
     }

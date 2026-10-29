@@ -730,7 +730,7 @@ fly behind it.
 
 ### Rollback netplay (the GGPO lobby)
 
-`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines, then the board's side: `vs_mode`, `results`, `winner` and `session` (`on`, `running`, `frames`: GGPO's session, its frames counted from the cold boot). The lobby reaches `match` before the cold boot, which zeroes get_status's `frames`, so a driver waiting for the match to run waits on `session.running`, not on get_status (Pinboard #588). The desktop build only; a build without GGPO answers `ok: false`.
+`{"cmd":"ggpo_lobby"}` reports the GGPO lobby (`net/ggpo_lobby.h`): `stage` (off, connecting, connected, signed in, channel, match, failed, lan_host, lan_join), `lan` (a direct match), the account, the channel's `users` with their states, a challenge to us (`challenged_by`) or ours (`challenging`), the `match` and `opponent`, whether the match has gone `direct` or still rides the relay, packet counts each way, `error` and the last chat lines, then the board's side: `vs_mode`, `results`, `winner` and `session` (`on`, `running`, `frames`: GGPO's session, its frames counted from the cold boot). The lobby reaches `match` before the cold boot, which zeroes get_status's `frames`, so a driver waiting for the match to run waits on `session.running`, not on get_status (Pinboard #588). The desktop build only; a build without GGPO answers `ok: false`.
 
 `"do"` posts a step first, which the emu thread runs at its next pump, so the reply still shows the stage before it:
 
@@ -744,8 +744,12 @@ fly behind it.
 | `accept`, `decline`, `cancel` | the pending challenge |
 | `chat` | `text` |
 | `end`, `disconnect` | end the match; leave the lobby |
+| `lan_host` | `port` (default 7000): host a direct match, no lobby (stage `lan_host`; `url` lists this machine's LAN and Tailscale addresses) |
+| `lan_join` | `addr`: `IP:PORT`, a name, or a `ws://` / `wss://` URL (stage `lan_join`, then `match` with `match` = `lan`) |
 
 Test against a local ggpo-server, never the live one.
+
+A direct match (`lan_host` / `lan_join`, Pinboard #1891) needs no server: `end` on the host waits for the next player, `disconnect` stops hosting. See docs/invariants/ggpo.md, Direct play.
 
 ### Game scripts (M2emulator's Lua)
 
