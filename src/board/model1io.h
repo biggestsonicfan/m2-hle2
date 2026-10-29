@@ -28,7 +28,9 @@
  * The MSM6253: a write to 0xC000+n latches channel n into its shift register,
  * and each read shifts out bit 7 in D0 (the other bits read 0, unmapped).
  * Channels 0-2 are the wheel, accelerator and brake (io_5649.h's model of
- * them), 3 reads 0xFF.
+ * them), 3 reads 0xFF. A profile's channel layout (quirks.analog: Desert
+ * Tank's handle, accelerator and turret) replaces them, and IN1 is then plain
+ * buttons rather than the gearbox.
  *
  * Time: the Z80 runs only when the CPU board touches the DPRAM, caught up to
  * the board's clock (eeprom_now's units, 1/(25 MHz * 60) s: one Z80 T-state
@@ -170,6 +172,8 @@ static inline uint8_t model1io_port_in(int port) {
         case 2:                                                             /* IN1 */
             if (m->secondary) return 0xFF;
             io5649_advance();
+            /* A channel layout (Desert Tank): IN1 is plain buttons. */
+            if (g_io5649_controls.layout) return io5649_in(held, 8);
             return (uint8_t)((io5649_gearbox() & 0xFEu) | ((held & g_model1io_vr4) ? 0 : 1));
         case 6: return (uint8_t)(eeprom_do() << 7 | 0x70 | 0x0F);
         default: return 0xFF;                                               /* D, E (drive board) */
