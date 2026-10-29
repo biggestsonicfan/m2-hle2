@@ -83,6 +83,7 @@ static inline void replay_session_reset(emu_thread_ctx_t *ctx) { (void)ctx; }
 static inline void replay_slice_begin(emu_thread_ctx_t *ctx) { (void)ctx; }
 static inline void replay_slice_end(emu_thread_ctx_t *ctx, bool frame_end) { (void)ctx; (void)frame_end; }
 static inline void replay_frame_result(emu_thread_ctx_t *ctx, int versus_result) { (void)ctx; (void)versus_result; }
+static inline bool replay__session_live(void) { return netplay_active(); }
 #else
 
 #include <time.h>

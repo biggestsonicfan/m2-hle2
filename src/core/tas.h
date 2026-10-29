@@ -47,6 +47,21 @@
 #ifndef M2HLE_TAS_H
 #define M2HLE_TAS_H
 
+#ifdef M2HLE_NO_ZIP
+/* A build with no zip support (the Dreamcast) has no movie: its greenzone is
+ * savestates and a movie is a zip. The run loop's calls, as they are with no
+ * movie open. */
+static inline bool tas_live(void) { return false; }
+static inline bool tas_unpaced(void) { return false; }
+static inline int  tas_slowdown(void) { return 1; }
+static inline void tas_break(const char *why) { (void)why; }
+static inline void tas_pump(emu_thread_ctx_t *ctx, bool session, bool reset_pending) {
+    (void)ctx; (void)session; (void)reset_pending;
+}
+static inline void tas_slice_begin(emu_thread_ctx_t *ctx) { (void)ctx; }
+static inline void tas_slice_end(emu_thread_ctx_t *ctx, bool frame_end) { (void)ctx; (void)frame_end; }
+#else
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -974,4 +989,5 @@ static inline const char *tas_load_file(emu_thread_ctx_t *ctx, const char *path,
     return err;
 }
 
+#endif /* M2HLE_NO_ZIP */
 #endif /* M2HLE_TAS_H */

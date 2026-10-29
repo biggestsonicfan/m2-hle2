@@ -1429,7 +1429,11 @@ static void *emu_thread_proc(void *p) {
 /* A light gun's host pointer and an analog wheel's position reach only a board
  * this host's hands drive (lightgun.h, io_5649.h). */
 static int emu_board_remote(void) {
+#ifdef M2HLE_NO_ZIP
+    return replay__session_live() || follow_following();
+#else
     return replay__session_live() || follow_following() || g_replay_play.on || g_native_play.on;
+#endif
 }
 
 static inline void emu_ctx_init(emu_thread_ctx_t *ctx, i960_cpu_t *cpu, memory_bus_t *bus) {
