@@ -22,6 +22,7 @@ Usage:
   inputs: tools/snd_stimuli.py's (bgm, sfx, sys, fuzz) or a MAME capture
   --crx: the board runs CRX_drv (Dynamite Cop, House of the Dead, Motor
          Raid), whose state is at 0x300-0xFFF (snd_replay's $SND_RAM_BASE)
+  --v95: the board runs Sega's 1994-95 driver (Virtua Fighter 2, Sega Rally)
   $ROMDIR as snd_replay wants it (sfight.zip and schamp.zip)
 
 numpy only. Nothing it writes belongs in the repo.
@@ -153,7 +154,15 @@ CRX_REGIONS = {'globals': [0xC04, 0xC18, 0xC19, 0xC1A] + [a for a in range(0xED7
                'tracks': [0xC40 + t * 32 + b for t in range(20) for b in range(16)]}
 
 
-def state(pa, pb, skip, crx=False):
+# the 1994-95 driver's (sound_hle_v95.h): the voice counts and master volume,
+# sequencers but their countdown and position, tracks, controllers and bends
+V95_REGIONS = {'globals': [0x251E, 0x251F, 0x252E],
+               'sequencers': [0x3000 + s * 32 + b for s in range(8) for b in range(32) if not 2 <= b <= 7],
+               'tracks': list(range(0x4000, 0x4150)),
+               'controllers': list(range(0x4200, 0x4250))}
+
+
+def state(pa, pb, skip, crx=False, v95=False):
     A = np.fromfile(pa + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     B = np.fromfile(pb + '.ram.bin', dtype=np.uint8).reshape(-1, 0x4000)
     n, hold = min(len(A), len(B)), int(1.0 * 57.524)
@@ -164,13 +173,13 @@ def state(pa, pb, skip, crx=False):
     # busy with it for a while (a song's preload holds its track set-up 0.3 s),
     # so a difference counts only when it lasts a second.
     base = CRX_BASE if crx else 0x1000
-    regions = CRX_REGIONS if crx else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
+    regions = CRX_REGIONS if crx else V95_REGIONS if v95 else {'globals': [0x141E, 0x141F, 0x1420, 0x1421, 0x142E, 0x142F, 0x1430, 0x1431, 0x1440, 0x1441],
                'sequencers': [0x2000 + s * 16 + b for s in range(8) for b in range(16) if not 2 <= b <= 7],
                'tracks': list(range(0x3000, 0x3140)),
                'controllers': list(range(0x3200, 0x3250)) + list(range(0x3270, 0x3290))}   # not SC08's TL save
     out = []
     for name, cols in regions.items():
-        cols = np.array(cols) - (CRX_BASE if crx else 0)   # the CRX lists are addresses, STF's dump offsets
+        cols = np.array(cols) - (CRX_BASE if crx else 0x1000 if v95 else 0)   # the CRX and v95 lists are addresses, STF's dump offsets
         D = A[:n][:, cols] != B[:n][:, cols]
         for j, col_addr in enumerate(cols):
             col, k = D[:, j], 0
@@ -196,6 +205,7 @@ def main():
     ap.add_argument('inputs', nargs='+')
     ap.add_argument('--seconds', type=float, default=120)
     ap.add_argument('--crx', action='store_true')
+    ap.add_argument('--v95', action='store_true')
     args = ap.parse_args()
     if args.crx:
         os.environ['SND_RAM_BASE'] = hex(CRX_BASE)
@@ -208,6 +218,9 @@ def main():
         (oa, ha), (ob, hb) = keyons(pa), keyons(pb)
         e30, e250 = match(oa, ob, 0.030), match(oa, ob, 0.250)
         print(f'== {name}: {len(oa)} key-ons on the board, {len(ob)} in C')
+        if not len(e250) or not len(ha) or not len(hb):
+            print('   no notes to match (no MIDI in after the driver booted?)')
+            continue
         print(f'   notes: {100 * len(e30) / max(1, len(oa)):.1f}% within 30 ms, '
               f'{100 * len(e250) / max(1, len(oa)):.1f}% within 250 ms; '
               f'timing (C - board) median {np.median(e250):+.2f} ms, p95 |err| {np.percentile(abs(e250), 95):.1f} ms')
@@ -220,7 +233,7 @@ def main():
             print(f'   audio: {len(rows)} windows; loudness C/board {loud.min():.3f}-{loud.max():.3f}; '
                   f'envelope correlation median {np.median(corr):.3f}, worst {corr.min():.3f}; '
                   'bands (dB) ' + ' '.join(f'{np.median(db[:, i]):+.2f}' for i in range(len(BANDS))))
-        diffs = state(pa, pb, restarts(inp), args.crx)
+        diffs = state(pa, pb, restarts(inp), args.crx, args.v95)
         print(f'   state: {len(diffs)} driver RAM differences lasting over a second')
         for d in diffs[:8]:
             print('     ' + d)

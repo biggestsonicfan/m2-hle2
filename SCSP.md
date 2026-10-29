@@ -492,6 +492,50 @@ sets, hotdp and pltkids (`--sound-hle`, 1200-1800 frames). The sound board costs
 hotd (90 s replay: 3.19 s of CPU on the 68000, 1.95 s in C) and 43% less in
 dynamcop (3.13 to 1.79).
 
+### Virtua Fighter 2's driver (Pinboard #1868)
+
+vf2's epr-17574 (the clones borrow it) runs Sega's 1994-95 driver, older than
+STF's and CRX_drv and unlike either: no header at 0x608000, its tables at fixed
+places in its code. `src/board/sound_hle_v95.h` (`v95` = 1 in its `shle_drv_t`,
+the tables in `k_v95_builds`); its header has the RAM map and the voice, track
+and record fields. Sega Rally's epr-17890 is a later build of the same driver,
+68% the same code and 700 lines longer, and stays on the 68000 for now; no other
+set in the container runs either build.
+
+- *Levels.* Timer A (level 2) runs eight sequencers (0 the music, 1-7 effects)
+  from the song table and queues their events; timer B (level 1) counts the
+  releasing voices down and frees them; MIDI in (level 3) queues the i960's.
+  The main loop streams the 32 records and takes one queued event at each record
+  that is not streaming. The handlers never lower the mask.
+- *Voices.* 32, one slot each. Music voices are numbered by age (+9), effects
+  (drum notes on channels 9-14) by their own (+5), five effects at most: a sixth
+  takes the oldest. With all 32 on, a note takes the oldest music voice. Channel
+  15's drum notes 0xB6/0xB8 choke its 0xBA.
+- *Samples.* A note's sample entry is read over the bus: an index past 0x7FF/20
+  lands below the table, at 0xFFxxxx, in sample ROM, and the RR and drum flags
+  come from there. Preloaded samples play from sound RAM; the rest stream 0x200
+  bytes at a time.
+- *Board costs* (68000 trace): timer A 1059 + ~390 an event queued; B 2361; a
+  MIDI byte 453; an event ~2160 to dispatch, a note-on with its key-on 7231,
+  without 2769, a note-off ~4900, a bend 4580, CC 16 (master volume) ~55,000 since
+  it runs once per matching track. An event that lands in an empty queue waits
+  3300 more before the loop reaches it (`V95_EVENT_LEAD`).
+- *Timer phase.* The first A and B come 33,188,953 clocks after power-on
+  (`boot_fixed`). B reloads at its entry, so each wait behind an A or a MIDI
+  byte moves every later B. 80,000 clocks off at boot put B 62% of a period out of
+  phase. A voice's release then ended before a drum note on one side and after it
+  on the other, and the voice order differed from then on. B still random-walks
+  ±25,000 clocks (handler lengths differ by tens of clocks), one state
+  difference in 115 s.
+
+`grade-sound-hle.py --v95` on a synthetic stimulus (the attract sends its few
+bytes before the driver boots): all 31 songs, drum effects on 9-14, CCs, bends,
+fades and stops, 115 s. 2294 of 2294 key-ons within 30 ms, median -0.29 ms,
+p95 2.7 ms; loudness 0.97-1.02 of the board's, envelope correlation median 0.90
+(worst 0.80). det_digest vf2 (2400 frames, a coin and a fight) is frame for frame
+the 68000's in the i960 columns; the sound board costs 39% less (90 s replay:
+2.83 s of CPU on the 68000, 1.73 s in C).
+
 ## The voices in C (`--sound-synth`)
 
 `src/board/sound_synth.h` takes the next step (Pinboard #1737): under the
