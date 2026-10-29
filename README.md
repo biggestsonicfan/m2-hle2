@@ -97,8 +97,9 @@ Fighting Vipers (`fvipers`), The House of the Dead (`hotd`), Daytona USA (`dayto
 (`doa`, `doab`, `doaa`, `doaab`, `doaae`), Virtua Fighter 2 (`vf2`, `vf2b`, `vf2a`, `vf2o`), Air
 Walkers (`airwlkrs`), Power Sled (`powsled`), Motor Raid (`motoraid`; on the web since Pinboard #1628), Last Bronx (`lastbrnx`, `lastbrnxu`, `lastbrnxj`;
 on the web since Pinboard #1535), Pilot Kids (`pltkids`, `pltkidsa`;
-on the web since Pinboard #1538) and Virtua Cop (`vcop`, with the I/O board's
-`model1io2.zip`; the mouse is the gun, a shot off the picture reloads). The desktop build adds the
+on the web since Pinboard #1538), Virtua Cop (`vcop`, with the I/O board's
+`model1io2.zip`; the mouse is the gun, a shot off the picture reloads) and Desert Tank (`desert`, with
+`model1io.zip`; Pinboard #1890). The desktop build adds the
 homebrew `m2snake` and `sfight_homebrew`.
 
 Every build, the web one too, also runs these clone sets, each picked by its zip's name (Pinboard #1286):

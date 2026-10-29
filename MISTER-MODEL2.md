@@ -44,7 +44,8 @@ against master (`4075c17`), and none needs work:
 
 ### 1. Desert Tank has no profile
 
-`desert.zip` is in `$ROMS_DIR`, and nothing in `src/` loads it. The core says it
+Done since Pinboard #1890: `src/profiles/desert.h` (docs/invariants/model1-boards.md).
+`desert.zip` is in `$ROMS_DIR`; before that, nothing in `src/` loaded it. The core says it
 is Daytona's board: the type-1 I/O board (EPR-14869C), and the TGP program is
 Daytona's upload. MAME flags it not working, but it boots and plays. A profile on
 top of Daytona's install should be cheap. What the core found:
