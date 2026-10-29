@@ -2733,6 +2733,29 @@ I-cache 24-25%. So 3 vblanks (20 fps) means a quarter off the frame,
 and the draw path is where most of it is. `AOT_OS=1` aims at the I-cache's
 quarter; its disc (`dreamcast/stf-speed-os`) has not been on a console yet.
 
+## FACESTOP on the console: the floor without 3D (#1883)
+
+The owner ran `dreamcast/stf-split-facestop` (2e098ed, FACESTOP: the face
+loop stops after the board cull, no 3D drawn) through the attract into the
+demo fight: M2LOG003.TXT, 150 s. Against M2LOG002 (all faces), over the
+fight's quiet windows from 104 s on (no page loads, `bio` under 5%), ms a
+frame:
+
+| log | windows | fps | frame avg/min | `sc` | game | `geo` | `drw` | `til` | `kos` |
+|---|---|---|---|---|---|---|---|---|---|
+| M2LOG002, faces | 12 | 13.1 | 76.2/65.8 | 36.1 | 21.7 | 7.8 | 29.4 | 4.0 | 7.7 |
+| M2LOG003, FACESTOP | 6 | 19.0 | 52.6/39.2 | 13.8 | 22.0 | 6.1 | 7.3 | 5.5 | 7.3 |
+
+"game" is `aot` + `gem` + `960` + `cop`: the board's own frame. So everything
+after the cull costs 22-24 ms a frame (`drw`, `dp_face_colour`, most of
+`dp_decode`), and taking all of it away gives 19 fps, not 30: no frame came
+in under 33 ms. What is left is about 22 ms of game, 14 ms of scan before the
+cull, 5 ms of tiles and 7 ms of KOS. Even a free face loop leaves the frame
+at 3 vblanks; 30 fps needs the game's 22 ms down as well as the 3D.
+
+FACESTOP's disc also has less page cache (1452 KB against 1964), so outside
+those windows the fight loaded 20-30 pages a window (`bio` 20-35%).
+
 ## Next optimization targets
 
 - **Other line-scrolled screens.** The PVR strips cover tilemap 2 alone
