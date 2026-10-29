@@ -476,7 +476,16 @@ static int aot_pg(i960_cpu_t *cpu, memory_bus_t *bus, const aot_op_t *d, uint32_
     return 0;
 }
 
+/* -DI960_AOT_OS=1: the compiled code for size. On the Dreamcast it is a
+ * megabyte against a 16 KB I-cache, which stalls ~19% of the time (#1877). */
+#if defined(I960_AOT_OS) && I960_AOT_OS && defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("Os")
 #include I960_AOT_GEN
+#pragma GCC pop_options
+#else
+#include I960_AOT_GEN
+#endif
 
 static bool     s_aot_on;
 static int s_aot_cop_ok;
