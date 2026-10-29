@@ -1,0 +1,9 @@
+features:
+  - netplay
+shared_features:
+  - rewind
+  - autosave
+file_extensions:
+  - zip
+systems:
+  - model2

@@ -1,0 +1,2 @@
+name: BATOCERA
+desc: libretro-m2hle on its own, for .github/workflows/batocera.yml

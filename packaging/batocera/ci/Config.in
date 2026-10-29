@@ -1,0 +1,9 @@
+# The two batocera.linux symbols libretro-m2hle.mk reads. In batocera they
+# come from the board's defconfig; here the CI's defconfig sets one or the other.
+config BR2_PACKAGE_BATOCERA_TARGET_X86_64_ANY
+	bool "batocera x86_64 target"
+
+config BR2_PACKAGE_BATOCERA_GLES3
+	bool "batocera GLES 3 target"
+
+source "$BR2_EXTERNAL_BATOCERA_PATH/package/libretro-m2hle/Config.in"
