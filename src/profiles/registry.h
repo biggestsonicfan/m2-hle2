@@ -34,6 +34,7 @@
 #include "pltkids.h"   /* runs since Pinboard #1538, on the site too */
 #include "motoraid.h"  /* runs since Pinboard #1627, on the site since #1628 */
 #ifndef M2HLE_WEB
+#include "m2_library.h" /* the rest of MAME's library, Pinboard #1872 */
 #include "m2snake.h"
 #include "sfight_homebrew.h"
 #endif
@@ -86,6 +87,27 @@ const game_profile_t *const g_profiles[] = {
     &daytonata_profile,
     &daytonagtx_profile,
 #ifndef M2HLE_WEB
+    &manxtt_profile,
+    &skytargt_profile,
+    &vcop2_profile,
+    &zeroguna_profile,
+    &vstriker_profile,
+    &vstrikero_profile,
+    &zerogun_profile,
+    &zerogunj_profile,
+    &dynabb_profile,
+    &gunblade_profile,
+    &indy500_profile,
+    &indy500d_profile,
+    &sgt24h_profile,
+    &overrevb_profile,
+    &overrev_profile,
+    &stcc_profile,
+    &skisuprg_profile,
+    &segawski_profile,
+    &waverunr_profile,
+    &topskatr_profile,
+    &bel_profile,
     &m2snake_profile,
     &sfight_homebrew_profile,
 #endif

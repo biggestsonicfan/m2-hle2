@@ -457,6 +457,8 @@ static void input_io_write_cb(mem_region_t *r, uint32_t addr, uint32_t val, int 
 static uint32_t input_board_held(void) { return g_input.use_net ? g_input.net_held : g_input.held; }
 static int      input_board_from_net(void) { return g_input.use_net; }
 
+static inline void input_lightgun_setup(void);
+
 /* io_5649.h's controls: the wheel, pedals and shifts from the quirks, a
  * gear's own button from the input map. */
 static inline void input_io5649_controls(void) {
@@ -467,6 +469,17 @@ static inline void input_io5649_controls(void) {
                                              { bits[GAME_INPUT_GEAR_N], bits[GAME_INPUT_GEAR_1], bits[GAME_INPUT_GEAR_2],
                                                bits[GAME_INPUT_GEAR_3], bits[GAME_INPUT_GEAR_4] },
                                              q->wheel.bike };
+    io5649_controls_t *c = &g_io5649_controls;
+    memcpy(c->ch, q->analog.ch, sizeof c->ch);
+    for (int ch = 0; ch < 8; ch++) c->layout |= q->analog.ch[ch] != 0;
+    c->in_high = q->analog.in_high;
+    c->up      = q->analog.up;
+    c->down    = q->analog.down;
+    c->press[0] = q->analog.press[0];
+    c->press[1] = q->analog.press[1];
+    /* A gun stick on a channel (Gunblade NY, Behind Enemy Lines): the guns'
+     * controls and ranges, as a light gun's. */
+    if (c->layout && q->gun[0].x_max) input_lightgun_setup();
 }
 
 /* A 315-5649 board (a wheel): io_5649.h serves the ports and takes the writes. */
