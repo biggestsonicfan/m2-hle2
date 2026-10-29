@@ -151,6 +151,17 @@ static void hud_line(int row, const char *tag, int win, const char *body) {
 
 static memory_bus_t     bus;
 static i960_cpu_t       cpu;
+
+#if DC_PG_TRACE
+/* One line per page read off the disc: "PT frame region page ip at", the
+ * page counted from the region's start, at 1 when dc_rom_at asked, not the bus. */
+static void pg_trace_load(uint32_t v) {
+    int r = DC_REGIONS - 1;
+    while (r > 0 && v < g_pg.first[r]) r--;
+    printf("PT %u %d %u %08lx %u\n", (unsigned)g_emu_frames, r, (unsigned)(v - g_pg.first[r]),
+           (unsigned long)cpu.sfr.ip, (unsigned)g_pg.in_at);
+}
+#endif
 static emu_thread_ctx_t ctx;
 static romset_t         rs;
 static tile_cpu_t       tiles;

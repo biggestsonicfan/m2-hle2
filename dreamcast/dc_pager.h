@@ -115,6 +115,15 @@ typedef struct {
 
 static pager_t g_pg;
 
+/* -DDC_PG_TRACE=1: every page read off the disc, to main_dc.c's
+ * pg_trace_load (which pages a fight needs, and who asked: #1877). */
+#ifndef DC_PG_TRACE
+#define DC_PG_TRACE 0
+#endif
+#if DC_PG_TRACE
+static void pg_trace_load(uint32_t v);
+#endif
+
 /* The bus hands its page tables' pages to pg_bus_in: they must be the same. */
 _Static_assert(MEM_PAGE_SHIFT == PG_SHIFT, "build with -DMEM_PAGE_SHIFT=14");
 
@@ -260,6 +269,9 @@ static uint32_t pg_fault(uint32_t v) {
             g->rg_loads[r]++;
         }
         g->at_loads += g->in_at;
+#if DC_PG_TRACE
+        pg_trace_load(v);
+#endif
     }
     f->vpage = v;
     f->ref = 1;
