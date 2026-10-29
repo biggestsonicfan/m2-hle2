@@ -33,6 +33,7 @@
 #include "lastbrnx.h"  /* runs since Pinboard #1517, on the site since #1535 */
 #include "pltkids.h"   /* runs since Pinboard #1538, on the site too */
 #include "motoraid.h"  /* runs since Pinboard #1627, on the site since #1628 */
+#include "desert.h"    /* runs since Pinboard #1890 */
 #ifndef M2HLE_WEB
 #include "m2_library.h" /* the rest of MAME's library, Pinboard #1872 */
 #include "m2snake.h"
@@ -76,6 +77,7 @@ const game_profile_t *const g_profiles[] = {
     &pltkids_profile,
     &pltkidsa_profile,
     &motoraid_profile,
+    &desert_profile,
     /* The clones of #1286, on the site under their game (web/site/m2hle-games.js). */
     &schamp_profile,
     &hotdo_profile,
