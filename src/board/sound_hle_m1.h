@@ -900,9 +900,13 @@ static uint32_t m1h_segment(void) {
     }
 }
 
+/* Virtua Cop's driver (shle_drv_t.m1 2) */
+#include "sound_hle_vcop.h"
+
 /* the board up to clock period `now`: the init's stages, the main loop's
  * parts that start by then, a byte the UART holds */
 static void m1hle_events(uint64_t now) {
+    if (g_shle_drv->m1 == 2) { vch_events(now); return; }
     m1hle_t *h = &g_shle.m1;
     if (h->phase == M1H_BOOT) m1h_boot(now);
     if (h->phase != M1H_RUN) return;

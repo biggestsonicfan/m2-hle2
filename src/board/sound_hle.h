@@ -104,7 +104,8 @@ typedef struct {
     /* Sega's 1994-95 driver (Virtua Fighter 2, Sega Rally): sound_hle_v95.h,
      * k_v95_builds. */
     uint8_t     v95;
-    /* The Model 1 sound board's 68000 driver (Daytona USA): sound_hle_m1.h. */
+    /* The Model 1 sound board's 68000 driver: sound_hle_m1.h (1 Daytona USA,
+     * 2 Virtua Cop, sound_hle_vcop.h). */
     uint8_t     m1;
 } shle_drv_t;
 
@@ -134,6 +135,8 @@ static const shle_drv_t k_shle_drvs[] = {
     { "srallyc",  0xF1EFC2C5u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 2 },
     /* the Model 1 board's epr-16486..: Daytona USA */
     { "daytona",  0x46E0A5F3u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 0, 1 },
+    /* epr-18022: Virtua Cop (sound_hle_vcop.h) */
+    { "vcop",     0x5857DA20u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0, 0, 0, 0, false, false, false, false, 0, 0, 2 },
 };
 static const shle_drv_t *g_shle_drv = &k_shle_drvs[0];
 

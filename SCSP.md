@@ -605,8 +605,26 @@ within 30 ms, median -1.46 ms, p95 3.8 ms, envelope correlation median 0.955;
 a race (coin, start, driving) 5716 of 5716, median -0.51 ms, p95 2.1 ms,
 correlation median 0.69; no driver RAM differences over a second in either.
 150 s of the race replay take 2.97 s of CPU on the 68000, 1.46 s in C (-51%).
-Virtua Cop's build (0x5857DA20) shares the core (0x000-0x17FA) but has
-12-byte voices, eight sequencers and no engines: not ported yet.
+
+**Virtua Cop's build** (epr-18022, 0x5857DA20, `shle_drv_t.m1` 2) is in
+`src/board/sound_hle_vcop.h`, on the same bus helpers. It is Daytona's driver
+rearranged: 20 channels, 12-byte voices, the drums on MIDI channel 15 (with a
+hi-hat choke and a countdown pass over the 56 voices every 36 ticks), eight
+32-byte sequencers at 0xF02000, and no engines. Its main loop polls timer B
+once a pass: set, the tick (YM 0x27, the countdowns, the sequencers); clear,
+the two chips' releases and one ring message. Its "engine" command (A0 70+)
+walks three records at 0xF017A0 that nothing writes, so it plays nothing;
+the port walks them the same way. Costs (`VCH_*`): a pass 3132 clocks idle,
+a tick 1044 with four sequencers waiting (+52 each), a note on 6190 from the
+dispatch, a note off 4956, a release 2632, CC 0x10 2083 a channel (+630 a
+voice it writes); a message's key-on lands `VCH_D_LEAD` (5900) into it.
+`grade-sound-hle.py --m1` (`SND_SET` the vcop set): the attract 3286 of 3286
+key-ons within 30 ms, median -4.67 ms, p95 7.2 ms; a shooting stage 3181 of
+3181, median -0.10 ms, p95 10.3 ms; envelope correlation medians 0.93 and
+0.96; no driver RAM differences over a second. The residue is the tick: the
+board loses one more tick than C about every ten seconds, from passes that
+land just over a period. det_digest vcop (2400 frames) is the 68000's frame
+for frame; the shooting replay's sound board takes 61% less CPU.
 
 ## The voices in C (`--sound-synth`)
 
