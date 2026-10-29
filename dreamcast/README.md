@@ -312,6 +312,7 @@ The bottom band (rows 14-29), a 2-s window:
 | `G0`, `G1` | the sampler's groups, % of the window's samples: `aot` the i960 compiled ahead, `gem` Gems' C, `hok` the profile's hooks, `960` the i960 interpreter and the bus, `cop`, `geo` the 3D decode, `drw` the PVR draw, `til` the tile layers, `snd`, `dsc` the pager and the drive, `kos`, `lib`, `bio` the BIOS (where the GD-ROM syscalls run), `oth` |
 | `S0`, `S1` | the six hottest symbols, % of the samples (names cut at 16) |
 | `SC` | `SCENE=` builds only (dc_scene.h), since boot: `sc` scenes loaded, `st` textures staged, `ad` adopted by the draw, `kb` read, `ms` spent, `me` meshes preloaded |
+| `X0`, `X1` | `SCANSPLIT=1` builds only (dc_scansplit.h): `DR`'s `sc` by part, tenths of ms a drawn frame: `wk` the GEO walk, `rn` the runs, `me` the mesh lookup, `fu` uncached models, `di` direct lists, `sp` the spheres, `xf` the corners through the matrix, `cc` the cull codes, `pj` the projection, `fa` the face loop; `mdl` models and `fc` faces walked a drawn frame |
 
 Flycast has no performance counters (`HW` reads 0) and charges nothing for the
 drive (`RD`'s ms read 0): those are for the console. `tools/hud_ocr.py` reads

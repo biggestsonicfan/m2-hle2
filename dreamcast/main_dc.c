@@ -113,7 +113,7 @@ KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM | (DC_STATS_DBGIO ? INIT_
  * window's numbers, its lines all the same window's. The panel starts hidden
  * and R on the pad shows or hides it (#526). Tools/hud_read.py reads it;
  * dreamcast/README.md says what each field is. */
-enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR, HUD_SC = 13,
+enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR, HUD_X0 = 11, HUD_X1, HUD_SC,
        HUD_WN = 14, HUD_FT, HUD_CP, HUD_PG, HUD_LD, HUD_RD, HUD_DR, HUD_MS, HUD_TX, HUD_SN,
        HUD_HW, HUD_PV, HUD_G0, HUD_G1, HUD_S0, HUD_S1 };
 static uint32_t s_hud_win;   /* the window's number */
@@ -1048,6 +1048,26 @@ static void dc_hud_window(dc_stats_t *s, uint64_t t2, const dc_window_t *w) {
              (unsigned)(g_dp.us_tiles / 1000 / d), (unsigned)(g_dp.us_scan / 1000 / d),
              (unsigned)(g_dp.us_sort / 1000 / d), g_dp.tris, g_dp.runs, g_dp.faces_dropped);
     hud_line(HUD_DR, "DR", 1, line);
+#if DC_SCAN_SPLIT
+    {   /* sc by part (dc_scansplit.h), a drawn frame's tenths of ms: the console's
+         * own split of the scan, which Flycast's (#535) cannot give for the caches */
+        static dc_split_t w0;
+        uint32_t t[DC_LAPS];
+        for (int i = 0; i < DC_LAPS; i++) t[i] = dc_split_ms((g_split.t[i] - w0.t[i]) * 10u) / d;
+        snprintf(line, sizeof line, "wk=%u rn=%u me=%u fu=%u di=%u sp=%u xf=%u",
+                 (unsigned)t[DC_LAP_WALK], (unsigned)t[DC_LAP_RUN], (unsigned)t[DC_LAP_MESH],
+                 (unsigned)t[DC_LAP_FULL], (unsigned)t[DC_LAP_DIRECT], (unsigned)t[DC_LAP_SPHERE],
+                 (unsigned)t[DC_LAP_XFORM]);
+        hud_line(HUD_X0, "X0", 1, line);
+        /* then the models through the matrix and the faces walked, a drawn frame */
+        snprintf(line, sizeof line, "cc=%u pj=%u fa=%u mdl=%u fc=%u",
+                 (unsigned)t[DC_LAP_CODES], (unsigned)t[DC_LAP_PROJ], (unsigned)t[DC_LAP_FACES],
+                 (unsigned)((g_split.n[DC_LAP_XFORM] - w0.n[DC_LAP_XFORM]) / d),
+                 (unsigned)((g_split.n[DC_LAP_FACES] - w0.n[DC_LAP_FACES]) / d));
+        hud_line(HUD_X1, "X1", 1, line);
+        w0 = g_split;
+    }
+#endif
     /* the mesh cache: meshes, built and hit in the window, clears/evictions, arena KB */
     snprintf(line, sizeof line, "n=%u b=%u h=%u clr=%u ev=%u kb=%u",
              (unsigned)g_geo3d_mesh_count, (unsigned)(g_geo3d_mesh_builds - s->builds_last),
