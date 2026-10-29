@@ -36,7 +36,7 @@
  * the bus's buffers and every profile extra. A part past the end is dropped,
  * and META is the last: a load then kept the newest save's sound budget and
  * latches, and every rollback of Power Sled split (Pinboard #1095). */
-#define ROLLBACK_PARTS_MAX (16 + SAVESTATE_NBUFS + SAVESTATE_EXTRA_MAX)
+#define ROLLBACK_PARTS_MAX (18 + SAVESTATE_NBUFS + SAVESTATE_EXTRA_MAX)
 #define ROLLBACK_POOL_MAX  16
 
 /* pack: a part that holds host pointers zeroes them (in a copy) before it is
@@ -49,6 +49,7 @@ typedef struct { const char *name; void *p; size_t n; void (*pack)(void *); bool
 static inline void rollback__pack_sharc(void *p) { ((sharc_state_t *)p)->sharc_dm_ext_w = 0; }
 static inline void rollback__pack_cop(void *p)   { ((cop_state_t *)p)->ctl_w = 0; }
 static inline void rollback__pack_scsp(void *p)  { savestate_scsp_pack((scsp_t *)p); }
+static inline void rollback__pack_dsb2(void *p)  { ((dsb2_state_t *)p)->mpa.base = NULL; }
 
 /* The small structs that are built rather than copied. */
 typedef struct {
@@ -122,6 +123,7 @@ static inline void rollback__add(const char *name, void *p, size_t n, void (*pac
      * are copied once the sound thread's run is over; see rollback_save_to. */
     g_rollback.part[g_rollback.n].late =
         ((uint8_t *)p >= (uint8_t *)&g_sound && (uint8_t *)p < (uint8_t *)(&g_sound + 1)) ||
+        ((uint8_t *)p >= (uint8_t *)&g_dsb2 && (uint8_t *)p < (uint8_t *)(&g_dsb2 + 1)) ||
         p == (void *)&g_shle || p == (void *)&g_ssyn || p == (void *)&g_rollback.meta;
     g_rollback.n++;
     g_rollback.size += n;
@@ -149,6 +151,11 @@ static inline void rollback_layout(i960_cpu_t *cpu, memory_bus_t *bus) {
     rollback__add("M2SCSP", &g_sound.scsp, sizeof g_sound.scsp, rollback__pack_scsp, true);
     rollback__add("SHLE", &g_shle, sizeof g_shle, NULL, false);
     rollback__add("SSYN", &g_ssyn, sizeof g_ssyn, NULL, false);
+    if (g_dsb2.present) {                              /* Top Skater's or Touring Car's music board */
+        if (g_dsb2.z80) rollback__add("DSB2.cpu", &g_dsb2.zcpu, sizeof g_dsb2.zcpu, NULL, false);
+        else            rollback__add("DSB2.cpu", &g_dsb2.m68k.cpu, sizeof g_dsb2.m68k.cpu, NULL, false);
+        rollback__add("DSB2", &g_dsb2.st, sizeof g_dsb2.st, rollback__pack_dsb2, true);
+    }
     for (int i = 0; i < g_savestate_extra_n; i++)
         if (savestate_extra_mine(i)) rollback__add(g_savestate_extra[i].name, g_savestate_extra[i].data, g_savestate_extra[i].size, NULL, false);
     rollback__add("META", &g_rollback.meta, sizeof g_rollback.meta, rollback__pack_meta, false);

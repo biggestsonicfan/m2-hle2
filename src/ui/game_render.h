@@ -2653,19 +2653,28 @@ static inline void game_render__geo_decode_one(geo3d_state_t *geo, const geo3d_m
     } else {
         geo3d_models_t from = *md;
         uint32_t oba = cm->dbg_mesh_ptr;
-        if (cm->model_idx < 0 && (oba & 0x01800000u) == 0x00800000u) {
+        if ((cm->model_idx < 0 || cm->vsel) && (oba & 0x01800000u) == 0x00800000u) {
             /* polygon ROM with no model-table entry (Sega Rally has no table):
              * the mesh sits at the object address, as MAME's geo_object_data reads it */
             size_t off = (size_t)(oba & 0x7FFFFFu) * 4u;
             if (!md->polygons || off >= md->polygons_size) return;
             from.obj_mesh      = md->polygons + off;
             from.obj_mesh_size = md->polygons_size - off;
-        } else if (cm->model_idx < 0) { /* polygon RAM: the mesh sits at the object address */
+        } else if (cm->model_idx < 0 || cm->vsel) { /* polygon RAM: the mesh sits at the object address */
             uint32_t word = oba & 0x7FFFu;
             from.obj_mesh      = (const uint8_t *)&g_geo_rs->polyram[(oba & 0x01000000u) ? 1 : 0][word];
             from.obj_mesh_size = (0x8000u - word) * 4u;
         }
-        geo3d_decode_model_cached(&from, cm->model_idx,
+        if (cm->vsel && from.obj_mesh) {
+            /* each vertex picks its matrix: the corners go to eye space here */
+            static uint8_t vsel_mesh[GEO3D_IA_MAX_VPS * VERTEX_PAIR_SIZE];
+            size_t n = geo3d_vsel_mesh(from.obj_mesh, from.obj_mesh_size, cm->vsel_cmd == 0x11,
+                                       cm->vsel_count, cm->vsel_raw, vsel_mesh, sizeof vsel_mesh);
+            if (!n) return;
+            from.obj_mesh      = vsel_mesh;
+            from.obj_mesh_size = n;
+        }
+        geo3d_decode_model_cached(&from, cm->vsel ? -1 : cm->model_idx,
                                   geo->use_matrix ? cm->matrix : NULL,
                                   cm->color[0], cm->color[1], cm->color[2]);
     }

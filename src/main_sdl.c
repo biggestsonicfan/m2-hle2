@@ -304,6 +304,7 @@ static SDL_AudioStream *sound_start(void) {
     sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
     if (state.romset.samples && state.romset.samples_size > 0)
         sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+    sound_load_dsb2(state.romset.mpegcpu, state.romset.mpegcpu_size, state.romset.mpeg, state.romset.mpeg_size);
     /* The stream is opened at the board's rate, so the drain works in 44.1 kHz
      * frames and SDL does the conversion. Half the desktop's queue: 93 ms is
      * what this frontend has always held, and a handheld would rather have the
@@ -991,6 +992,7 @@ static void sdl_netplay_reset_cb(void *ctx) {
         sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
         if (state.romset.samples && state.romset.samples_size > 0)
             sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+        sound_load_dsb2(state.romset.mpegcpu, state.romset.mpegcpu_size, state.romset.mpeg, state.romset.mpeg_size);
     }
     input_reset();
     input_attach(&state.bus);

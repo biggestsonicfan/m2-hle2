@@ -281,6 +281,7 @@ static void load_sound_board(void) {
         sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
     if (state.romset.samples && state.romset.samples_size > 0)
         sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+    sound_load_dsb2(state.romset.mpegcpu, state.romset.mpegcpu_size, state.romset.mpeg, state.romset.mpeg_size);
     if (g_no_sound_board) {
         sound_detach(&state.bus);
         LOG_INFO("sound: --no-sound-board, the board boots without its 68000 and SCSP");
@@ -487,6 +488,7 @@ static void netplay_reset_board_cb(void *ctx) {
             sound_load_rom(state.romset.audiocpu, (uint32_t)state.romset.audiocpu_size);
         if (state.romset.samples && state.romset.samples_size > 0)
             sound_load_samples(state.romset.samples, (uint32_t)state.romset.samples_size);
+        sound_load_dsb2(state.romset.mpegcpu, state.romset.mpegcpu_size, state.romset.mpeg, state.romset.mpeg_size);
     }
 
     input_reset();

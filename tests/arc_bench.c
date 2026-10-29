@@ -233,6 +233,7 @@ static int load_rom(const char *zip, bool sound) {
             sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
         if (romset.samples && romset.samples_size > 0)
             sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
+        sound_load_dsb2(romset.mpegcpu, romset.mpegcpu_size, romset.mpeg, romset.mpeg_size);
     }
     input_reset();
     input_attach(&bus);
