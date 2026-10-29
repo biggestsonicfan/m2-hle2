@@ -189,8 +189,14 @@ RELEASE ?=
 CFLAGS += $(if $(RELEASE),-DDC_RELEASE='"$(RELEASE)"')
 
 AOT_GEN :=
+# AOT_OS=1 compiles the AOT code for size (-Os, src/core/i960_aot.h): 573 KB
+# less text, the page cache 2476 KB instead of 1964, the board the same (the
+# frame-3000 hash). Under Flycast the slice is 3.5% longer (more instructions);
+# on a console the I-cache stalls it saves may pay that back (#1877), so it is
+# off until a console's HUD=prof bench says.
+AOT_OS ?= 0
 ifneq ($(AOT),)
-CFLAGS  += -DI960_AOT=1 -DI960_AOT_GEN='"aot_gen.h"' -I$(OUT)
+CFLAGS  += -DI960_AOT=1 -DI960_AOT_GEN='"aot_gen.h"' -I$(OUT) -DI960_AOT_OS=$(AOT_OS)
 AOT_GEN := $(OUT)/aot_gen.h
 endif
 

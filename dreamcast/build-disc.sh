@@ -143,6 +143,7 @@ ask_program() {
     say "The program (make -C dreamcast)"
     yes AOT "AOT: the i960 code compiled to SH-4 ahead of time" y
     [ "$DCB_AOT" = 1 ] && ask AOT_COVER "  share of the map compiled (AOT_COVER)" 0.99
+    [ "$DCB_AOT" = 1 ] && yes AOT_OS "  AOT_OS: the compiled code for size (-Os; 512 KB more page cache)" n
     yes GEMS "Gems C: Sega's C from Sonic Gems Collection for the trapped functions and the COP" y
     [ "$DCB_GEMS" = 1 ] && ask GEMS_PATH "  its folder (empty: the tree's vendor/gems-c submodule)" ""
     yes FRAME512 "FRAME512: a 512x384 frame in the middle of the 640x480 signal" y
@@ -209,7 +210,7 @@ ask_dev() {
     ask EXTRA "EXTRA: more compiler flags" ""
 }
 
-ALL_KEYS="REPO REF FETCH RELEASE DISCS GDI_NAME GDI_CANARY CDI_NAME CDI_CANARY AOT AOT_COVER GEMS GEMS_PATH
+ALL_KEYS="REPO REF FETCH RELEASE DISCS GDI_NAME GDI_CANARY CDI_NAME CDI_CANARY AOT AOT_COVER AOT_OS GEMS GEMS_PATH
 FRAME512 FILL VIEW FPS PANEL FPS_CAP HOST_MATH STRIPS RAMP4096 SCENE SDLOG PS3 SOUND MODELS TEXPAK REDO_ASSETS DUMMY FAST ZIP
 TEST TEST_SECS CANARY JOBS DEV OPTAB JIT JIT_ON JIT_TEST HASH_FRAME LINK LINK_GEMS SINCOS MEASURE CACHESHRINK AOT_MAP IB_POOL EXTRA"
 
@@ -235,7 +236,7 @@ make_args() {
         FRAME512="$DCB_FRAME512" FILL="$DCB_FILL" VIEW="$DCB_VIEW" FPS_CAP="$DCB_FPS_CAP"
         HUD="$(HUD_ARG)" FPS="$DCB_FPS" HOST_MATH="$DCB_HOST_MATH" STRIPS="$DCB_STRIPS"
         RAMP4096="$DCB_RAMP4096" SCENE="${DCB_SCENE:-0}" SDLOG="$DCB_SDLOG" RELEASE="$DCB_RELEASE")
-    if [ "$DCB_AOT" = 1 ]; then MAKE_ARGS+=(AOT="$ROMS/rom_code1.bin" AOT_COVER="$DCB_AOT_COVER"); else MAKE_ARGS+=(AOT=); fi
+    if [ "$DCB_AOT" = 1 ]; then MAKE_ARGS+=(AOT="$ROMS/rom_code1.bin" AOT_COVER="$DCB_AOT_COVER" AOT_OS="${DCB_AOT_OS:-0}"); else MAKE_ARGS+=(AOT=); fi
     if [ "$DCB_GEMS" = 1 ]; then MAKE_ARGS+=(GEMS="$GEMS_DIR"); else MAKE_ARGS+=(GEMS=); fi
     [ "${DCB_DEV:-0}" = 1 ] || return 0
     MAKE_ARGS+=(OPTAB="$DCB_OPTAB" JIT="$DCB_JIT" HASH_FRAME="$DCB_HASH_FRAME" LINK="$DCB_LINK" EXTRA="$DCB_EXTRA")
@@ -415,7 +416,7 @@ describe() {
     [ "$DCB_SDLOG" = 1 ] && d+=" SDLOG=1"
     [ "${DCB_DEV:-0}" = 1 ] && [ "$DCB_MEASURE" != none ] && d+=" $DCB_MEASURE=1"
     [ "${DCB_DEV:-0}" = 1 ] && [ "$DCB_CACHESHRINK" = 1 ] && d+=" CACHESHRINK=1"
-    [ "$DCB_AOT" = 1 ] && d+=", AOT $DCB_AOT_COVER"; [ "$DCB_GEMS" = 1 ] && d+=", Gems C"
+    [ "$DCB_AOT" = 1 ] && d+=", AOT $DCB_AOT_COVER$( [ "${DCB_AOT_OS:-0}" = 1 ] && echo ' -Os')"; [ "$DCB_GEMS" = 1 ] && d+=", Gems C"
     [ "$DCB_PANEL" = prof ] && d+=", PROF panel hidden at boot - R shows/hides it"
     [ "$DCB_STRIPS" = 1 ] && d+=", STRIPS.PAK"; [ "$DCB_TEXPAK" = 1 ] && d+=", $(texpak_name)"
     [ "$DCB_SOUND" = 1 ] && d+=", STF.AFS sound"
