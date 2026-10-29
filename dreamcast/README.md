@@ -313,6 +313,7 @@ The bottom band (rows 14-29), a 2-s window:
 | `S0`, `S1` | the six hottest symbols, % of the samples (names cut at 16) |
 | `SC` | `SCENE=` builds only (dc_scene.h), since boot: `sc` scenes loaded, `st` textures staged, `ad` adopted by the draw, `kb` read, `ms` spent, `me` meshes preloaded |
 | `X0`, `X1` | `SCANSPLIT=1` builds only (dc_scansplit.h): `DR`'s `sc` by part, tenths of ms a drawn frame: `wk` the GEO walk, `rn` the runs, `me` the mesh lookup, `fu` uncached models, `di` direct lists, `sp` the spheres, `xf` the corners through the matrix, `cc` the cull codes, `pj` the projection, `fa` the face loop; `mdl` models and `fc` faces walked a drawn frame |
+| `X2` | `SCANSPLIT=1` builds only (#1884): `dp_face_colour` inside `fa`, a drawn frame: `cl` its tenths of ms and `cn` its calls (`dp_face_col`'s memo misses), `rw` the ramp walks' tenths of ms (`g_dp_ramp` misses) and `wn` the walks, `lk` `dp_face_col`'s memo lookups and `rl` `dp_face_ramp`'s cache lookups. The bench's row 10 has the same over frames 3500-3900, in ms and calls |
 
 Flycast has no performance counters (`HW` reads 0) and charges nothing for the
 drive (`RD`'s ms read 0): those are for the console. `tools/hud_ocr.py` reads

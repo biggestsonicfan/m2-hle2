@@ -617,6 +617,7 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
                         (trans ? 1u << 23 : 0u) | 1u << 24, k1 = (uint32_t)T->lb;
     const uint32_t h = ((k0 * 2654435761u) ^ (k1 * 40503u)) >> DP_RAMP_SHIFT & (DP_RAMP_CACHE - 1u);
     const uint32_t lut = bus->gen_lut | 1u;
+    DC_COL_N(RAMP);
 #if DC_RAMP_COUNT
     g_rc.n[DC_RC_LOOK] += g_rc.on;
 #endif
@@ -638,6 +639,7 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
 #if DC_RAMP_KEEP
     if (g_rk.on) dc_rk_miss(lut, k0, k1, h);
 #endif
+    const uint32_t wt0 = DC_COL_T0();
 #if GEO3D_RAMPSTOP
     /* RAMPSTOP (#547): no walk or bank; the key stands in for base and offset. */
     *base = k0; *offset = k1; *pal = 0;
@@ -665,6 +667,7 @@ static void dp_face_ramp(const memory_bus_t *bus, const dp_col_in_t *T, const in
     g_dp_ramp[h].lut = lut; g_dp_ramp[h].k0 = k0; g_dp_ramp[h].k1 = k1;
     g_dp_ramp[h].pkey = *pal >= DP_POOL_FIRST ? g_dp_pool[*pal - DP_POOL_FIRST].key : 0;
     g_dp_ramp[h].base = *base; g_dp_ramp[h].off = *offset; g_dp_ramp[h].pal = *pal;
+    DC_COL_ADD(WALK, wt0);
 #if DC_RAMP_KEEP
     if (g_rk.on) dc_rk_done(lut, *base, *offset, *pal);
 #endif
@@ -1449,6 +1452,7 @@ static inline dc_tex_t *dp_face_tex(float tx, float ty, float tw, float th, floa
 }
 
 static inline void dp_face_col(float r, float g, float b, float lb, float pl, bool ctex, bool ctrans) {
+    DC_COL_N(LOOK);
     if (r != g_dp_memo.c.r || g != g_dp_memo.c.g || b != g_dp_memo.c.b || pl != g_dp_memo.c.pl ||
             lb != g_dp_memo.c.lb || ctex != g_dp_memo.ctex || ctrans != g_dp_memo.ctrans) {
         g_dp_memo.c = (dp_col_in_t){ r, g, b, lb, pl };
@@ -1459,7 +1463,9 @@ static inline void dp_face_col(float r, float g, float b, float lb, float pl, bo
         else if (lb < 0.0f) GEO3D_FCI(C_TL);
         else if (!g_dp_pal_on) GEO3D_FCI(C_RAMP);
         else GEO3D_FCI(C_PAL);
+        const uint32_t ct0 = DC_COL_T0();
         dp_face_colour(g_dp_bus, &g_dp_memo.c, ctex, ctrans, &g_dp_memo.base, &g_dp_memo.off, &g_dp_memo.pal);
+        DC_COL_ADD(CALL, ct0);
     }
 }
 

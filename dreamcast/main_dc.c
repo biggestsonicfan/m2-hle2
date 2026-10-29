@@ -113,7 +113,7 @@ KOS_INIT_FLAGS(INIT_IRQ | INIT_CONTROLLER | INIT_CDROM | (DC_STATS_DBGIO ? INIT_
  * window's numbers, its lines all the same window's. The panel starts hidden
  * and R on the pad shows or hides it (#526). Tools/hud_read.py reads it;
  * dreamcast/README.md says what each field is. */
-enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR, HUD_X0 = 11, HUD_X1, HUD_SC,
+enum { HUD_LV, HUD_ID, HUD_B0, HUD_B1, HUD_B2, HUD_B3, HUD_AO, HUD_VR, HUD_X2 = 10, HUD_X0, HUD_X1, HUD_SC,
        HUD_WN = 14, HUD_FT, HUD_CP, HUD_PG, HUD_LD, HUD_RD, HUD_DR, HUD_MS, HUD_TX, HUD_SN,
        HUD_HW, HUD_PV, HUD_G0, HUD_G1, HUD_S0, HUD_S1 };
 static uint32_t s_hud_win;   /* the window's number */
@@ -854,8 +854,9 @@ static void dc_bench_report(dc_bench_t *b, const dc_stats_t *s, uint64_t t1, con
  * then the report puts ms by part and the calls over the picture (rows 7-9). */
 static void dc_split_bench(bool f0) {
     static dc_split_t s0;
-    static char l7[64], l8[64], l9[64];
-    if (f0) { s0 = g_split; return; }
+    static uint32_t c0t[DC_COLS], c0n[DC_COLS];
+    static char l7[64], l8[64], l9[64], l10[64];
+    if (f0) { s0 = g_split; memcpy(c0t, g_col.t, sizeof c0t); memcpy(c0n, g_col.n, sizeof c0n); return; }
     uint32_t ms[DC_LAPS], n[DC_LAPS], sum = 0;
     for (int i = 0; i < DC_LAPS; i++) {
         ms[i] = dc_split_ms(g_split.t[i] - s0.t[i]); n[i] = g_split.n[i] - s0.n[i]; sum += ms[i];
@@ -868,8 +869,16 @@ static void dc_split_bench(bool f0) {
              (unsigned long)ms[DC_LAP_FACES]);
     snprintf(l9, sizeof l9, "sum %lu n %lu/%lu/%lu f %lu", (unsigned long)sum, (unsigned long)n[DC_LAP_MESH],
              (unsigned long)n[DC_LAP_FULL], (unsigned long)n[DC_LAP_XFORM], (unsigned long)n[DC_LAP_FACES]);
-    printf("%s | %s | %s\n", l7, l8, l9);
-    dp_text(7, l7); dp_text(8, l8); dp_text(9, l9);
+    /* dp_face_colour and its ramp walks (#1884): ms and calls; the lookups */
+    snprintf(l10, sizeof l10, "cl %lu n %lu rw %lu n %lu lk %lu rl %lu",
+             (unsigned long)dc_split_ms(g_col.t[DC_COL_CALL] - c0t[DC_COL_CALL]),
+             (unsigned long)(g_col.n[DC_COL_CALL] - c0n[DC_COL_CALL]),
+             (unsigned long)dc_split_ms(g_col.t[DC_COL_WALK] - c0t[DC_COL_WALK]),
+             (unsigned long)(g_col.n[DC_COL_WALK] - c0n[DC_COL_WALK]),
+             (unsigned long)(g_col.n[DC_COL_LOOK] - c0n[DC_COL_LOOK]),
+             (unsigned long)(g_col.n[DC_COL_RAMP] - c0n[DC_COL_RAMP]));
+    printf("%s | %s | %s | %s\n", l7, l8, l9, l10);
+    dp_text(7, l7); dp_text(8, l8); dp_text(9, l9); dp_text(10, l10);
 }
 #else
 static inline void dc_split_bench(bool f0) { (void)f0; }
@@ -1066,6 +1075,18 @@ static void dc_hud_window(dc_stats_t *s, uint64_t t2, const dc_window_t *w) {
                  (unsigned)((g_split.n[DC_LAP_FACES] - w0.n[DC_LAP_FACES]) / d));
         hud_line(HUD_X1, "X1", 1, line);
         w0 = g_split;
+        /* dp_face_colour (#1884), a drawn frame: its tenths of ms and calls, the
+         * ramp walks' tenths and walks, dp_face_col's lookups, dp_face_ramp's */
+        static uint32_t ct0[DC_COLS], cn0[DC_COLS];
+        uint32_t ct[DC_COLS], cn[DC_COLS];
+        for (int i = 0; i < DC_COLS; i++) {
+            ct[i] = dc_split_ms((g_col.t[i] - ct0[i]) * 10u) / d; cn[i] = (g_col.n[i] - cn0[i]) / d;
+            ct0[i] = g_col.t[i]; cn0[i] = g_col.n[i];
+        }
+        snprintf(line, sizeof line, "cl=%u cn=%u rw=%u wn=%u lk=%u rl=%u",
+                 (unsigned)ct[DC_COL_CALL], (unsigned)cn[DC_COL_CALL], (unsigned)ct[DC_COL_WALK],
+                 (unsigned)cn[DC_COL_WALK], (unsigned)cn[DC_COL_LOOK], (unsigned)cn[DC_COL_RAMP]);
+        hud_line(HUD_X2, "X2", 1, line);
     }
 #endif
     /* the mesh cache: meshes, built and hit in the window, clears/evictions, arena KB */

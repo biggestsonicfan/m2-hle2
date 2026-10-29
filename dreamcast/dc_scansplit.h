@@ -61,6 +61,32 @@ static inline uint32_t dc_split_ms(uint32_t ticks) {
 #define GEO3D_LAP_N(p, cnt)  dc_lap(DC_LAP_##p, (uint32_t)(cnt))
 #endif
 
+/* dp_face_colour's own time, inside the face loop's (#1884). The console's
+ * sampler (M2LOG004) gave it a tenth of a fight's frame, where Flycast's stop
+ * switches (#546, #556) put it near 3%: more calls, or dearer ones? Two TMU2
+ * reads round each call and round each ramp walk (a g_dp_ramp miss), and a
+ * count of dp_face_col's memo lookups and dp_face_ramp's; the X2 row has them
+ * a drawn frame. Not lap marks: g_split.last is left alone, so "fa" still
+ * holds all of it. */
+enum { DC_COL_LOOK, DC_COL_CALL, DC_COL_RAMP, DC_COL_WALK, DC_COLS };
+#if DC_SCAN_SPLIT
+static struct { uint32_t t[DC_COLS], n[DC_COLS]; } g_col;
+static inline uint32_t dc_col_t0(void) { return DC_TMU2_TCNT; }
+static inline void dc_col_add(unsigned k, uint32_t t0) {
+    uint32_t now = DC_TMU2_TCNT, d = t0 - now;
+    if (now > t0) d += DC_TMU2_TCOR + 1u;   /* reloaded since */
+    g_col.t[k] += d;
+    g_col.n[k]++;
+}
+#define DC_COL_T0()        dc_col_t0()
+#define DC_COL_ADD(k, t0)  dc_col_add(DC_COL_##k, (t0))
+#define DC_COL_N(k)        (g_col.n[DC_COL_##k]++)
+#else
+#define DC_COL_T0()        0u
+#define DC_COL_ADD(k, t0)  ((void)(t0))
+#define DC_COL_N(k)        ((void)0)
+#endif
+
 /* The face loop's branches (make FACECOUNT=1, Pinboard #537): geo3d_cached_draw_dc
  * is one fused walk over the faces, so it is counted, never timed per face.
  * Each GEO3D_FC(k) adds one to its branch; GEO3D_FCI(k) is for the functions
