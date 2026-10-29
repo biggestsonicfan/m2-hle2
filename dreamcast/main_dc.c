@@ -139,7 +139,7 @@ static void hud_line(int row, const char *tag, int win, const char *body) {
     if (n > 74) { n = 74; l[73] = '>'; }
     sprintf(l + n, " %02X", hud_crc8(l, n));
     dp_text_row(row, l);
-    if (DC_SDLOG && row != HUD_LV) {   /* the whole line, no check; LV (every frame) left out */
+    if (DC_STATS_DBGIO && row != HUD_LV) {   /* the whole line, no check; LV (every frame) left out */
         if (win) printf("%s %04u %s\n", tag, (unsigned)(s_hud_win % 10000u), body);
         else printf("%s %s\n", tag, body);
     }
