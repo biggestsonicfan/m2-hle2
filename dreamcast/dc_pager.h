@@ -61,6 +61,17 @@
 #define PG_MAX_PART   32             /* pages a file ends inside */
 #define PG_SLOTS      4              /* bus pages a frame can be seen at (XTRA_DATA mirrors MAIN_DATA) */
 #define PG_RECENT     4              /* frames dc_rom_at handed out last: not evicted */
+/* A page of the program ROM (region 0) read off the disc this many times is
+ * pinned, up to PG_CODE_PINS of them. The code a fight runs now and then (off
+ * the vblank handler, every ~400 frames in attract) is touched more rarely
+ * than the clock comes round, so it went and came back each time (#1877). */
+#ifndef PG_CODE_PIN_AFTER
+#define PG_CODE_PIN_AFTER 4u
+#endif
+#ifndef PG_CODE_PINS
+#define PG_CODE_PINS  16u
+#endif
+#define PG_CODE_PAGES 128u           /* the program ROM's window, 2 MB */
 
 typedef struct {
     uint32_t vpage;                  /* window page it holds, or ~0 */
@@ -95,6 +106,8 @@ typedef struct {
     uint32_t rg_loads[DC_REGIONS];   /* loads by the region the page is in */
     uint32_t at_loads;               /* loads for dc_rom_at, not the bus */
     uint32_t pak_loads;              /* of the model pack's pages */
+    uint8_t  code_loads[PG_CODE_PAGES];   /* per program ROM page: loads, to PG_CODE_PIN_AFTER */
+    uint32_t code_pins;              /* program ROM pages pinned for it */
     uint8_t  in_at;
     /* the model pack */
     uint32_t          pak_first, pak_pages;    /* its window pages, after the ROM's */
@@ -272,6 +285,12 @@ static uint32_t pg_fault(uint32_t v) {
             int r = DC_REGIONS - 1;
             while (r > 0 && v < g->first[r]) r--;
             g->rg_loads[r]++;
+            uint32_t c = v - g->first[0];
+            if (r == 0 && c < PG_CODE_PAGES && g->code_loads[c] < PG_CODE_PIN_AFTER &&
+                ++g->code_loads[c] == PG_CODE_PIN_AFTER && g->code_pins < PG_CODE_PINS) {
+                f->pinned = 1;
+                g->code_pins++;
+            }
         }
         g->at_loads += g->in_at;
 #if DC_PG_TRACE
