@@ -169,8 +169,8 @@ static inline void multi_view_want(emu_thread_ctx_t *ctx, int n) {
  * picked: the frontend loads the set again, as it starts alone (Power
  * Sled's ride has its Main beside it then, SOLO); -1 otherwise. */
 static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
-    if (!igBeginMenuEx("Boards", loaded && g_active_profile)) return -1;
-    const game_profile_t *p = g_active_profile;
+    const game_profile_t *p = emu_multi_ring_profile();
+    if (!igBeginMenuEx("Boards", loaded && p)) return -1;
     int ring = emu_multi_count(p, EMU_MULTI_MAX);
     bool linked = p->ring_role || p->link_role;
     int now = emu_multi_on() ? g_multi.n : g_multi_want ? emu_multi_count(p, g_multi_want) : 1;
@@ -236,7 +236,8 @@ static inline int multi_view__cols(int n, int w, int h, float a) {
  * role; nothing unlinked. */
 static inline const char *multi_view__name(int b) {
     if (!g_multi.linked) return "";
-    const char *const *names = g_active_profile ? g_active_profile->ring_names : NULL;
+    const game_profile_t *p = emu_multi_ring_profile();
+    const char *const *names = p ? p->ring_names : NULL;
     for (int i = 0; names && names[i]; i++)
         if (i == b) return names[i];
     return b ? "SLAVE" : "MASTER";
@@ -244,15 +245,19 @@ static inline const char *multi_view__name(int b) {
 
 /* Where each board's picture goes in ox, oy, w, h, into g_mview.cell. A
  * ring whose MASTER plays itself (ring_op: Power Sled's Main) has it on top,
- * centred over one row of its slaves; any other ring is one row (Daytona's
+ * centred over one row of its slaves, and a site's extra unit (the Relay,
+ * emu_multi_last_below) centred below them; any other ring is one row (Daytona's
  * cabinets, Virtual-On's pair); unlinked boards take the grid with the
  * largest pictures. The pictures keep the screen's aspect and the block of
  * them is centred. */
 static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
     float a = (float)VIDEO_WIDTH / (float)VIDEO_HEIGHT;
-    bool main_above = g_multi.linked && n > 1 && g_active_profile && g_active_profile->ring_op;
+    const game_profile_t *p = emu_multi_ring_profile();
+    bool main_above = g_multi.linked && n > 1 && p && p->ring_op;
+    bool last_below = main_above && n > 2 && emu_multi_last_below(n);
     int cols, rows;
-    if (main_above)          { cols = n - 1; rows = 2; }
+    if (last_below)          { cols = n - 2; rows = 3; }
+    else if (main_above)     { cols = n - 1; rows = 2; }
     else if (g_multi.linked) { cols = n;     rows = 1; }
     else                     { cols = multi_view__cols(n, w, h, a); rows = (n + cols - 1) / cols; }
     int cw = w / cols, ch = h / rows;
@@ -261,7 +266,8 @@ static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
     int y0 = oy + (h - rows * ph) / 2;
     for (int b = 0; b < n; b++) {
         int r, c, in_row;
-        if (main_above) { r = b ? 1 : 0; c = b ? b - 1 : 0; in_row = b ? n - 1 : 1; }
+        if (last_below && b == n - 1) { r = 2; c = 0; in_row = 1; }
+        else if (main_above) { r = b ? 1 : 0; c = b ? b - 1 : 0; in_row = b ? cols : 1; }
         else            { r = b / cols;  c = b % cols;      in_row = r < rows - 1 ? cols : n - r * cols; }
         int x0 = ox + (w - in_row * pw) / 2;            /* each row centred, a short last one too */
         g_mview.cell[b].x = x0 + c * pw + 2;

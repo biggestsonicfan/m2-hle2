@@ -183,6 +183,19 @@ static inline void emu_multi_sets_free(void) {
     g_multi_nsets = 0;
 }
 
+/* The ring's profile, the loaded set's: g_active_profile is the board's own
+ * while a board runs a set of its own (powsledm's Main, powsledr's Relay). */
+static inline const game_profile_t *emu_multi_ring_profile(void) {
+    return g_multi_nsets && g_multi_sets[0].p ? g_multi_sets[0].p : g_active_profile;
+}
+
+/* The ring's last board goes below it: a site's extra unit (Power Sled -
+ * Arcade's Relay), a ring of ring_sets longer than link_cabinets. */
+static inline bool emu_multi_last_below(int n) {
+    const game_profile_t *p = emu_multi_ring_profile();
+    return p && p->ring_sets && g_multi_ring_ok && n == p->ring_sets_n && n > p->link_cabinets;
+}
+
 /* Board b's set's program and profile into the bus (force: even when it is
  * already the one there, as a boot wants). The rollback copy then puts the
  * board's own patches of it back (Power Sled's unit bytes). */
