@@ -625,9 +625,10 @@ const m2hleGames = (() => {
         { id: 'manxttc', name: 'Rev C Twin', about: 'Twin, Revision C' },
       ],
       romHint: 'Your <code>manxtt.zip</code> (Manx TT Superbike, Revision D), or <code>manxttc.zip</code> and its parent <code>manxtt.zip</code>, picked together',
-      /* The touch overlay's Test button starts shown: TEST MODE sets the cabinet
-       * type (GAME ASSIGNMENTS) and the rest. */
-      touchShow: ['test'],
+      /* The touch overlay's Test and Service buttons start shown: TEST MODE sets
+       * the cabinet type (GAME ASSIGNMENTS) and the rest, Service picks a line
+       * and Test enters it. */
+      touchShow: ['test', 'service'],
       /* Motor Raid's bike (io_5649.h): B1 the throttle, B2 the brake, LEFT /
        * RIGHT lean, B3 / B4 shift. */
       labels: { up: 'Unused', down: 'Unused', left: 'Lean left', right: 'Lean right',

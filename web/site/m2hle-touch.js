@@ -64,7 +64,7 @@ m2hleLang.add({
  * do the macros: the editor shows hidden buttons, and "Show" puts one back.
  * P+K takes Button 4's place, which STF does not use. The cabinet's Test and
  * Service switches start hidden too, but for a game whose `touchShow` names
- * them (Manx TT's TEST passes its motion slider check: Pinboard #1926). */
+ * them (Manx TT's TEST MODE: Pinboard #1926). */
 const M2HLE_TOUCH_LAYOUTS = {
   solo: {
     landscape: {
@@ -152,8 +152,8 @@ const m2hleTouch = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    base: 56, text: 'P+B' },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    base: 56, text: 'K+B' },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], base: 56, text: 'PKB' },
-    { id: 'test',    act: 21, base: 44 },
-    { id: 'service', act: 20, base: 44 },
+    { id: 'test',    act: 21, base: 50 },
+    { id: 'service', act: 20, base: 50 },
   ];
   /* A twin-stick game: m2hle-pad.js's twin rows, the right lever being player 2's
    * port. `face` is the word on the button; its name is the game's (`labels`). */
