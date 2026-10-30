@@ -526,6 +526,455 @@ const m2hleGames = (() => {
         },
       },
     },
+    desert: {
+      title: 'Desert Tank',
+      year: 1994, board: 'Model 2', colors: ['#c8902b', '#2a1c0b'],
+      blurb: 'A tank of your own on the desert and canyon missions: drive it, lay the turret, and fire the machine gun and the cannon.',
+      /* src/profiles/desert.h: Daytona's board, with the Model 1 I/O board's
+       * program from model1io.zip as its parent. */
+      profiles: [
+        { id: 'desert', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>desert.zip</code> and the I/O board\'s <code>model1io.zip</code>, picked together',
+      /* MAME's INPUT_PORTS(desert): LEFT / RIGHT the handle, UP / DOWN walk
+       * the turret (up aims the cannon up), B1 the accelerator, B2 the
+       * machine gun, B3 the cannon, B4 held for reverse (quirks.analog). */
+      labels: { up: 'Turret up', down: 'Turret down', left: 'Steer left', right: 'Steer right',
+                b1: 'Accelerator', b2: 'Machine gun', b3: 'Cannon', b4: 'Reverse (hold)' },
+      ownReplay: false,
+      /* No shared board: no ranking is read out of its backup RAM yet
+       * (arcade/games.mjs); its save stays in the browser. */
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'デザートタンク',
+          blurb: '砂漠と峡谷のミッションで戦車を操縦。走らせ、砲塔を向け、機関銃と主砲を撃て。',
+          profiles: { desert: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>desert.zip</code> と I/O ボードの <code>model1io.zip</code> を一緒に',
+          labels: { up: '砲塔を上に', down: '砲塔を下に', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'アクセル', b2: '機関銃', b3: '主砲', b4: '後退（押し続ける）' },
+        },
+      },
+    },
+    /* The rest of MAME's library (src/profiles/m2_library.h, Pinboard #1872),
+     * on the site since #1909. Each game's controls are its MAME INPUT_PORTS
+     * as that header maps them. None has a shared board: no ranking is read
+     * out of its backup RAM yet (arcade/games.mjs); its save stays in the
+     * browser. */
+    vcop2: {
+      title: 'Virtua Cop 2',
+      year: 1995, board: 'Model 2A-CRX', colors: ['#d84a1d', '#141c3c'],
+      blurb: 'Rage and Smarty, now with Janet, back on the Virtua City beat against EVL Inc. One or two guns.',
+      profiles: [
+        { id: 'vcop2', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>vcop2.zip</code> (Virtua Cop 2)',
+      /* Virtua Cop's gun on the 315-5649 (board/lightgun.h): B1 fires, B2 reloads. */
+      labels: { b1: 'Trigger', b2: 'Reload', b3: 'Unused', b4: 'Unused' },
+      gun: true,
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'バーチャコップ2',
+          blurb: 'レイジとスマーティ、そして新たにジャネットがバーチャシティで再び EVL 社に立ち向かう。1人または2人で。',
+          profiles: { vcop2: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>vcop2.zip</code>（バーチャコップ2）',
+          labels: { b1: 'トリガー', b2: 'リロード', b3: '未使用', b4: '未使用' },
+        },
+      },
+    },
+    vstriker: {
+      title: 'Virtua Striker',
+      year: 1994, board: 'Model 2B-CRX', colors: ['#1da84a', '#0b2c14'],
+      blurb: 'Sega\'s first 3D football: national teams, a stick and three buttons. One or two players.',
+      profiles: [
+        { id: 'vstriker', name: 'Rev A', about: 'Revision A' },
+        { id: 'vstrikero', name: 'First', about: 'The first release' },
+      ],
+      romHint: 'Your <code>vstriker.zip</code> (Revision A), or <code>vstrikro.zip</code> and its parent <code>vstriker.zip</code>, picked together',
+      /* In play the buttons are 2-3-1 (MAME, m2_library.h VSTRIKER_INPUT). */
+      labels: { b1: 'Short pass', b2: 'Long pass', b3: 'Shoot', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'バーチャストライカー',
+          blurb: 'セガ初の 3D サッカー。各国の代表チーム、スティックと 3 つのボタン。1人または2人で。',
+          profiles: { vstriker: { name: 'リビジョン A', about: 'リビジョン A' },
+                      vstrikero: { name: '初期版', about: '最初のリリース' } },
+          romHint: 'お持ちの <code>vstriker.zip</code>（リビジョン A）、または <code>vstrikro.zip</code> と親セットの <code>vstriker.zip</code> を一緒に',
+          labels: { b1: 'ショートパス', b2: 'ロングパス', b3: 'シュート', b4: '未使用' },
+        },
+      },
+    },
+    manxtt: {
+      title: 'Manx TT Superbike',
+      year: 1995, board: 'Model 2A-CRX', colors: ['#c81d1d', '#1c0b0b'],
+      blurb: 'The Isle of Man on a superbike: the Laxey Coast course and the TT course itself. It stops on the motion slider\'s safety check, as it does in MAME.',
+      /* MAME's manxttdx machine; the DX's Model 1 sound board is not here, the
+       * CRX's own sound is (m2_library.h). */
+      profiles: [
+        { id: 'manxtt', name: 'Rev D', about: 'DX/Twin, Revision D' },
+      ],
+      romHint: 'Your <code>manxtt.zip</code> (Manx TT Superbike, Revision D)',
+      /* Motor Raid's bike (io_5649.h): B1 the throttle, B2 the brake, LEFT /
+       * RIGHT lean, B3 / B4 shift. */
+      labels: { up: 'Unused', down: 'Unused', left: 'Lean left', right: 'Lean right',
+                b1: 'Throttle', b2: 'Brake', b3: 'Shift up', b4: 'Shift down' },
+      keys: DRIVING_KEYS,
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'マンクスTTスーパーバイク',
+          blurb: 'スーパーバイクでマン島を走る。ラクシー・コーストのコースと、T.T. コースそのもの。MAME と同じく、モーションスライダーの安全確認の画面で止まります。',
+          profiles: { manxtt: { name: 'リビジョン D', about: 'DX/ツイン、リビジョン D' } },
+          romHint: 'お持ちの <code>manxtt.zip</code>（マンクスTTスーパーバイク、リビジョン D）',
+          labels: { up: '未使用', down: '未使用', left: '左に傾ける', right: '右に傾ける',
+                    b1: 'スロットル', b2: 'ブレーキ', b3: 'シフトアップ', b4: 'シフトダウン' },
+        },
+      },
+    },
+    skytargt: {
+      title: 'Sky Target',
+      year: 1995, board: 'Model 2A-CRX', colors: ['#2a8fd8', '#0b1e3c'],
+      blurb: 'A jet fighter on rails over four routes: the stick aims, the machine gun and the missiles do the rest.',
+      profiles: [
+        { id: 'skytargt', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>skytargt.zip</code> (Sky Target)',
+      /* MAME's INPUT_PORTS(skytargt): the stick on two pots, B1 the machine
+       * gun, B2 missiles, B3 the view. */
+      labels: { up: 'Stick up', down: 'Stick down', left: 'Stick left', right: 'Stick right',
+                b1: 'Machine gun', b2: 'Missile', b3: 'View', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'スカイターゲット',
+          blurb: '4 つのルートを飛ぶジェット戦闘機。スティックで狙い、機関砲とミサイルで撃ち落とせ。',
+          profiles: { skytargt: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>skytargt.zip</code>（スカイターゲット）',
+          labels: { up: 'スティック上', down: 'スティック下', left: 'スティック左', right: 'スティック右',
+                    b1: '機関砲', b2: 'ミサイル', b3: '視点', b4: '未使用' },
+        },
+      },
+    },
+    zerogun: {
+      title: 'Zero Gunner',
+      year: 1997, board: 'Model 2A/2B-CRX', colors: ['#7a3cd8', '#160b2c'],
+      blurb: 'Psikyo\'s helicopter shoot-\'em-up, seen from above. One or two players.',
+      /* src/profiles/m2_library.h: the 2B Export set first; the Japanese 2B
+       * and the 2A Export are clones of zerogun.zip. */
+      profiles: [
+        { id: 'zerogun', name: 'Export', about: 'Model 2B (Export)' },
+        { id: 'zerogunj', name: 'Japan', about: 'Model 2B (Japan)' },
+        { id: 'zeroguna', name: 'Export 2A', about: 'Model 2A (Export)' },
+      ],
+      romHint: 'Your <code>zerogun.zip</code>, or <code>zerogunj.zip</code> or <code>zeroguna.zip</code> and its parent <code>zerogun.zip</code>, picked together',
+      /* MAME's INPUT_PORTS(zerogun): two buttons a player. */
+      labels: { b1: 'Shot', b2: 'Button 2', b3: 'Unused', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'ゼロガンナー',
+          blurb: '彩京の見下ろし型ヘリコプター・シューティング。1人または2人で。',
+          profiles: { zerogun: { name: '海外', about: 'Model 2B（海外）' },
+                      zerogunj: { name: '日本', about: 'Model 2B（日本）' },
+                      zeroguna: { name: '海外 2A', about: 'Model 2A（海外）' } },
+          romHint: 'お持ちの <code>zerogun.zip</code>、または <code>zerogunj.zip</code> か <code>zeroguna.zip</code> と親セットの <code>zerogun.zip</code> を一緒に',
+          labels: { b1: 'ショット', b2: 'ボタン 2', b3: '未使用', b4: '未使用' },
+        },
+      },
+    },
+    dynabb: {
+      title: 'Dynamite Baseball',
+      year: 1997, board: 'Model 2B-CRX', colors: ['#d8601d', '#2c140b'],
+      blurb: 'Japanese pro baseball with a bat you swing: twelve teams and three ballparks. One or two players.',
+      /* m2_library.h: MAME's dynabb, or the dynabb97 a zip of that name often holds. */
+      profiles: [
+        { id: 'dynabb', name: 'Arcade', about: 'Dynamite Baseball, or Dynamite Baseball 97' },
+      ],
+      romHint: 'Your <code>dynabb.zip</code> (Dynamite Baseball or Dynamite Baseball 97)',
+      /* MAME's INPUT_PORTS(dynabb): two buttons, and the bat swing a pressure
+       * channel (io_5649.h press) held on B3. */
+      labels: { b1: 'Button 1', b2: 'Button 2', b3: 'Swing the bat', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'ダイナマイトベースボール',
+          blurb: 'バットを振って打つプロ野球。12 球団と 3 つの球場。1人または2人で。',
+          profiles: { dynabb: { name: 'アーケード', about: 'ダイナマイトベースボール、またはダイナマイトベースボール97' } },
+          romHint: 'お持ちの <code>dynabb.zip</code>（ダイナマイトベースボール、またはダイナマイトベースボール97）',
+          labels: { b1: 'ボタン 1', b2: 'ボタン 2', b3: 'バットを振る', b4: '未使用' },
+        },
+      },
+    },
+    gunblade: {
+      title: 'Gunblade NY',
+      year: 1995, board: 'Model 2B-CRX', colors: ['#5a6a7a', '#10161c'],
+      blurb: 'A helicopter gunship over New York with a mounted gun for each player: the stick walks the sight, the trigger fires.',
+      profiles: [
+        { id: 'gunblade', name: 'Rev A', about: 'Revision A' },
+      ],
+      romHint: 'Your <code>gunblade.zip</code> (Gunblade NY, Revision A)',
+      /* Two gun sticks on the A/D (m2_library.h M2LIB_GUNSTICKS): a player's
+       * directions walk the sight, B1 is the trigger. */
+      labels: { up: 'Aim up', down: 'Aim down', left: 'Aim left', right: 'Aim right',
+                b1: 'Trigger', b2: 'Unused', b3: 'Unused', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'ガンブレードNY',
+          blurb: 'ニューヨーク上空を飛ぶ武装ヘリ、銃座はプレイヤーごとに一つ。スティックで照準を動かし、トリガーで撃て。',
+          profiles: { gunblade: { name: 'リビジョン A', about: 'リビジョン A' } },
+          romHint: 'お持ちの <code>gunblade.zip</code>（ガンブレードNY、リビジョン A）',
+          labels: { up: '照準を上に', down: '照準を下に', left: '照準を左に', right: '照準を右に',
+                    b1: 'トリガー', b2: '未使用', b3: '未使用', b4: '未使用' },
+        },
+      },
+    },
+    indy500: {
+      title: 'INDY 500',
+      year: 1995, board: 'Model 2B-CRX', colors: ['#1d4fd8', '#d8c81d'],
+      blurb: 'IndyCar racing on three courses: the Indianapolis Motor Speedway, a city course and a highland course.',
+      /* m2_library.h: the Twin cabinet first, the Deluxe a clone of indy500.zip. */
+      profiles: [
+        { id: 'indy500', name: 'Twin', about: 'Twin cabinet, Revision A (newer)' },
+        { id: 'indy500d', name: 'Deluxe', about: 'Deluxe cabinet, Revision A' },
+      ],
+      romHint: 'Your <code>indy500.zip</code> (Twin), or <code>indy500d.zip</code> and its parent <code>indy500.zip</code>, picked together',
+      /* m2_library.h M2LIB_WHEEL_INPUT: LEFT / RIGHT steer, UP / DOWN shift,
+       * B1 the accelerator, B2 the brake, B3 / B4 the views. */
+      labels: { up: 'Shift up', down: 'Shift down', left: 'Steer left', right: 'Steer right',
+                b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
+      keys: DRIVING_KEYS,
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'INDY 500',
+          blurb: '3 つのコースでインディカー・レース。インディアナポリス・モーター・スピードウェイ、市街地コース、高原のコース。',
+          profiles: { indy500: { name: 'ツイン', about: 'ツイン筐体、リビジョン A（新しい版）' },
+                      indy500d: { name: 'デラックス', about: 'デラックス筐体、リビジョン A' } },
+          romHint: 'お持ちの <code>indy500.zip</code>（ツイン）、または <code>indy500d.zip</code> と親セットの <code>indy500.zip</code> を一緒に',
+          labels: { up: 'シフトアップ', down: 'シフトダウン', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'アクセル', b2: 'ブレーキ', b3: '視点 1', b4: '視点 2' },
+        },
+      },
+    },
+    sgt24h: {
+      title: 'Super GT 24h',
+      year: 1996, board: 'Model 2B-CRX', colors: ['#d81d4f', '#1c0b14'],
+      blurb: 'Jaleco\'s GT racing: two courses, each run both ways.',
+      profiles: [
+        { id: 'sgt24h', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>sgt24h.zip</code> (Super GT 24h)',
+      /* As INDY 500's wheel; the pedals read the other way (m2_library.h). */
+      labels: { up: 'Shift up', down: 'Shift down', left: 'Steer left', right: 'Steer right',
+                b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
+      keys: DRIVING_KEYS,
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'スーパーGT 24h',
+          blurb: 'ジャレコの GT レース。2 つのコースを、それぞれ正逆両方向で。',
+          profiles: { sgt24h: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>sgt24h.zip</code>（スーパーGT 24h）',
+          labels: { up: 'シフトアップ', down: 'シフトダウン', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'アクセル', b2: 'ブレーキ', b3: '視点 1', b4: '視点 2' },
+        },
+      },
+    },
+    overrev: {
+      title: 'Over Rev',
+      year: 1997, board: 'Model 2B/2C-CRX', colors: ['#d8a81d', '#1c160b'],
+      blurb: 'Jaleco\'s racer: six courses, on Model 2B and 2C.',
+      /* m2_library.h: the 2C Revision A first, the 2B Revision B a clone of overrev.zip. */
+      profiles: [
+        { id: 'overrev', name: '2C', about: 'Model 2C, Revision A' },
+        { id: 'overrevb', name: '2B', about: 'Model 2B, Revision B' },
+      ],
+      romHint: 'Your <code>overrev.zip</code> (Model 2C), or <code>overrevb.zip</code> and its parent <code>overrev.zip</code>, picked together',
+      labels: { up: 'Shift up', down: 'Shift down', left: 'Steer left', right: 'Steer right',
+                b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
+      keys: DRIVING_KEYS,
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'オーバーレブ',
+          blurb: 'ジャレコのレースゲーム。6 つのコース、Model 2B と 2C で。',
+          profiles: { overrev: { name: '2C', about: 'Model 2C、リビジョン A' },
+                      overrevb: { name: '2B', about: 'Model 2B、リビジョン B' } },
+          romHint: 'お持ちの <code>overrev.zip</code>（Model 2C）、または <code>overrevb.zip</code> と親セットの <code>overrev.zip</code> を一緒に',
+          labels: { up: 'シフトアップ', down: 'シフトダウン', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'アクセル', b2: 'ブレーキ', b3: '視点 1', b4: '視点 2' },
+        },
+      },
+    },
+    stcc: {
+      title: 'Sega Touring Car Championship',
+      year: 1996, board: 'Model 2C-CRX', colors: ['#1d6ad8', '#d81d1d'],
+      blurb: 'Touring cars door to door: the Toyota Supra, the Alfa Romeo, the Opel Calibra and the AMG Mercedes, music on its own MPEG board.',
+      profiles: [
+        { id: 'stcc', name: 'Newer', about: 'The newer build, or Revision A' },
+      ],
+      romHint: 'Your <code>stcc.zip</code> (Sega Touring Car Championship)',
+      labels: { up: 'Shift up', down: 'Shift down', left: 'Steer left', right: 'Steer right',
+                b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
+      keys: DRIVING_KEYS,
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'セガツーリングカーチャンピオンシップ',
+          blurb: 'ツーリングカーが接戦を繰り広げる。トヨタ・スープラ、アルファロメオ、オペル・カリブラ、AMG メルセデス。音楽は専用の MPEG ボードから。',
+          profiles: { stcc: { name: '新しい版', about: '新しいバージョン、またはリビジョン A' } },
+          romHint: 'お持ちの <code>stcc.zip</code>（セガツーリングカーチャンピオンシップ）',
+          labels: { up: 'シフトアップ', down: 'シフトダウン', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'アクセル', b2: 'ブレーキ', b3: '視点 1', b4: '視点 2' },
+        },
+      },
+    },
+    skisuprg: {
+      title: 'Sega Ski Super G',
+      year: 1996, board: 'Model 2C-CRX', colors: ['#8cc8f0', '#0b1e3c'],
+      blurb: 'Downhill skiing on a cabinet you stand on: swing and lean through the gates. It stops on DRIVE BOARD TROUBLE, as it does in MAME.',
+      profiles: [
+        { id: 'skisuprg', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>skisuprg.zip</code> (Sega Ski Super G)',
+      /* MAME's INPUT_PORTS(skisuprg): the swing and the incline on two pots,
+       * three select buttons (START, B1, B2) and the zoom; the foot sensors
+       * are player 2's B1 / B2 (m2_library.h). */
+      labels: { up: 'Lean forward', down: 'Lean back', left: 'Swing left', right: 'Swing right',
+                b1: 'Select 2', b2: 'Select 3', b3: 'Zoom in', b4: 'Zoom out' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'セガスキースーパーG',
+          blurb: '筐体の上に立って滑るダウンヒル・スキー。体を振り、傾けて旗門を抜けろ。MAME と同じく、DRIVE BOARD TROUBLE の画面で止まります。',
+          profiles: { skisuprg: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>skisuprg.zip</code>（セガスキースーパーG）',
+          labels: { up: '前に傾ける', down: '後ろに傾ける', left: '左に振る', right: '右に振る',
+                    b1: 'セレクト 2', b2: 'セレクト 3', b3: 'ズームイン', b4: 'ズームアウト' },
+        },
+      },
+    },
+    segawski: {
+      title: 'Sega Water Ski',
+      year: 1997, board: 'Model 2C-CRX', colors: ['#1dc8d8', '#0b2c3c'],
+      blurb: 'Water skiing behind a boat: slide side to side, take the ramps and pitch into tricks.',
+      profiles: [
+        { id: 'segawski', name: 'Rev A', about: 'Japan, Revision A' },
+      ],
+      romHint: 'Your <code>segawski.zip</code> (Sega Water Ski)',
+      /* MAME's INPUT_PORTS(segawski): the slide on a pot, B1 Set, B2 Select
+       * up, B3 / B4 pitch; START is Select down. */
+      labels: { up: 'Unused', down: 'Unused', left: 'Slide left', right: 'Slide right',
+                b1: 'Set', b2: 'Select up', b3: 'Pitch left', b4: 'Pitch right' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'セガウォータースキー',
+          blurb: 'ボートに引かれて水上スキー。左右にスライドし、ジャンプ台を越え、体をひねってトリックを決めろ。',
+          profiles: { segawski: { name: 'リビジョン A', about: '日本、リビジョン A' } },
+          romHint: 'お持ちの <code>segawski.zip</code>（セガウォータースキー）',
+          labels: { up: '未使用', down: '未使用', left: '左にスライド', right: '右にスライド',
+                    b1: '決定', b2: '選択を上へ', b3: '左にひねる', b4: '右にひねる' },
+        },
+      },
+    },
+    waverunr: {
+      title: 'Wave Runner',
+      year: 1996, board: 'Model 2C-CRX', colors: ['#d8d81d', '#0b2c4c'],
+      blurb: 'A personal watercraft race around the bays and under the bridges, on a handlebar you steer and lean.',
+      profiles: [
+        { id: 'waverunr', name: 'Rev A', about: 'Japan, Revision A' },
+      ],
+      romHint: 'Your <code>waverunr.zip</code> (Wave Runner)',
+      /* MAME's INPUT_PORTS(waverunr): the handle bar and roll LEFT / RIGHT,
+       * the pitch UP / DOWN, B1 the throttle, B3 the view. */
+      labels: { up: 'Lean forward', down: 'Lean back', left: 'Steer left', right: 'Steer right',
+                b1: 'Throttle', b2: 'Unused', b3: 'View', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'ウェーブランナー',
+          blurb: '湾をめぐり、橋の下をくぐる水上バイク・レース。ハンドルで曲がり、体を傾けて。',
+          profiles: { waverunr: { name: 'リビジョン A', about: '日本、リビジョン A' } },
+          romHint: 'お持ちの <code>waverunr.zip</code>（ウェーブランナー）',
+          labels: { up: '前に傾ける', down: '後ろに傾ける', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'スロットル', b2: '未使用', b3: '視点', b4: '未使用' },
+        },
+      },
+    },
+    topskatr: {
+      title: 'Top Skater',
+      year: 1997, board: 'Model 2C-CRX', colors: ['#d81d8c', '#2c0b1e'],
+      blurb: 'Skateboarding on a deck you stand on: curve, slide and jump through three courses, music on its own MPEG board.',
+      /* m2_library.h: the Export Revision A first; the others are clones of topskatr.zip. */
+      profiles: [
+        { id: 'topskatr', name: 'Export', about: 'Export, Revision A' },
+        { id: 'topskatru', name: 'USA', about: 'USA, Revision A' },
+        { id: 'topskatruo', name: 'USA first', about: 'USA, the first release' },
+        { id: 'topskatrj', name: 'Japan', about: 'Japan' },
+      ],
+      romHint: 'Your <code>topskatr.zip</code> (Export), or <code>topskatu.zip</code>, <code>topskatruo.zip</code> or <code>topskatrj.zip</code> and its parent <code>topskatr.zip</code>, picked together',
+      /* MAME's INPUT_PORTS(topskatr): curving LEFT / RIGHT, the slide UP /
+       * DOWN, B1 / B2 jump front / tail, B3 / B4 select left / right. */
+      labels: { up: 'Slide forward', down: 'Slide back', left: 'Curve left', right: 'Curve right',
+                b1: 'Jump (front)', b2: 'Jump (tail)', b3: 'Select left', b4: 'Select right' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'トップスケーター',
+          blurb: 'ボードに乗って滑るスケートボード。3 つのコースをカーブし、スライドし、ジャンプしろ。音楽は専用の MPEG ボードから。',
+          profiles: { topskatr: { name: '海外', about: '海外、リビジョン A' },
+                      topskatru: { name: '北米', about: '北米、リビジョン A' },
+                      topskatruo: { name: '北米 初期版', about: '北米、最初のリリース' },
+                      topskatrj: { name: '日本', about: '日本' } },
+          romHint: 'お持ちの <code>topskatr.zip</code>（海外）、または <code>topskatu.zip</code>、<code>topskatruo.zip</code>、<code>topskatrj.zip</code> と親セットの <code>topskatr.zip</code> を一緒に',
+          labels: { up: '前にスライド', down: '後ろにスライド', left: '左にカーブ', right: '右にカーブ',
+                    b1: 'ジャンプ（前）', b2: 'ジャンプ（後ろ）', b3: 'セレクト左', b4: 'セレクト右' },
+        },
+      },
+    },
+    bel: {
+      title: 'Behind Enemy Lines',
+      year: 1998, board: 'Model 2C-CRX', colors: ['#6a7a3c', '#161c0b'],
+      blurb: 'Soldiers behind the lines with a mounted gun each: the stick walks the sight, the trigger fires, a button sends a missile.',
+      profiles: [
+        { id: 'bel', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>bel.zip</code> (Behind Enemy Lines)',
+      /* Gunblade NY's gun sticks (m2_library.h M2LIB_GUNSTICKS), B2 the missile. */
+      labels: { up: 'Aim up', down: 'Aim down', left: 'Aim left', right: 'Aim right',
+                b1: 'Trigger', b2: 'Missile', b3: 'Unused', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'ビハインド・エネミー・ラインズ',
+          blurb: '敵陣の奥深くで戦う兵士たち、銃座は一人に一つ。スティックで照準を動かし、トリガーで撃ち、ボタンでミサイルを放て。',
+          profiles: { bel: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>bel.zip</code>（ビハインド・エネミー・ラインズ）',
+          labels: { up: '照準を上に', down: '照準を下に', left: '照準を左に', right: '照準を右に',
+                    b1: 'トリガー', b2: 'ミサイル', b3: '未使用', b4: '未使用' },
+        },
+      },
+    },
   };
   const HOSTS = { play: 'sfight', srally: 'srallyc' };
   /* ?game= names that are another game's set: { game, profile }. */

@@ -15,9 +15,12 @@
 /* The web build (M2HLE_WEB) registers Sonic the Fighters, which it exists to
  * play over RPCN, Sega Rally, Virtual-On, Dynamite Cop, Fighting Vipers,
  * The House of the Dead, Daytona USA, Virtua Fighter 2, Dead or Alive and
- * Air Walkers, Power Sled, Virtua Cop, Last Bronx, Pilot Kids and Motor Raid, with the clones of #1286 (the page's ?game=, web/site/m2hle-games.js). Any other set is only
- * download size: left out, not hidden. See WEB-PORT.md. Both STF profiles are there, since
- * each is its own lobby space. */
+ * Air Walkers, Power Sled, Virtua Cop, Last Bronx, Pilot Kids, Motor Raid,
+ * Desert Tank and the rest of MAME's library (m2_library.h, on the site since
+ * Pinboard #1909), with the clones of #1286 (the page's ?game=,
+ * web/site/m2hle-games.js). The homebrew is left out, not hidden: a smaller
+ * binary. See WEB-PORT.md. Both STF profiles are there, since each is its own
+ * lobby space. */
 #include "srallyc.h"
 #include "vonj.h"
 #include "dynamcop.h"
@@ -33,9 +36,9 @@
 #include "lastbrnx.h"  /* runs since Pinboard #1517, on the site since #1535 */
 #include "pltkids.h"   /* runs since Pinboard #1538, on the site too */
 #include "motoraid.h"  /* runs since Pinboard #1627, on the site since #1628 */
-#include "desert.h"    /* runs since Pinboard #1890 */
+#include "desert.h"    /* runs since Pinboard #1890, on the site since #1908 */
+#include "m2_library.h" /* the rest of MAME's library, Pinboard #1872, on the site since #1909 */
 #ifndef M2HLE_WEB
-#include "m2_library.h" /* the rest of MAME's library, Pinboard #1872 */
 #include "m2snake.h"
 #include "sfight_homebrew.h"
 #endif
@@ -88,7 +91,6 @@ const game_profile_t *const g_profiles[] = {
     &daytonat_profile,
     &daytonata_profile,
     &daytonagtx_profile,
-#ifndef M2HLE_WEB
     &manxtt_profile,
     &skytargt_profile,
     &vcop2_profile,
@@ -113,6 +115,7 @@ const game_profile_t *const g_profiles[] = {
     &topskatruo_profile,
     &topskatrj_profile,
     &bel_profile,
+#ifndef M2HLE_WEB
     &m2snake_profile,
     &sfight_homebrew_profile,
 #endif

@@ -361,6 +361,12 @@ static inline void dsb2_load(const uint8_t *rom, size_t rom_size, const uint8_t 
     /* A 68000 program starts with its stack and reset PC (big-endian here). */
     uint32_t pc = d->present ? (uint32_t)rom[4] << 24 | (uint32_t)rom[5] << 16 | (uint32_t)rom[6] << 8 | rom[7] : 0;
     d->z80 = d->present && ((pc & 1u) || pc >= DSB2_ROM_SIZE);
+    /* dsb2_run_cpu steps with m68k_step_core, which wants the 68000's timing
+     * tables built. The sound board's loop builds them, but with its driver in
+     * C (sound_hle.h, the default) that loop never runs: every instruction then
+     * took 0 cycles, a taken branch -2, the clock wrapped below zero and the
+     * 1 kHz timer's catch-up never ended (Top Skater hung at frame 3, #1909). */
+    if (d->present && !d->z80) m68k_tables_init();
     dsb2_reset();
     if (d->present && d->z80)
         LOG_INFO("dsbz80: Z80 MPEG board, program %u KB, data %u MB",

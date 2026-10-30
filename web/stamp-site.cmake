@@ -39,7 +39,16 @@ foreach(game "sfight|Sonic the Fighters" "srallyc|Sega Rally Championship"
              "daytona|Daytona USA" "vcop|Virtua Cop" "vf2|Virtua Fighter 2"
              "doa|Dead or Alive" "airwlkrs|Air Walkers"
              "powsled|Power Sled" "lastbrnx|Last Bronx"
-             "pltkids|Pilot Kids" "motoraid|Motor Raid")
+             "pltkids|Pilot Kids" "motoraid|Motor Raid"
+             "desert|Desert Tank" "vcop2|Virtua Cop 2"
+             "vstriker|Virtua Striker" "manxtt|Manx TT Superbike"
+             "skytargt|Sky Target" "zerogun|Zero Gunner"
+             "dynabb|Dynamite Baseball" "gunblade|Gunblade NY"
+             "indy500|INDY 500" "sgt24h|Super GT 24h" "overrev|Over Rev"
+             "stcc|Sega Touring Car Championship"
+             "skisuprg|Sega Ski Super G" "segawski|Sega Water Ski"
+             "waverunr|Wave Runner" "topskatr|Top Skater"
+             "bel|Behind Enemy Lines")
   string(REPLACE "|" ";" game "${game}")
   list(GET game 0 id)
   list(GET game 1 title)
