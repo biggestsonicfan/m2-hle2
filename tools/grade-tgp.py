@@ -30,10 +30,16 @@ modelled on (SLPM-62703 addresses):
 Matrices are col0, col1, col2, T, as the TGP's 0x26 replies them.
 Prints, per command with replies, the median, 99th percentile and largest error
 relative to 1 + |value|; exits 1 when one is over --limit.
+
+0x58 is printed but not graded. Its root is the TGP program's Newton step,
+which on the cabinet comes out up to 1.8% longer than the PS2 port's sqrtf:
+making ours match sqrtf (Pinboard #661) slowed the rival cars by 11% against
+MAME and a real cabinet (Pinboard #1906).
 """
 import argparse, collections, math, struct, sys
 
 LOOP_PCS = (0x70, 0x77)
+UNGRADED = {0x58}                  # the cabinet's root is not sqrtf (see above)
 
 
 def f32(u):
@@ -169,10 +175,11 @@ def main():
     for op in sorted(errs):
         es = sorted(x[0] for x in errs[op])
         n = len(es)
-        over = es[-1] > args.limit
+        over = es[-1] > args.limit and op not in UNGRADED
         bad |= over
         print('op %02X  n=%6d  median %.3g  p99 %.3g  max %.3g%s'
-              % (op, n, es[n // 2], es[int(n * .99)], es[-1], '  OVER' if over else ''))
+              % (op, n, es[n // 2], es[int(n * .99)], es[-1],
+                 '  OVER' if over else '  (not graded)' if op in UNGRADED else ''))
     if args.show:
         for e, fr, got, want in sorted(errs[int(args.show, 16)], reverse=True)[:12]:
             print('frame %d  err %.3g  got %s  want %s' % (fr, e, ['%.7g' % x for x in got], ['%.7g' % x for x in want]))

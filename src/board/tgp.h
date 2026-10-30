@@ -70,10 +70,10 @@ typedef struct {
     uint8_t  r, rpc, c0, c1, sft, vsm;
     bool     gpio0, gpio1, gpio2, gpio3;
     bool     stall;                 /* this instruction read an empty FIFO */
-    bool     d_moved;               /* this instruction's transfer wrote d */
-    bool     d_late;                /* d_late_v is still on its way to d, */
-    uint32_t d_late_v;
-    uint64_t d_late_at;             /* moved by instruction number d_late_at */
+    /* Unused: kept so a savestate's TGP entry keeps its size (Pinboard #1906). */
+    bool     reserved_b0, reserved_b1;
+    uint32_t reserved_w;
+    uint64_t reserved_q;
     bool     halted;                /* held by the board: before boot, during upload */
 
     uint32_t prog[TGP_PROG_WORDS];
@@ -345,7 +345,6 @@ static inline void tgp_write_reg(uint32_t r, uint32_t v) {
     if (r >= 0x20u && r < 0x30u) { tgp_rf_wr(r & 0x1Fu, v); return; }
     uint32_t part;
     uint32_t *f = tgp_fp_reg(r, &part);
-    if (f == &g_tgp.d) g_tgp.d_moved = true;
     if (f) { *f = part == 0 ? v : part == 1 ? tgp_set_exp(*f, v) : tgp_set_mant(*f, v); return; }
     uint16_t *h = tgp_u16_reg(r);
     if (h) { *h = (uint16_t)v; return; }
@@ -478,31 +477,17 @@ static inline void tgp_alu_st(void) {
     g_tgp.st = (g_tgp.st & ~g_tgp.alu_stmask) | g_tgp.alu_stset;
 }
 
-/* A transfer into d that a float op's result overtook (tgp_alu_d) lands
- * after the next instruction's transfer has read it. */
-static inline void tgp_d_land(void) {
-    if (!g_tgp.d_late || g_tgp.d_late_at == g_tgp.insns) return;
-    g_tgp.d = g_tgp.d_late_v;
-    g_tgp.d_late = false;
-}
-
 /* A float result for d. When the same instruction also moved a word into d,
- * the next instruction's transfer still reads the result, and then d takes
- * the moved word: the TGP's square root (srallyc's helper at 0x1AB) moves x
- * into d beside the op that makes its seed, reads the seed out of d and
- * divides x by it. MAME lets the result win outright, and every root came
- * out up to 1.8% long against the PS2 port's sqrtf (Pinboard #661). */
+ * the result wins, as in MAME. Sega Rally's square root (its TGP helper at
+ * 0x1AB) moves x into d beside the op that makes its seed, so its roots come
+ * out up to 1.8% longer than the PS2 port's sqrtf. They are the cabinet's:
+ * with the moved word kept (Pinboard #661) the rival cars drove 11% slower
+ * than in MAME and on a real cabinet (Pinboard #1906). */
 static inline void tgp_alu_d(uint32_t r) {
-    if (g_tgp.d_moved) {
-        g_tgp.d_late_v = g_tgp.d;
-        g_tgp.d_late_at = g_tgp.insns;
-        g_tgp.d_late = true;
-    }
     g_tgp.d = r;
 }
 
 static inline void tgp_alu_post_1(uint32_t alu) {
-    tgp_d_land();
     switch (alu) {
     case 0x01: case 0x02: case 0x03: case 0x04:
     case 0x0E: case 0x0F: case 0x16: case 0x17:
@@ -823,11 +808,9 @@ static bool tgp_step(void) {
     t->ppc = t->pc;
     uint32_t op = tgp_prog_rd(t->pc++);
     t->stall = false;
-    t->d_moved = false;
     t->insns++;
 
     tgp_step_t k = tgp_dispatch(op);
-    if (k != TGP_STEP_STALL) tgp_d_land();
     switch (k) {
     case TGP_STEP_REP:
         return true;

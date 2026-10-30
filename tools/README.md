@@ -1532,15 +1532,19 @@ each command starts:
     det_digest $ROMS_DIR/srallyc.zip --profile srallyc --frames 3000 \
         --cop 1:3000:/dev/shm/tgp.log --out /dev/shm/digest.txt
 
-It grades 0x26 (read matrix), 0x2C (transform a point), 0x2F (normalise), 0x43 (a vector slot),
-0x58 (distance) and 0x5C (edge cross), and through them every matrix and slot op. The script's
+It grades 0x26 (read matrix), 0x2C (transform a point), 0x2F (normalise), 0x43 (a vector slot)
+and 0x5C (edge cross), and through them every matrix and slot op. 0x58 (distance) is printed but
+not graded (below). The script's
 header lists the PS2 function each is modelled on. It exits 1 when an error is over `--limit`
 (1e-3), relative to 1 + |value|.
 
-*What it found (Pinboard #661):* every 0x58 distance was 0.01-1.8% long. The TGP's square root
-moves x into d beside the op that makes its first guess, and with MAME's order the guess was lost
-(tgp.h, `tgp_alu_d`). Over 3000 frames of attract the largest error is now 1.7e-7 for 0x58
-and under 1e-4 for every command (0x5C's worst is a difference of near-equal products).
+*What it found, and why 0x58 is not graded (Pinboard #661, #1906):* every 0x58 distance is
+0.01-1.8% longer than the PS2 port's `sqrtf`. The TGP's square root moves x into d beside the op
+that makes its first guess, and with MAME's order the guess is lost (tgp.h, `tgp_alu_d`). #661
+kept the moved word and matched `sqrtf` to 1.7e-7, but then the rival cars drove 11% slower than in
+MAME and on a real cabinet (#1906): the cabinet's roots are the long ones, and the PS2 port's C is
+not its maths here. Over 3000 frames of attract every graded command is under 1e-4 (0x5C's worst
+is a difference of near-equal products).
 
 ## Each TGP op's argument and reply counts (`tgp-ops.py`)
 
