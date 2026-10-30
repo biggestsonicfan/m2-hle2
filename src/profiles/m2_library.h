@@ -162,7 +162,9 @@ static inline int m2lib_load(romset_t *rs, const char *child, const char *parent
 
 /* ---- Chip lists (tools/mame_rom_recipe.py over MAME's model2.cpp) -------- */
 
-/* MAME's M1AUDIO_CPU_REGION, M1AUDIO_MPCM1_REGION, M1AUDIO_MPCM2_REGION, cpu4, eeprom: no board here reads them. */
+/* MAME's cpu4 and eeprom: no board here reads them. The Deluxe cabinet's Model 1
+ * sound board (M1AUDIO_CPU_REGION, M1AUDIO_MPCM1_REGION) is board/m1dx.h; its
+ * second MultiPCM's region is empty in MAME and stays so. */
 static const rom_part_t manxtt_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-18822d.12", 0x4f435990, "epr-18823d.13", 0xb8eddb5c),
     ROM_PAIR32(ROM_MAINCPU, 0x0040000, "epr-18824d.14", 0xaca9f61f, "epr-18825d.15", 0x5a1d7799),
@@ -184,8 +186,10 @@ static const rom_part_t manxtt_parts[] = {
     ROM_SWAP16(ROM_SAMPLES, 0x0400000, "mpr-18765.36", 0xca4a803c),
     ROM_SWAP16(ROM_SAMPLES, 0x0600000, "mpr-18766.37", 0xe41892ea),
     ROM_PAIR32(ROM_TGP_TABLES, 0x0000000, "opr-14742a.45", 0x90c6b117, "opr-14743a.46", 0xae7f446b),
+    ROM_SWAP16(ROM_M1CPU, 0x0000000, "epr-18742.7", 0x1b78da74),
+    ROM_BYTES(ROM_M1PCM, 0x0000000, "mpr-18743.32", 0x17e84e15),
 };
-#define MANXTT_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2400000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x400000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000, [ROM_TGP_TABLES] = 0x40000
+#define MANXTT_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2400000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x400000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000, [ROM_TGP_TABLES] = 0x40000, [ROM_M1CPU] = 0x40000, [ROM_M1PCM] = 0x200000
 
 /* Revision C, MAME's Twin set: its own program and the Twin's sound program
  * and first sample ROM. MAME's cpu4 is left out; its eeprom (the settings,
@@ -966,8 +970,9 @@ M2LIB_SET(bel,       BEL_SIZES,       BOARD_MODEL2C_CRX, 0)
         .input = in, .quirks = { M2LIB_BASE, __VA_ARGS__ }, \
     }
 
-/* Model 2A. Manx TT is MAME's manxttdx machine: the DX's Model 1 sound board
- * (its second voice) is not here, the CRX's own sound is.
+/* Model 2A. Manx TT is MAME's manxttdx machine: the CRX's SCSP board, and
+ * beside it the Deluxe cabinet's Model 1 sound board (board/m1dx.h), which
+ * plays only in a DELUXE cabinet (Pinboard #1928).
  *
  * The settings (the EEPROM, mirrored at 0x514050: a CRC-CCITT word over the
  * next 0x36 bytes, routine 0x6B9B0) hold CABINET TYPE at 0x51405A, 0 DELUXE
@@ -977,7 +982,8 @@ M2LIB_SET(bel,       BEL_SIZES,       BOARD_MODEL2C_CRX, 0)
  * fails the CRC (0x3230) and takes the factory settings (0x2FF0); at 0x3000,
  * just before `call 0x2E80` signs and writes them, factory_twin makes the
  * default TWIN. TEST MODE > GAME ASSIGNMENTS still sets DELUXE for the rest
- * of the power-on. (Pinboard #1926) */
+ * of the power-on; leaving TEST then goes past the slider check, and the
+ * second sound board plays. (Pinboard #1926, #1928) */
 #define MANXTT_CABINET 0x0051405Au
 
 static int manxtt_hook_factory_twin(i960_cpu_t *cpu, memory_bus_t *bus) {

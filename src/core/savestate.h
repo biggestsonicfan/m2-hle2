@@ -469,6 +469,13 @@ static inline bool savestate__add_sound(mz_zip_archive *zp, mz_uint level) {
         ok = savestate__add(zp, level, "DSB2", d, sizeof *d);
         free(d);
     }
+    if (ok && g_m1dx.present) {                        /* Manx TT's Deluxe sound board */
+        m1dx_save_t *d = (m1dx_save_t *)malloc(sizeof *d);
+        if (!d) return false;
+        m1dx_save(d);
+        ok = savestate__add(zp, level, "M1DX", d, sizeof *d);
+        free(d);
+    }
     return ok;
 }
 
@@ -716,6 +723,8 @@ typedef struct {
     bool               have_ssyn;          /* SNDSYNTH: a state from before it has none (the chip played) */
     dsb2_save_t       *dsb2;
     bool               have_dsb2;          /* DSB2: a set without the board, or a state from before it */
+    m1dx_save_t       *m1dx;
+    bool               have_m1dx;          /* M1DX: likewise */
     savestate_emu_t    emu;
     savestate_hle_t    hle;
     uint8_t           *extra[SAVESTATE_EXTRA_MAX];
@@ -730,7 +739,9 @@ static inline bool savestate__scratch_alloc(savestate_scratch_t *n) {
     n->sram  = (uint8_t *)malloc(sizeof g_sound.ram);
     n->scsp  = (scsp_t *)malloc(sizeof *n->scsp);
     n->dsb2  = (dsb2_save_t *)malloc(sizeof *n->dsb2);
-    if (!n->cpu || !n->sharc || !n->cop || !n->snaps || !n->glive || !n->sram || !n->scsp || !n->dsb2) return false;
+    n->m1dx  = (m1dx_save_t *)malloc(sizeof *n->m1dx);
+    if (!n->cpu || !n->sharc || !n->cop || !n->snaps || !n->glive || !n->sram || !n->scsp || !n->dsb2 || !n->m1dx)
+        return false;
     for (size_t i = 0; i < SAVESTATE_NBUFS; i++)
         if (!(n->bufs[i] = (uint8_t *)malloc(SAVESTATE_BUFS[i].size))) return false;
     for (int i = 0; i < g_savestate_extra_n; i++)
@@ -740,6 +751,7 @@ static inline bool savestate__scratch_alloc(savestate_scratch_t *n) {
 
 static inline void savestate__scratch_free(savestate_scratch_t *n) {
     free(n->cpu); free(n->sharc); free(n->cop); free(n->snaps); free(n->glive); free(n->sram); free(n->scsp); free(n->dsb2);
+    free(n->m1dx);
     for (size_t i = 0; i < SAVESTATE_NBUFS; i++) free(n->bufs[i]);
     for (int i = 0; i < SAVESTATE_EXTRA_MAX; i++) free(n->extra[i]);
 }
@@ -757,6 +769,8 @@ static inline void savestate__scratch_read_late(mz_zip_archive *zp, savestate_sc
                 && savestate__get(zp, "SNDSYNTH", &n->ssyn, sizeof n->ssyn);
     n->have_dsb2 = mz_zip_reader_locate_file(zp, "DSB2", NULL, 0) >= 0
                 && savestate__get(zp, "DSB2", n->dsb2, sizeof *n->dsb2);
+    n->have_m1dx = mz_zip_reader_locate_file(zp, "M1DX", NULL, 0) >= 0
+                && savestate__get(zp, "M1DX", n->m1dx, sizeof *n->m1dx);
 }
 
 /* Every board entry into scratch; false if one is missing or the wrong size. */
@@ -831,6 +845,8 @@ static inline void savestate__scratch_commit(const savestate_scratch_t *n, i960_
     else              memset(&g_ssyn, 0, sizeof g_ssyn);
     if (n->have_dsb2) dsb2_restore(n->dsb2);
     else              dsb2_reset();                    /* boots again: the music restarts with the next cue */
+    if (n->have_m1dx) m1dx_restore(n->m1dx);
+    else              m1dx_reset();
     savestate_sound_put(&n->snd);
 
     savestate_hle_set(&n->hle);
