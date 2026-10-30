@@ -10,6 +10,7 @@
  * and that draws the board into its target; the window then shows the
  * targets in a grid, the one in focus framed. A click on a board, or
  * Ctrl+1..8, gives it the focus: the keyboard, the pads and the sound.
+ * Emulation > Boards picks the count from the window, as `--boards` does.
  *
  * The board frames are paced here, at 60 a second of the host's clock, at
  * most one round a host frame (the emu thread only naps meanwhile).
@@ -147,6 +148,41 @@ static inline void multi_view_set_loaded(void) {
     g_mview.started = false;
 }
 
+/* The menu's choice of 2..8: the boards running stop, and n of them start
+ * from power-on at the next host frame. */
+static inline void multi_view_want(emu_thread_ctx_t *ctx, int n) {
+    emu_mutex_lock(&ctx->mutex);
+    emu_multi_stop(ctx);
+    emu_mutex_unlock(&ctx->mutex);
+    multi_view_set_loaded();
+    g_multi_want = n;
+}
+
+/* Emulation > Boards: one board, or 2..the most the loaded game takes (a
+ * linked game's ring, else EMU_MULTI_MAX). Returns 0 when One board was
+ * picked: the frontend loads the set again, as it starts alone (Power
+ * Sled's ride has its Main beside it then, SOLO); -1 otherwise. */
+static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
+    if (!igBeginMenuEx("Boards", loaded && g_active_profile)) return -1;
+    const game_profile_t *p = g_active_profile;
+    int ring = emu_multi_count(p, EMU_MULTI_MAX);
+    bool linked = p->ring_role || p->link_role;
+    int now = emu_multi_on() ? g_multi.n : g_multi_want ? emu_multi_count(p, g_multi_want) : 1;
+    int picked = -1;
+    if (igMenuItemEx("One board", NULL, now == 1, true) && now != 1) { g_multi_want = 0; picked = 0; }
+    for (int n = 2; n <= ring; n++) {
+        char label[48];
+        snprintf(label, sizeof label, "%d boards%s", n, n == ring && linked ? " (all cabinets)" : "");
+        if (igMenuItemEx(label, NULL, now == n, true) && now != n) multi_view_want(ctx, n);
+    }
+    igSeparator();
+    igTextDisabled("%s", linked ? "Linked in a ring, board 1 the MASTER" : "Side by side, not linked");
+    igTextDisabled("A new count starts every board from power-on");
+    igTextDisabled("Click a board or Ctrl+1..8 to play it");
+    igEndMenu();
+    return picked;
+}
+
 /* Once a host frame, before any pass: the boards made when due, then the
  * rounds owed, each board drawn into its target. True while the boards run:
  * the window then draws multi_view_draw, not its one picture. */
@@ -189,6 +225,16 @@ static inline int multi_view__cols(int n, int w, int h, float a) {
     return best;
 }
 
+/* Board b's label: the profile's name for that cabinet of the ring, or its
+ * role; nothing unlinked. */
+static inline const char *multi_view__name(int b) {
+    if (!g_multi.linked) return "";
+    const char *const *names = g_active_profile ? g_active_profile->ring_names : NULL;
+    for (int i = 0; names && names[i]; i++)
+        if (i == b) return names[i];
+    return b ? "SLAVE" : "MASTER";
+}
+
 /* The boards' pictures in a grid over ox, oy, w, h of the swapchain pass,
  * each letterboxed in its cell, and their numbers over them. */
 static inline void multi_view_draw(int ox, int oy, int w, int h) {
@@ -210,9 +256,8 @@ static inline void multi_view_draw(int ox, int oy, int w, int h) {
         ImVec2 p1 = { (float)(pic.x + pic.w) / dpi, (float)(pic.y + pic.h) / dpi };
         bool mine = b == g_multi.focus;
         if (mine) ImDrawList_AddRectEx(dl, p0, p1, 0xFF30D0FFu, 0.0f, 3.0f, 0);
-        char label[48];
-        snprintf(label, sizeof label, "%d%s%s", b + 1,
-                 g_multi.linked ? (b ? " SLAVE" : " MASTER") : "", mine ? "  (keys, sound)" : "");
+        char label[64];
+        snprintf(label, sizeof label, "%d %s%s", b + 1, multi_view__name(b), mine ? "  (keys, sound)" : "");
         ImVec2 t = { p0.x + 6.0f, p0.y + 4.0f };
         ImDrawList_AddTextImFontPtr(dl, igGetFont(), igGetFontSize(), (ImVec2){ t.x + 1, t.y + 1 }, 0xC0000000u, label);
         ImDrawList_AddTextImFontPtr(dl, igGetFont(), igGetFontSize(), t, mine ? 0xFF30D0FFu : 0xFFE0E0E0u, label);

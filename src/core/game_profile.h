@@ -444,6 +444,15 @@ typedef struct game_profile {
      * differ (Power Sled's ride colours). NULL: the slaves are all alike. */
     void              (*ring_seat)(struct memory_bus *bus, int seat);
 
+    /* The MASTER's operator in a ring (`--boards`), when it is not link_solo's:
+     * Power Sled's waits for a rider between races, so the rides play their
+     * attract. Same contract as link_solo. NULL: link_solo. */
+    uint32_t          (*ring_op)(struct memory_bus *bus, uint32_t held);
+
+    /* What each cabinet of the ring is, for the window's labels (board 0 the
+     * MASTER, then the seats); NULL or a short list: MASTER / SLAVE. */
+    const char *const  *ring_names;
+
     /* A GGPO match plays the link: both cabinets on each machine, one player
      * on each (core/emu_twin.h). A role outside backup RAM (Power Sled's unit,
      * the program's bytes) must be a savestate extra, as it swaps with the

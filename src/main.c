@@ -333,8 +333,11 @@ static void scripts_shutdown(void) {
     m2lua_unload();
 }
 
+static char s_loaded_zip[512];   /* the set loaded, for Emulation > Boards > One board */
+
 static void load_active_profile(const char *primary_zip) {
     if (!select_profile_for_zip(primary_zip)) return;
+    if (primary_zip != s_loaded_zip) snprintf(s_loaded_zip, sizeof s_loaded_zip, "%s", primary_zip);
     if (!g_active_profile) { LOG_ERROR("no active profile selected"); return; }
 
     char parent_zip[512] = {0};
@@ -791,6 +794,12 @@ static void menu_emulation(void) {
     if (igMenuItemEx("Step",     "F5", false, can_step)) emu_step(&state.emu, 1);
     if (igMenuItemEx("Step 10",  "F6", false, can_step)) emu_step(&state.emu, 10);
     if (igMenuItemEx("Step 100", "F7", false, can_step)) emu_step(&state.emu, 100);
+    igSeparator();
+    int boards = multi_view_menu(&state.emu, state.romset.loaded);
+    if (boards == 0 && s_loaded_zip[0]) {   /* one board: the set as it starts alone */
+        load_active_profile(s_loaded_zip);
+        if (running && state.romset.loaded) emu_run(&state.emu);
+    }
     igSeparator();
     igMenuItemBoolPtr("Break on warning", NULL, (bool *)&g_log.break_on_warn, true);
     igEndMenu();
