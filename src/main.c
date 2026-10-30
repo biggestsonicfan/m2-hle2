@@ -78,6 +78,9 @@
 #include "lg4ff.h"            /* a Logitech G25 without Logitech's software (#1370) */
 #endif
 #include "controls_window.h"  /* the Controls window: devices and keys, per profile (#1147) */
+#if M2HLE_PADS
+#include "multi_pads.h"       /* --boards N: each pad plays a board of its own (#1914) */
+#endif
 #if defined(__linux__)
 #include <unistd.h>          /* readlink: scripts/ beside the executable */
 #endif
@@ -1024,6 +1027,7 @@ static void pads_frame(void) {
     SDL_Event ev;
     bool changed = false;
     while (SDL_PollEvent(&ev)) sdl_pads_event(&ev, &changed);
+    if (multi_pads_switch()) changed = true;   /* --boards: the pads to their boards, or back */
     if (!g_pads_focused) return;
     if (changed) pad_refresh();
     ffb_update();
@@ -1605,6 +1609,9 @@ static void draw_windows(void) {
     if (state.show_netplay)     netplay_window_draw(&state.show_netplay);
     if (state.show_lan)         lan_window_draw(&state.show_lan);
     controls_window_draw(&state.show_controls, pads_running());
+#if M2HLE_PADS
+    multi_pads_window(pads_running());
+#endif
     netplay_empty_room_overlay();
     netplay_vs_again_overlay();
     if (state.show_demo)        igShowDemoWindow(&state.show_demo);
@@ -1808,7 +1815,11 @@ static void frame(void) {
      * highlights track live state without tearing. */
     if (state.emu_started) emu_update_snapshots(&state.emu);
 
-    /* --boards N: the rounds owed, each board drawn into its own target. */
+    /* --boards N: the rounds owed, each board drawn into its own target,
+     * each played by its own pads. */
+#if M2HLE_PADS
+    multi_pads_frame();
+#endif
     const bool multi = multi_view_frame(&state.emu, &state.bus, &state.romset, &state.geo3d,
                                         state.emu_started && emu_is_running(&state.emu));
 

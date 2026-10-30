@@ -9,7 +9,8 @@
  * calls multi_view__drawn with each board in the bus just after its frame,
  * and that draws the board into its target; the window then shows the
  * targets in a grid, the one in focus framed. A click on a board, or
- * Ctrl+1..8, gives it the focus: the keyboard, the pads and the sound.
+ * Ctrl+1..8, gives it the focus: the keyboard and the sound. Each gamepad
+ * and wheel plays a board of its own (multi_pads.h, Pinboard #1914).
  * Emulation > Boards picks the count from the window, as `--boards` does.
  *
  * The board frames are paced here, at 60 a second of the host's clock, at
@@ -53,6 +54,8 @@ static struct {
     sg_pass_action     action;
     struct { int x, y, w, h; } cell[EMU_MULTI_MAX];
     int                cells;
+    char               seat[EMU_MULTI_MAX][48];   /* the pads that play each board (multi_pads.h) */
+    bool               show_pads;                 /* the Board controllers window */
 } g_mview;
 
 static inline bool multi_view__make(multi_view_board_t *v, const geo3d_state_t *base) {
@@ -178,7 +181,8 @@ static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
     igSeparator();
     igTextDisabled("%s", linked ? "Linked in a ring, board 1 the MASTER" : "Side by side, not linked");
     igTextDisabled("A new count starts every board from power-on");
-    igTextDisabled("Click a board or Ctrl+1..8 to play it");
+    igTextDisabled("Click a board or Ctrl+1..8: the keyboard plays it");
+    igMenuItemBoolPtr("Controllers...", NULL, &g_mview.show_pads, true);
     igEndMenu();
     return picked;
 }
@@ -256,8 +260,11 @@ static inline void multi_view_draw(int ox, int oy, int w, int h) {
         ImVec2 p1 = { (float)(pic.x + pic.w) / dpi, (float)(pic.y + pic.h) / dpi };
         bool mine = b == g_multi.focus;
         if (mine) ImDrawList_AddRectEx(dl, p0, p1, 0xFF30D0FFu, 0.0f, 3.0f, 0);
-        char label[64];
-        snprintf(label, sizeof label, "%d %s%s", b + 1, multi_view__name(b), mine ? "  (keys, sound)" : "");
+        else if (g_multi.pad_held[b])   /* a pad's button held: which board it plays */
+            ImDrawList_AddRectEx(dl, p0, p1, 0xFF40FF60u, 0.0f, 2.0f, 0);
+        char label[128];
+        snprintf(label, sizeof label, "%d %s%s%s%s", b + 1, multi_view__name(b),
+                 g_mview.seat[b][0] ? "  " : "", g_mview.seat[b], mine ? "  (keys, sound)" : "");
         ImVec2 t = { p0.x + 6.0f, p0.y + 4.0f };
         ImDrawList_AddTextImFontPtr(dl, igGetFont(), igGetFontSize(), (ImVec2){ t.x + 1, t.y + 1 }, 0xC0000000u, label);
         ImDrawList_AddTextImFontPtr(dl, igGetFont(), igGetFontSize(), t, mine ? 0xFF30D0FFu : 0xFFE0E0E0u, label);

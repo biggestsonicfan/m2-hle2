@@ -64,7 +64,8 @@ static struct {
     bool              linked;
     size_t            board;       /* one board's bytes, g_rollback.size */
     uint8_t          *slot[EMU_MULTI_MAX];
-    uint32_t          held[EMU_MULTI_MAX];   /* the keys of a board not in focus */
+    uint32_t          pad_held[EMU_MULTI_MAX];   /* the board's own controllers' bits (the frontend's) */
+    io5649_host_t     pad_an[EMU_MULTI_MAX];     /* ...and their wheel and pedals; on = 0: none */
     emu_multi_queue_t ready[EMU_MULTI_MAX];  /* board b takes from ready[b] */
     emu_multi_queue_t sent[EMU_MULTI_MAX];   /* this round's for board b */
     m2comm_link_t     link[EMU_MULTI_MAX];   /* each board's g_m2comm_link, peer NULL */
@@ -194,23 +195,37 @@ static inline void emu_multi__count_other(void) {
 }
 
 /* One frame of every board. drawn(user, b) runs with board b in the bus, just
- * after its frame: the frontend draws its picture there. */
+ * after its frame: the frontend draws its picture there.
+ *
+ * Each board plays from its own controllers (Pinboard #1914): pad_held[b] and
+ * pad_an[b], which the frontend sets from the pads it gave that board, and the
+ * keyboard (g_input.held, the keys alone while multi runs) on the board in
+ * focus. They go into g_input.held and the host wheel for the board's frame
+ * and back after the round: the round runs on the UI thread, so no key event
+ * comes between. */
 static inline void emu_multi_round(emu_thread_ctx_t *ctx, void (*drawn)(void *user, int b), void *user) {
     if (!g_multi.on) return;
     int64_t t0 = emu_now_us();
     int start = g_multi.live, mute = g_sound_mute;
+    const uint32_t keys = g_input.held;
+    const io5649_host_t key_an = g_io5649_host;
+    const io5649_host_t no_an = { 0 };
+    uint32_t anyone = keys;
+    for (int b = 0; b < g_multi.n; b++) anyone |= g_multi.pad_held[b];
     for (int i = 0; i < g_multi.n; i++) {
         int b = (start + i) % g_multi.n;
         emu_multi__switch(ctx, b);
         bool mine = b == g_multi.focus;
         g_sound_mute = mine ? mute : 1;     /* settled by the next switch */
-        if (mine) netplay_release_inputs();
-        else {
-            /* A Main nobody plays is worked by the profile's operator from the
-             * player's keys (Power Sled's ring_op), as GGPO's SOLO does. */
-            uint32_t held = g_multi.held[b];
-            if (b == 0 && g_multi.linked && g_multi.op) held = g_multi.op(ctx->bus, g_input.held);
-            g_input.net_held = held; g_input.use_net = 1;
+        if (!mine && b == 0 && g_multi.linked && g_multi.op) {
+            /* A Main nobody plays is worked by the profile's operator from
+             * every player's buttons (Power Sled's ring_op), as GGPO's SOLO does. */
+            g_input.net_held = g_multi.op(ctx->bus, anyone);
+            g_input.use_net = 1;
+        } else {
+            netplay_release_inputs();
+            g_input.held = (mine ? keys : 0) | g_multi.pad_held[b];
+            g_io5649_host = g_multi.pad_an[b].on ? g_multi.pad_an[b] : mine ? key_an : no_an;
         }
         bool ran = emu_multi__run_board(ctx);
         if (ran) {
@@ -222,6 +237,8 @@ static inline void emu_multi_round(emu_thread_ctx_t *ctx, void (*drawn)(void *us
     emu_multi__switch(ctx, g_multi.focus);
     g_sound_mute = mute;
     netplay_release_inputs();
+    g_input.held = keys;
+    g_io5649_host = key_an;
     emu_multi__commit();
     g_multi.rounds++;
     g_multi.round_us = emu_now_us() - t0;
