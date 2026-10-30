@@ -1,10 +1,11 @@
 /*
  * tgp_test.c - the Model 2A TGP (src/board/tgp.h), with no ROM.
  *
- * A float op and a transfer into d in one instruction (Pinboard #661): the
- * next instruction's transfer reads the op's result out of d, and then d holds
- * the word that was moved. Sega Rally's square root (its TGP helper at 0x1AB)
- * is built on it; MAME lets the result win, and its roots come out long.
+ * A float op and a transfer into d in one instruction: the op's result wins
+ * and the moved word is lost, as in MAME. Sega Rally's square root (its TGP
+ * helper at 0x1AB) is built on it. Keeping the moved word (Pinboard #661) made
+ * its roots match the PS2 port's sqrtf, but the rival cars then drove 11%
+ * slower than on a cabinet (Pinboard #1906).
  */
 #include <stdio.h>
 #include <string.h>
@@ -35,9 +36,9 @@ int main(void) {
     CHECK(u2f(g_tgp.d) == 0.75f, "the float result is in d after its instruction");
     tgp_step();
     CHECK(u2f(g_tgp.a) == 0.75f, "the next transfer reads the result");
-    CHECK(u2f(g_tgp.d) == 0.5f, "then d holds the moved word");
+    CHECK(u2f(g_tgp.d) == 0.75f, "and d keeps it: the moved word is lost");
     tgp_step();
-    CHECK(u2f(g_tgp.d) == 0.5f / 0.75f, "the divide takes x over the seed");
+    CHECK(u2f(g_tgp.d) == 1.0f, "the divide takes the result over itself");
 
     /* Without a transfer into d the result simply stays. */
     tgp_reset();

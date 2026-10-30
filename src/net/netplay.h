@@ -236,8 +236,11 @@
  *    was the ROM's JAPAN on every region (Pinboard #1628).
  * 39: homebrew on STF's board has its comm board, where it read "no board"
  *    (Pinboard #1632).
+ * 40: Model 2A's TGP lets a float op's result win over a word moved into d
+ *    beside it again (MAME), undoing 16: Sega Rally's rivals drove 11% slow
+ *    (Pinboard #1906).
  */
-#define NETPLAY_PROTO_REV 39
+#define NETPLAY_PROTO_REV 40
 
 /* Room attribute word layout. Bits 28-31 are left alone: the server owns
  * SCE_NP_MATCHING2_ROOM_FLAG_ATTR_FULL (0x20000000) in there and rewrites it.
