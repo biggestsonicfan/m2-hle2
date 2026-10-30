@@ -359,6 +359,7 @@ static const char *const k_powsled_ring_sets[] = { "powsledm", "powsled", "powsl
         .ring_seat       = powsled_ring_seat,                                                                 \
         .ring_op         = powsled_ring_op,     /* --boards: the rides' attract until a rider calls */        \
         .ring_names      = k_powsled_ring_names,                                                              \
+        .ring_bezel      = 24,     /* the title's window centres step 520 on a 496 screen */                  \
         .ring_sets       = sets, .ring_sets_n = sets_n,                                                       \
         .link_twin       = true,   /* GGPO: the Main (1P) and a ride (2P) on each machine */                  \
         .link_solo       = powsled_solo_op,   /* alone: a Main beside the ride, its panel worked */           \

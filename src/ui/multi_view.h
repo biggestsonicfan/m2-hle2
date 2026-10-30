@@ -56,7 +56,12 @@ static struct {
     int                cells;
     char               seat[EMU_MULTI_MAX][48];   /* the pads that play each board (multi_pads.h) */
     bool               show_pads;                 /* the Board controllers window */
-} g_mview;
+    bool               show_labels;               /* the boards' labels and the focus frame (off: a moment on a focus change) */
+    int                shown_focus;               /* the focus the moment is for */
+    int64_t            focus_us;                  /* when the focus changed */
+} g_mview = { .shown_focus = -1 };
+
+#define MULTI_VIEW_FOCUS_SHOW_US 2000000   /* how long a new focus shows its label, labels off */
 
 static inline bool multi_view__make(multi_view_board_t *v, const geo3d_state_t *base) {
     memset(v, 0, sizeof *v);
@@ -185,6 +190,7 @@ static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
     igTextDisabled("%s", linked ? "Linked in a ring, board 1 the MASTER" : "Side by side, not linked");
     igTextDisabled("A new count starts every board from power-on");
     igTextDisabled("Click a board or Ctrl+1..8: the keyboard plays it");
+    igMenuItemBoolPtr("Show labels", NULL, &g_mview.show_labels, true);
     igMenuItemBoolPtr("Controllers...", NULL, &g_mview.show_pads, true);
     igEndMenu();
     return picked;
@@ -249,7 +255,9 @@ static inline const char *multi_view__name(int b) {
  * emu_multi_last_below) centred below them; any other ring is one row (Daytona's
  * cabinets, Virtual-On's pair); unlinked boards take the grid with the
  * largest pictures. The pictures keep the screen's aspect and the block of
- * them is centred. */
+ * them is centred. A linked ring's slaves are spaced by its ring_bezel, in
+ * screen pixels scaled with the pictures, so the game's wide shots line up
+ * across them (Power Sled's title over the four rides). */
 static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
     float a = (float)VIDEO_WIDTH / (float)VIDEO_HEIGHT;
     const game_profile_t *p = emu_multi_ring_profile();
@@ -260,17 +268,23 @@ static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
     else if (main_above)     { cols = n - 1; rows = 2; }
     else if (g_multi.linked) { cols = n;     rows = 1; }
     else                     { cols = multi_view__cols(n, w, h, a); rows = (n + cols - 1) / cols; }
-    int cw = w / cols, ch = h / rows;
+    int bezel = g_multi.linked && p ? p->ring_bezel : 0;
+    /* A row of cols screens and cols-1 bezels in w: each screen's share. */
+    int cw = bezel ? (int)((int64_t)(w - 4) * VIDEO_WIDTH / (cols * VIDEO_WIDTH + (cols - 1) * bezel)) + 4
+                   : w / cols;
+    int ch = h / rows;
     game_rect_t pic = game_render_letterbox(cw - 4, ch - 4, VIDEO_WIDTH, VIDEO_HEIGHT);
     int pw = pic.w + 4, ph = pic.h + 4;                 /* a cell, its 2-pixel gutter */
+    int gap = bezel ? (pic.w * bezel + VIDEO_WIDTH / 2) / VIDEO_WIDTH : 0;   /* the slaves' bezel, beyond it */
     int y0 = oy + (h - rows * ph) / 2;
     for (int b = 0; b < n; b++) {
         int r, c, in_row;
         if (last_below && b == n - 1) { r = 2; c = 0; in_row = 1; }
         else if (main_above) { r = b ? 1 : 0; c = b ? b - 1 : 0; in_row = b ? cols : 1; }
         else            { r = b / cols;  c = b % cols;      in_row = r < rows - 1 ? cols : n - r * cols; }
-        int x0 = ox + (w - in_row * pw) / 2;            /* each row centred, a short last one too */
-        g_mview.cell[b].x = x0 + c * pw + 2;
+        int step = in_row > 1 ? pw + gap : pw;
+        int x0 = ox + (w - in_row * step + (step - pw)) / 2;   /* each row centred, a short last one too */
+        g_mview.cell[b].x = x0 + c * step + 2;
         g_mview.cell[b].y = y0 + r * ph + 2;
         g_mview.cell[b].w = pic.w;
         g_mview.cell[b].h = pic.h;
@@ -282,6 +296,9 @@ static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
 static inline void multi_view_draw(int ox, int oy, int w, int h) {
     int n = g_multi.n;
     multi_view__place(n, ox, oy, w, h);
+    int64_t now = emu_now_us();
+    if (g_multi.focus != g_mview.shown_focus) { g_mview.shown_focus = g_multi.focus; g_mview.focus_us = now; }
+    bool flash = now - g_mview.focus_us < MULTI_VIEW_FOCUS_SHOW_US;   /* labels off: the new focus a moment */
     float dpi = sapp_dpi_scale() > 0 ? sapp_dpi_scale() : 1.0f;
     ImDrawList *dl = igGetBackgroundDrawList();
     for (int b = 0; b < n; b++) {
@@ -290,6 +307,10 @@ static inline void multi_view_draw(int ox, int oy, int w, int h) {
         ImVec2 p0 = { (float)pic.x / dpi, (float)pic.y / dpi };
         ImVec2 p1 = { (float)(pic.x + pic.w) / dpi, (float)(pic.y + pic.h) / dpi };
         bool mine = b == g_multi.focus;
+        if (!g_mview.show_labels && !(mine && flash)) {
+            if (g_multi.pad_held[b]) ImDrawList_AddRectEx(dl, p0, p1, 0xFF40FF60u, 0.0f, 2.0f, 0);
+            continue;
+        }
         if (mine) ImDrawList_AddRectEx(dl, p0, p1, 0xFF30D0FFu, 0.0f, 3.0f, 0);
         else if (g_multi.pad_held[b])   /* a pad's button held: which board it plays */
             ImDrawList_AddRectEx(dl, p0, p1, 0xFF40FF60u, 0.0f, 2.0f, 0);

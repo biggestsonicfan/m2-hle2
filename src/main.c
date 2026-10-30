@@ -1901,9 +1901,11 @@ static void frame(void) {
         ox = 0; oy = menu_h; w = sapp_width(); h = sapp_height() - menu_h;
     }
     const bool post = !multi && frame_post_source(w, h, lerp_t);
+    sg_pass_action action = state.pass_action;
+    if (multi) action.colors[0].clear_value = (sg_color){ 0, 0, 0, 1 };   /* the boards' bezels */
 
     sg_begin_pass(&(sg_pass){
-        .action    = state.pass_action,
+        .action    = action,
         .swapchain = sglue_swapchain(),
     });
 
