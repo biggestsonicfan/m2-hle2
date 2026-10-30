@@ -930,6 +930,25 @@ static inline void tas__load_branches(mz_zip_archive *z, const char *branches) {
     }
 }
 
+/* The profile a movie file was made on, into out (before any ROM is loaded:
+ * --tas picks the game by it). NULL, or why it cannot be read. */
+static inline const char *tas_file_profile(const char *path, char *out, size_t cap) {
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    if (!mz_zip_reader_init_file(&z, path, 0)) return "not a movie (not a zip)";
+    size_t jn = 0;
+    char *json = (char *)tas__extract(&z, "tas.json", &jn);
+    mz_zip_reader_end(&z);
+    if (!json) return "not a movie (no tas.json)";
+    char *j = (char *)realloc(json, jn + 1);
+    if (!j) { free(json); return "out of memory"; }
+    j[jn] = 0;
+    out[0] = 0;
+    json_get_str(j, "profile", out, cap);
+    free(j);
+    return out[0] ? NULL : "not a movie (no profile in tas.json)";
+}
+
 /* Open a movie: the board goes to its start, and the movie is played up to
  * its end (resume false: it stops there). Mutex held, between slices. */
 static inline const char *tas_load_file(emu_thread_ctx_t *ctx, const char *path, bool to_end) {

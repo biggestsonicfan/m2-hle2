@@ -34,4 +34,6 @@ The `.m2tas` file is a zip:
 
 Loading a movie restores the settings, loads the anchor and plays the movie to its end. It refuses a movie of another profile.
 
+From the command line (Pinboard #1927): `--tas FILE` loads the movie's own profile before the ROM (`tas_file_profile` reads `tas.json` first; a `--rom` of a sibling set switches to the movie's zip beside it), then opens it at frame 0 with recording off. `--tas-video OUT` (or `--replay-video` with `--tas`) records it through `ui/replay_video.h`. The board is held stopped until the recorder is connected and the frame gate is on, and `replay_video_pump` starts it: a board left running by `--run` would play frames nobody recorded. The source's end is `g_tas.frame >= mv.n`; a `tas_break` before that is a split (exit 4).
+
 Tests: the bridge's `tas` command (`ui/mcp_bridge.h`: start, seek, rewind, undo_rewind, edit, branch_save/load, save/load, aim, and `from`/`count` for the held words and checks). Record 320 frames of sfight, then rewind, replay, edit, undo, branch, insert/delete, and save and reload the file. Every frame check comes back identical. The same holds for a hotd movie whose gun aim moves.
