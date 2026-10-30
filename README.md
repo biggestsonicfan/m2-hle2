@@ -470,6 +470,21 @@ frames and raw samples and nothing else, apart from the optional NV12 conversion
 them into an mp4 with ffmpeg; it is about a hundred lines, and reading it is the fastest way to
 see the protocol.
 
+**A replay straight to a video file** (`--replay-video`, Pinboard #1925): the same server and
+that client's job in one process. It plays the replay with no window, writes every frame and
+its sound into the file with ffmpeg, and exits when the playback ends (0; 4 when it left the
+record, and the video stops there; 1 on an error).
+
+```
+m2hle --rom sfight.zip --replay match.m2replay --replay-video match.mp4 [--av-size 1396x1080] [--ffmpeg PATH]
+```
+
+Nothing is dropped: the board waits for each frame to be drawn and the renderer waits for
+ffmpeg, so it runs as fast as the encoder allows rather than at 60 Hz (~33 fps at 1080p on a
+software GL; a smaller `--av-size` is quicker). The video starts at the first paced frame of the
+playback, after the boot the game's own view runs through unpaced. ffmpeg is looked for on
+`PATH` unless `--ffmpeg` names it. See `src/ui/replay_video.h`.
+
 **With `--headless`** the emulator brings up a graphics device with no window and no swapchain,
 so no desktop session is needed — a server can stream. That path is D3D11 only for now; on a GL
 build use `--kiosk`, which streams just as well from a parked window.

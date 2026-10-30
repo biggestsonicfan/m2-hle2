@@ -61,6 +61,7 @@
 #include "netplay_window.h"  /* the RPCN netplay front-end */
 #include "lan_window.h"      /* direct play, no server (Pinboard #1891) */
 #include "replay_window.h"   /* the Replays menu and the playback window */
+#include "replay_video.h"    /* --replay-video: a replay into a video file, headless */
 #include "tas_window.h"      /* tool-assisted play (Pinboard #1462) */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
 #include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
@@ -513,6 +514,10 @@ static bool replay_cli_arg(int argc, char **argv, int *i) {
         snprintf(g_replay_rec.dir, sizeof g_replay_rec.dir, "%s", argv[++*i]);
     } else if (!strcmp(a, "--replay") && more) {
         snprintf(g_replay_open_arg, sizeof g_replay_open_arg, "%s", argv[++*i]);
+    } else if (!strcmp(a, "--replay-video") && more) {
+        replay_video_set(argv[++*i]);      /* headless, every frame into FILE, then exit */
+    } else if (!strcmp(a, "--ffmpeg") && more) {
+        replay_video_set_ffmpeg(argv[++*i]);
     } else {
         return false;
     }
@@ -1554,6 +1559,7 @@ static void headless_shutdown(void) {
  * snapshots, netplay and the tray (and the A/V server's frames) until the tray
  * or the bridge asks to quit. */
 static void headless_loop(bool av_on) {
+    bool video = replay_video_on();
     LOG_INFO("headless: running%s%s", g_mcp_enable ? " with the MCP bridge" : "",
              av_on ? " with the A/V server"
                    : (g_mcp_enable ? "" : " (no --mcp: nothing can drive it)"));
@@ -1570,7 +1576,9 @@ static void headless_loop(bool av_on) {
         link_check_frame(g_emu_frames);   /* the bridge's link_check "test" answer */
         if (av_on) {
             headless_shot(headless_av_frame());
-            headless_sleep_ms(1);
+            g_emu_frame_drawn = av_capture_seen();   /* the frame gate (--replay-video) */
+            if (video && replay_video_pump()) break;
+            if (!g_emu_frame_gate) headless_sleep_ms(1);
         } else {
             emu_sleep_ms(5);
         }
@@ -1619,7 +1627,14 @@ static int headless_main(void) {
     headless_board_init();
 
     bool av_on = false;
-    if (g_av_port > 0) {
+    if (replay_video_on()) {
+        if (!g_replay_open_arg[0]) { LOG_ERROR("--replay-video needs --replay FILE"); return 2; }
+        g_av_port = 0;                      /* the server is the recorder's, on any free port */
+        av_stream_set_format(AV_FORMAT_NV12);   /* made on the GPU; the file is 4:2:0 anyway */
+        g_autorun = 1;
+        g_no_tray = 1;
+    }
+    if (g_av_port > 0 || replay_video_on()) {
         if (!headless_av_start()) return 3;
         av_on = true;
     }
@@ -1629,14 +1644,16 @@ static int headless_main(void) {
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (!load_state_arg()) return 1;
     replay_open_arg();
+    if (replay_video_on() && !replay_video_start()) return 1;
     if (!comm_link_arg()) return 1;
     if (g_autorun) emu_run(&state.emu);
 
     if (!g_no_tray) headless_tray_start();
     headless_loop(av_on);
 
+    int rc = replay_video_on() ? replay_video_finish() : 0;
     headless_shutdown();
-    return 0;
+    return rc;
 }
 
 /* The main board's debug windows: the i960, memory, breakpoints, the COP,
@@ -2501,6 +2518,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     if (!g_headless) lightgun_ui_settings_load();   /* the crosshair (Pinboard #1496) */
     scripts_setup();
     if (g_headless && g_multi_want) { LOG_WARN("--boards needs the window: one board under --headless"); g_multi_want = 0; }
+    if (replay_video_on()) g_headless = 1;   /* a file needs no window */
     if (g_headless) exit(headless_main());
     /* Capture mode wants the game moving, not a first frame held on pause. */
     if (g_kiosk_on) g_autorun = 1;

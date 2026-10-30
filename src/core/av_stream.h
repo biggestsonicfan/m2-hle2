@@ -250,6 +250,7 @@ static inline bool av_stream_enabled(void) { return g_av.enabled != 0; }
  * when a client goes belong to that client, and must not reach the next one. */
 static inline uint64_t av_stream_session(void) { return g_av.sessions; }
 static inline bool av_stream_active(void)  { return g_av.enabled && g_av.connected; }
+static inline int  av_stream_port(void)    { return g_av.port; }
 static inline int  av_stream_width(void)   { return g_av.width; }
 static inline int  av_stream_height(void)  { return g_av.height; }
 static inline av_format_t av_stream_format(void) { return g_av.format; }
@@ -563,6 +564,15 @@ static inline bool av_stream_start(int port, int w, int h) {
         LOG_ERROR("av: bind() failed on port %d (%d)", port, net_errno());
         net_close(&s);
         goto fail_net;
+    }
+    if (port == 0) {           /* any free port (--replay-video): ask which */
+        struct sockaddr_in got;
+#ifdef _WIN32
+        int got_len = (int)sizeof got;
+#else
+        socklen_t got_len = sizeof got;
+#endif
+        if (getsockname(s, (struct sockaddr *)&got, &got_len) == 0) port = ntohs(got.sin_port);
     }
     if (listen(s, 1) != 0) {
         LOG_ERROR("av: listen() failed (%d)", net_errno());
