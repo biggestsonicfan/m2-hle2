@@ -6,7 +6,8 @@
  * lead): the pedals read from the picked device, each from where it rests; a
  * joystick SDL does not call a wheel plays as one once picked; with a
  * gamepad picked the other gamepad plays nothing, and a gamepad picked as the
- * wheel is not a gamepad any more. A pick's file text reads back.
+ * wheel is not a gamepad any more. A pick's file text reads back. While
+ * several boards run (--boards, Pinboard #1914) each pad is read alone.
  *
  * A ctest (CMakeLists.txt, pads_test; M2HLE_PADS builds only).
  */
@@ -39,7 +40,7 @@ static SDL_JoystickID attach_vid(const char *name, SDL_JoystickType type, Uint16
     if (type == SDL_JOYSTICK_TYPE_GAMEPAD)
         d.button_mask = (1u << SDL_GAMEPAD_BUTTON_SOUTH) | (1u << SDL_GAMEPAD_BUTTON_EAST) |
                         (1u << SDL_GAMEPAD_BUTTON_WEST) | (1u << SDL_GAMEPAD_BUTTON_NORTH) |
-                        (1u << SDL_GAMEPAD_BUTTON_START) | (1u << SDL_GAMEPAD_BUTTON_BACK);
+                        (1u << SDL_GAMEPAD_BUTTON_EAST) | (1u << SDL_GAMEPAD_BUTTON_BACK);
     return SDL_AttachVirtualJoystick(&d);
 }
 
@@ -258,6 +259,46 @@ static void test_g25(void) {
     pump();
 }
 
+static const pad_multi_dev_t *multi_dev(SDL_JoystickID id) {
+    for (int k = 0; k < g_pad_multi.n; k++)
+        if (g_pad_multi.dev[k].id == id) return &g_pad_multi.dev[k];
+    return NULL;
+}
+
+/* Several boards: each pad's buttons are its own, none in the shared held. */
+static void test_multi(void) {
+    static game_profile_t p;
+    p.input.bits[GAME_INPUT_P1_B2]    = 0x10;
+    p.input.bits[GAME_INPUT_P1_B1]    = 0x100;
+    g_active_profile = &p;
+    sdl_pads_default();
+    SDL_JoystickID a = attach("Multi Pad A", SDL_JOYSTICK_TYPE_GAMEPAD, 6, 6, 15);
+    SDL_JoystickID b = attach("Multi Pad B", SDL_JOYSTICK_TYPE_GAMEPAD, 7, 6, 15);
+    pump();
+    button(b, SDL_GAMEPAD_BUTTON_EAST, true);
+    pump();
+    CHECK(g_input.held & 0x10, "one board: pad B's B2 is the shared held's");
+    g_pad_multi.on = true;
+    pump();
+    const pad_multi_dev_t *da = multi_dev(a), *db = multi_dev(b);
+    CHECK(da && db && !da->wheel && !db->wheel, "boards: both pads listed, as gamepads");
+    CHECK(db && db->held == 0x10 && da && da->held == 0, "boards: B2 is pad B's alone");
+    CHECK(!(g_input.held & 0x10), "boards: the shared held let go of it");
+    button(a, SDL_GAMEPAD_BUTTON_SOUTH, true);
+    pump();
+    CHECK(da->held == 0x100 && db->held == 0x10 && !g_input.held, "boards: pad A's B1 is pad A's alone");
+    button(a, SDL_GAMEPAD_BUTTON_SOUTH, false);
+    g_pad_multi.on = false;
+    pump();
+    CHECK(g_input.held == 0x10, "one board again: pad B's B2 back in the shared held");
+    button(b, SDL_GAMEPAD_BUTTON_EAST, false);
+    pump();
+    SDL_DetachVirtualJoystick(a);
+    SDL_DetachVirtualJoystick(b);
+    pump();
+    g_active_profile = NULL;
+}
+
 int main(void) {
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
     if (!SDL_Init(SDL_INIT_GAMEPAD)) { printf("FAIL: SDL_Init: %s\n", SDL_GetError()); return 1; }
@@ -273,6 +314,7 @@ int main(void) {
     test_fanatec_base();
     test_fanatec_twice();
     test_g25();
+    test_multi();
 
     SDL_Quit();
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "ALL PASS", g_fail);

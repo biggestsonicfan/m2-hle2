@@ -171,6 +171,15 @@ static inline bool powsled_link_role(memory_bus_t *bus, game_link_role_t role) {
     return true;
 }
 
+/* `--boards` (core/emu_multi.h): each ride its own colour, as the Main's
+ * NETWORK screen wants (one each of SILVER, RED, BLACK and YELLOW; two alike
+ * are an ERROR, "change RIDE ID (color)"). Every settings copy gets it, so
+ * any two agree (FUN_edc30). */
+static inline void powsled_ring_seat(memory_bus_t *bus, int seat) {
+    if (!bus->back || seat < 0 || seat > 3) return;
+    for (uint32_t copy = 0; copy < 3; copy++) bus->back[copy * 0x100u + 8u] = (uint8_t)seat;
+}
+
 /* The Main's operator, for a ride played alone (emu_ggpo.h, SOLO; Pinboard
  * #1110). The race state, 0x53E744 on every unit, is 4 between races, 5 with
  * entry open, 6 once it is closed, 7 racing and 8 on the results, then 4
@@ -220,6 +229,27 @@ static inline uint32_t powsled_solo_op(memory_bus_t *bus, uint32_t held) {
     return g_powsled_op.since < POWSLED_OP_PRESS ? press : 0;
 }
 
+/* The Main's operator in a ring of rides (`--boards`, core/emu_multi.h).
+ * Between races (state 4) it waits for a rider to press Entry before it opens
+ * entry, so until someone wants a race the rides play their attract, as a
+ * real site's do with nobody at the Main's panel; then it is the SOLO one. */
+static bool g_powsled_ring_called;
+
+static inline uint32_t powsled_ring_op(memory_bus_t *bus, uint32_t held) {
+    enum { ENTRY = 0x100 | 0x400 };
+    bool between = mem_read8(bus, POWSLED_RACE_STATE) == 4;
+    if (!between) g_powsled_ring_called = false;
+    else if (held & ENTRY) g_powsled_ring_called = true;
+    uint32_t press = powsled_solo_op(bus, held);
+    return between && !g_powsled_ring_called ? 0 : press;
+}
+
+/* The ring's cabinets: the Main is the site's big screen over the line of
+ * rides (the LIVE camera) and the operator's panel; each ride a sled. */
+static const char *const k_powsled_ring_names[] = {
+    "MAIN (screen + operator)", "SILVER ride", "RED ride", "BLACK ride", "YELLOW ride", NULL,
+};
+
 /* MAME INPUT_PORTS_START(powsled): IN0 the cabinet (COIN1 0x01, COIN2 0x02,
  * TEST 0x04, SERVICE1 0x08, START 0x10 / 0x20, SERVICE2 0x40, Cancel Error
  * 0x80), IN1 the riders' buttons (P1 Entry 0x01, P1 Call 0x02, P2 Entry 0x04,
@@ -245,6 +275,10 @@ static const game_profile_t powsled_profile = {
     .install_fn      = powsled_install,
     .hook_count      = 0,
     .link_role       = powsled_link_role,
+    .link_cabinets   = 5,      /* the Main and four rides (no Relay unit yet) */
+    .ring_seat       = powsled_ring_seat,
+    .ring_op         = powsled_ring_op,     /* --boards: the rides' attract until a rider calls */
+    .ring_names      = k_powsled_ring_names,
     .link_twin       = true,   /* GGPO: the Main (1P) and a ride (2P) on each machine */
     .link_solo       = powsled_solo_op,   /* alone: a Main beside the ride, its panel worked */
     .input = {

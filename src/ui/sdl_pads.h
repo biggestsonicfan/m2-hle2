@@ -482,7 +482,74 @@ static void pad_wheels_read(bool *now, pad_analog_t *an) {
     SDL_free(jids);
 }
 
+/* ---- Several boards (--boards, Pinboard #1914) ------------------------------ */
+
+/* While several boards run (core/emu_multi.h) each pad and wheel plays a
+ * board of its own, so none of them presses the shared actions: pad_refresh
+ * reads each one alone into g_pad_multi.dev, its held bits and its analog,
+ * and the window's seats (multi_pads.h) hand them to the boards. Every pad
+ * plays, the Controls window's pick or not; its device kind still holds. */
+#define PAD_MULTI_DEVS 16
+typedef struct {
+    SDL_JoystickID id;
+    bool           wheel;
+    uint32_t       held;     /* the profile's bits for the actions it holds */
+    io5649_host_t  an;       /* on = 0: no analog (not a driving game) */
+} pad_multi_dev_t;
+static struct {
+    bool            on;
+    int             n;
+    pad_multi_dev_t dev[PAD_MULTI_DEVS];
+} g_pad_multi;
+
+static uint32_t pad_multi__bits(const bool *now) {
+    uint32_t held = 0;
+    for (int a = 0; a < GAME_INPUT_COUNT && g_active_profile; a++)
+        if (now[a]) held |= g_active_profile->input.bits[a];
+    return held;
+}
+
+static void pad_multi__add(SDL_JoystickID id, bool wheel, const bool *now, const pad_analog_t *an) {
+    if (g_pad_multi.n >= PAD_MULTI_DEVS) return;
+    pad_multi_dev_t *d = &g_pad_multi.dev[g_pad_multi.n++];
+    d->id = id;
+    d->wheel = wheel;
+    d->held = pad_multi__bits(now);
+    d->an = (io5649_host_t){ an->on && wheel_host_on(), an->steer, an->accel, an->brake };
+}
+
+/* Every pad and wheel on its own; the shared actions let go. */
+static void pad_multi_read(void) {
+    static const bool none[GAME_INPUT_COUNT];
+    g_pad_multi.n = 0;
+    int count = 0;
+    SDL_JoystickID *jids = pad_device_takes(true) ? SDL_GetJoysticks(&count) : NULL;
+    for (int i = 0; jids && i < count; i++) {
+        SDL_Joystick *joy = wheel_is(jids[i]) ? SDL_GetJoystickFromID(jids[i]) : NULL;
+        if (!joy) continue;
+        bool now[GAME_INPUT_COUNT] = {0};
+        pad_analog_t an = {0};
+        pad_wheel_read(jids[i], joy, now, &an);
+        pad_multi__add(jids[i], true, now, &an);
+    }
+    SDL_free(jids);
+    SDL_JoystickID *ids = pad_device_takes(false) ? SDL_GetGamepads(&count) : NULL;
+    for (int i = 0; ids && i < count; i++) {
+        if (!SDL_IsGamepad(ids[i]) || wheel_is(ids[i]) || pedals_is(ids[i])) continue;
+        SDL_Gamepad *pad = SDL_GetGamepadFromID(ids[i]);
+        if (!pad) continue;
+        bool now[GAME_INPUT_COUNT] = {0};
+        pad_analog_t an = {0};
+        pad_gamepad_read(pad, now, &an);
+        pad_multi__add(ids[i], false, now, &an);
+    }
+    SDL_free(ids);
+    wheel_host_set(false, 0, 0, 0);
+    pad_publish(none, none);
+}
+
 static void pad_refresh(void) {
+    if (g_pad_multi.on) { pad_multi_read(); return; }
     bool now[GAME_INPUT_COUNT] = {0}, far_now[GAME_INPUT_COUNT] = {0};
     int count = 0, here = 0;
     pad_analog_t an = {0};
@@ -505,6 +572,7 @@ static void pad_refresh(void) {
  * takes the pad, and a button held into it must not stay held in the game. */
 static void lobby_pad_release(void) {
     wheel_host_set(false, 0, 0, 0);
+    g_pad_multi.n = 0;   /* the boards' pads too (Pinboard #1914) */
     for (int a = 0; a < GAME_INPUT_COUNT; a++) {
         if (g_pad_held[a]) input_action_up(a);
         if (g_pad_far_held[a]) input_far_up(a);

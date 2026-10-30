@@ -215,6 +215,25 @@ static inline void daytona_settings_single(memory_bus_t *bus, const uint8_t *rom
     b[9] = (uint8_t)(crc >> 8);
 }
 
+/* LINK ID into the block the boot takes, with its CRC, for the boards of one
+ * process (core/emu_multi.h): 1 MASTER, 2 SLAVE, 0 SINGLE. The I/O board's
+ * EEPROM is blank at every power-on here, so the boot takes backup RAM's copy,
+ * which daytona_settings_single made valid at the install. The board's comm
+ * ring then counts the cabinets and numbers them. False for the 1993 build. */
+static inline bool daytona_settings_role(memory_bus_t *bus, uint32_t factory, game_link_role_t role) {
+    static const uint8_t link_id[3] = { 0, 1, 2 };   /* ALONE, MASTER, SLAVE */
+    const uint8_t *rom = bus->rom;
+    uint32_t table = factory + 0x80u;
+    if (!factory || !rom || !bus->back || bus->rom_size < table + 0x200u) return false;
+    uint8_t *b = bus->back + DAYTONA_SETTINGS;
+    if (memcmp(b, rom + factory, 8) != 0) return false;
+    b[DAYTONA_SETTINGS_LINK] = link_id[role <= GAME_LINK_SLAVE ? role : GAME_LINK_ALONE];
+    uint16_t crc = daytona_settings_crc(rom, table, b + 0x0A, 0x76);
+    b[8] = (uint8_t)crc;
+    b[9] = (uint8_t)(crc >> 8);
+    return true;
+}
+
 /* The colour tables by cabinet (Pinboard #1056). The settings' +0x1A is CABINET
  * (0 DELUXE, 1 TWIN, 2 UPLIGHT; the factory block's is TWIN), and the boot
  * (ROM 0xA74, once: nothing else writes 0x01810000-0x0181BFFF) builds the three
@@ -283,6 +302,9 @@ static inline void daytona_install_build(const romset_t *rs, i960_cpu_t *cpu, me
     } \
     static inline void name##_backup(const romset_t *rs, memory_bus_t *bus) { \
         if (rs->maincpu) daytona_settings_single(bus, rs->maincpu, rs->maincpu_size, factory_at); \
+    } \
+    static inline bool name##_ring_role(memory_bus_t *bus, game_link_role_t role) { \
+        return daytona_settings_role(bus, factory_at, role); \
     }
 DAYTONA_INSTALL(daytona,    DAYTONA_FACTORY)
 DAYTONA_INSTALL(daytona93,  0)
@@ -335,6 +357,7 @@ static uint32_t daytona_gtx_read_cb(mem_region_t *r, uint32_t addr, int size) {
 }
 
 static inline void daytonagtx_backup(const romset_t *rs, memory_bus_t *bus) { daytonagtx_base_backup(rs, bus); }
+static inline bool daytonagtx_ring_role(memory_bus_t *bus, game_link_role_t role) { return daytonagtx_base_ring_role(bus, role); }
 
 static inline void daytonagtx_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     daytonagtx_base_install(rs, cpu, bus);
@@ -442,6 +465,8 @@ static const game_profile_t daytona_profile = {
     .dash         = daytona_dash,
     .link_setting = DAYTONA_LINK_SETTING,
     .link_cable   = true,   /* a ring of one: 1人まで対戦できます */
+    .ring_role    = daytona_ring_role,
+    .link_cabinets = 8,
     .input        = DAYTONA_INPUT,
     .quirks       = DAYTONA_QUIRKS(0x83fbb4, 3190),
 };
@@ -457,7 +482,7 @@ static const game_profile_t daytona_profile = {
         .id = #name, .display_name = title, .parent_zip_name = "daytona.zip", \
         .board = BOARD_MODEL2, .load_fn = load, .install_fn = name##_install, \
         .backup_fn = name##_backup, .link_setting = DAYTONA_LINK_SETTING, \
-        .link_cable = true, \
+        .link_cable = true, .ring_role = name##_ring_role, .link_cabinets = 8, \
         .input = DAYTONA_INPUT, .quirks = DAYTONA_QUIRKS(table, count), \
     };
 /* noclip games.js `daytona93`: its own table, 2822 entries. */
