@@ -239,22 +239,44 @@ static inline const char *multi_view__name(int b) {
     return b ? "SLAVE" : "MASTER";
 }
 
-/* The boards' pictures in a grid over ox, oy, w, h of the swapchain pass,
- * each letterboxed in its cell, and their numbers over them. */
+/* Where each board's picture goes in ox, oy, w, h, into g_mview.cell. A
+ * ring whose MASTER plays itself (ring_op: Power Sled's Main) has it on top,
+ * centred over one row of its slaves; any other ring is one row (Daytona's
+ * cabinets, Virtual-On's pair); unlinked boards take the grid with the
+ * largest pictures. The pictures keep the screen's aspect and the block of
+ * them is centred. */
+static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
+    float a = (float)VIDEO_WIDTH / (float)VIDEO_HEIGHT;
+    bool main_above = g_multi.linked && n > 1 && g_active_profile && g_active_profile->ring_op;
+    int cols, rows;
+    if (main_above)          { cols = n - 1; rows = 2; }
+    else if (g_multi.linked) { cols = n;     rows = 1; }
+    else                     { cols = multi_view__cols(n, w, h, a); rows = (n + cols - 1) / cols; }
+    int cw = w / cols, ch = h / rows;
+    game_rect_t pic = game_render_letterbox(cw - 4, ch - 4, VIDEO_WIDTH, VIDEO_HEIGHT);
+    int pw = pic.w + 4, ph = pic.h + 4;                 /* a cell, its 2-pixel gutter */
+    int y0 = oy + (h - rows * ph) / 2;
+    for (int b = 0; b < n; b++) {
+        int r, c, in_row;
+        if (main_above) { r = b ? 1 : 0; c = b ? b - 1 : 0; in_row = b ? n - 1 : 1; }
+        else            { r = b / cols;  c = b % cols;      in_row = r < rows - 1 ? cols : n - r * cols; }
+        int x0 = ox + (w - in_row * pw) / 2;            /* each row centred, a short last one too */
+        g_mview.cell[b].x = x0 + c * pw + 2;
+        g_mview.cell[b].y = y0 + r * ph + 2;
+        g_mview.cell[b].w = pic.w;
+        g_mview.cell[b].h = pic.h;
+    }
+}
+
+/* The boards' pictures over ox, oy, w, h of the swapchain pass
+ * (multi_view__place), and their numbers over them. */
 static inline void multi_view_draw(int ox, int oy, int w, int h) {
     int n = g_multi.n;
-    float a = (float)VIDEO_WIDTH / (float)VIDEO_HEIGHT;
-    int cols = multi_view__cols(n, w, h, a), rows = (n + cols - 1) / cols;
-    int cw = w / cols, ch = h / rows;
+    multi_view__place(n, ox, oy, w, h);
     float dpi = sapp_dpi_scale() > 0 ? sapp_dpi_scale() : 1.0f;
     ImDrawList *dl = igGetBackgroundDrawList();
     for (int b = 0; b < n; b++) {
-        int c = b % cols, r = b / cols;
-        game_rect_t pic = game_render_letterbox(cw - 4, ch - 4, VIDEO_WIDTH, VIDEO_HEIGHT);
-        pic.x += ox + c * cw + 2;
-        pic.y += oy + r * ch + 2;
-        g_mview.cell[b].x = pic.x; g_mview.cell[b].y = pic.y;
-        g_mview.cell[b].w = pic.w; g_mview.cell[b].h = pic.h;
+        game_rect_t pic = { g_mview.cell[b].x, g_mview.cell[b].y, g_mview.cell[b].w, g_mview.cell[b].h };
         if (g_mview.b[b].drawn) game_render_draw_target(g_mview.b[b].tex, true, pic.x, pic.y, pic.w, pic.h);
         ImVec2 p0 = { (float)pic.x / dpi, (float)pic.y / dpi };
         ImVec2 p1 = { (float)(pic.x + pic.w) / dpi, (float)(pic.y + pic.h) / dpi };
