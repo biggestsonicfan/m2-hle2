@@ -459,6 +459,20 @@ typedef struct game_profile {
      * MASTER, then the seats); NULL or a short list: MASTER / SLAVE. */
     const char *const  *ring_names;
 
+    /* The screen pixels between two slaves' pictures that the game's wide
+     * shots were drawn for (Pinboard #1919): Power Sled's title spans its
+     * four rides with one camera, each ride's window centre 520 pixels on
+     * from the last on its 496-pixel screen, so 24. The window spaces the
+     * slaves' row by it (scaled with the pictures). 0: pictures 2 pixels apart. */
+    uint8_t             ring_bezel;
+
+    /* The ROM set each cabinet of a whole site runs (`--boards`, Pinboard
+     * #1918), by name, when it is not the loaded one: Power Sled's Main and
+     * Relay are sets of their own. Used when every one of them is beside the
+     * loaded zip; the ring then holds ring_sets_n cabinets. NULL: one set. */
+    const char *const  *ring_sets;
+    uint8_t             ring_sets_n;
+
     /* A GGPO match plays the link: both cabinets on each machine, one player
      * on each (core/emu_twin.h). A role outside backup RAM (Power Sled's unit,
      * the program's bytes) must be a savestate extra, as it swaps with the

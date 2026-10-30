@@ -56,7 +56,12 @@ static struct {
     int                cells;
     char               seat[EMU_MULTI_MAX][48];   /* the pads that play each board (multi_pads.h) */
     bool               show_pads;                 /* the Board controllers window */
-} g_mview;
+    bool               show_labels;               /* the boards' labels and the focus frame (off: a moment on a focus change) */
+    int                shown_focus;               /* the focus the moment is for */
+    int64_t            focus_us;                  /* when the focus changed */
+} g_mview = { .shown_focus = -1 };
+
+#define MULTI_VIEW_FOCUS_SHOW_US 2000000   /* how long a new focus shows its label, labels off */
 
 static inline bool multi_view__make(multi_view_board_t *v, const geo3d_state_t *base) {
     memset(v, 0, sizeof *v);
@@ -122,8 +127,11 @@ static void multi_view__drawn(void *user, int b) {
 }
 
 /* The boards made, once the set is loaded and running (`--boards N`). */
-static inline void multi_view__start(emu_thread_ctx_t *ctx, const geo3d_state_t *base) {
+static inline void multi_view__start(emu_thread_ctx_t *ctx, const romset_t *rs, const geo3d_state_t *base) {
     g_mview.started = true;
+    emu_mutex_lock(&ctx->mutex);
+    emu_multi_sets_restore(ctx);   /* a board left alone on a set of its own: the loaded one again */
+    emu_mutex_unlock(&ctx->mutex);
     const game_profile_t *p = g_active_profile;
     int n = emu_multi_count(p, g_multi_want);
     if (g_multi_want > n)
@@ -135,7 +143,7 @@ static inline void multi_view__start(emu_thread_ctx_t *ctx, const geo3d_state_t 
             return;
         }
     emu_mutex_lock(&ctx->mutex);
-    bool ok = emu_multi_start(ctx, p, n, true);
+    bool ok = emu_multi_start(ctx, p, rs, n, true);
     emu_mutex_unlock(&ctx->mutex);
     if (!ok) { LOG_ERROR("multi: %d boards of %s could not start", n, p ? p->id : "?"); multi_view_free_all(); return; }
     g_mview.ramp  = g_game_render.ramp_enabled;
@@ -166,8 +174,8 @@ static inline void multi_view_want(emu_thread_ctx_t *ctx, int n) {
  * picked: the frontend loads the set again, as it starts alone (Power
  * Sled's ride has its Main beside it then, SOLO); -1 otherwise. */
 static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
-    if (!igBeginMenuEx("Boards", loaded && g_active_profile)) return -1;
-    const game_profile_t *p = g_active_profile;
+    const game_profile_t *p = emu_multi_ring_profile();
+    if (!igBeginMenuEx("Boards", loaded && p)) return -1;
     int ring = emu_multi_count(p, EMU_MULTI_MAX);
     bool linked = p->ring_role || p->link_role;
     int now = emu_multi_on() ? g_multi.n : g_multi_want ? emu_multi_count(p, g_multi_want) : 1;
@@ -182,6 +190,7 @@ static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
     igTextDisabled("%s", linked ? "Linked in a ring, board 1 the MASTER" : "Side by side, not linked");
     igTextDisabled("A new count starts every board from power-on");
     igTextDisabled("Click a board or Ctrl+1..8: the keyboard plays it");
+    igMenuItemBoolPtr("Show labels", NULL, &g_mview.show_labels, true);
     igMenuItemBoolPtr("Controllers...", NULL, &g_mview.show_pads, true);
     igEndMenu();
     return picked;
@@ -193,7 +202,7 @@ static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
 static inline bool multi_view_frame(emu_thread_ctx_t *ctx, memory_bus_t *bus, const romset_t *rs,
                                     const geo3d_state_t *base, bool running) {
     if (!g_multi_want) return false;
-    if (!g_mview.started && running && rs->loaded && g_active_profile) multi_view__start(ctx, base);
+    if (!g_mview.started && running && rs->loaded && g_active_profile) multi_view__start(ctx, rs, base);
     if (!emu_multi_on()) return false;
     g_mview.bus = bus;
     g_mview.rs  = rs;
@@ -233,7 +242,8 @@ static inline int multi_view__cols(int n, int w, int h, float a) {
  * role; nothing unlinked. */
 static inline const char *multi_view__name(int b) {
     if (!g_multi.linked) return "";
-    const char *const *names = g_active_profile ? g_active_profile->ring_names : NULL;
+    const game_profile_t *p = emu_multi_ring_profile();
+    const char *const *names = p ? p->ring_names : NULL;
     for (int i = 0; names && names[i]; i++)
         if (i == b) return names[i];
     return b ? "SLAVE" : "MASTER";
@@ -241,27 +251,40 @@ static inline const char *multi_view__name(int b) {
 
 /* Where each board's picture goes in ox, oy, w, h, into g_mview.cell. A
  * ring whose MASTER plays itself (ring_op: Power Sled's Main) has it on top,
- * centred over one row of its slaves; any other ring is one row (Daytona's
+ * centred over one row of its slaves, and a site's extra unit (the Relay,
+ * emu_multi_last_below) centred below them; any other ring is one row (Daytona's
  * cabinets, Virtual-On's pair); unlinked boards take the grid with the
  * largest pictures. The pictures keep the screen's aspect and the block of
- * them is centred. */
+ * them is centred. A linked ring's slaves are spaced by its ring_bezel, in
+ * screen pixels scaled with the pictures, so the game's wide shots line up
+ * across them (Power Sled's title over the four rides). */
 static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
     float a = (float)VIDEO_WIDTH / (float)VIDEO_HEIGHT;
-    bool main_above = g_multi.linked && n > 1 && g_active_profile && g_active_profile->ring_op;
+    const game_profile_t *p = emu_multi_ring_profile();
+    bool main_above = g_multi.linked && n > 1 && p && p->ring_op;
+    bool last_below = main_above && n > 2 && emu_multi_last_below(n);
     int cols, rows;
-    if (main_above)          { cols = n - 1; rows = 2; }
+    if (last_below)          { cols = n - 2; rows = 3; }
+    else if (main_above)     { cols = n - 1; rows = 2; }
     else if (g_multi.linked) { cols = n;     rows = 1; }
     else                     { cols = multi_view__cols(n, w, h, a); rows = (n + cols - 1) / cols; }
-    int cw = w / cols, ch = h / rows;
+    int bezel = g_multi.linked && p ? p->ring_bezel : 0;
+    /* A row of cols screens and cols-1 bezels in w: each screen's share. */
+    int cw = bezel ? (int)((int64_t)(w - 4) * VIDEO_WIDTH / (cols * VIDEO_WIDTH + (cols - 1) * bezel)) + 4
+                   : w / cols;
+    int ch = h / rows;
     game_rect_t pic = game_render_letterbox(cw - 4, ch - 4, VIDEO_WIDTH, VIDEO_HEIGHT);
     int pw = pic.w + 4, ph = pic.h + 4;                 /* a cell, its 2-pixel gutter */
+    int gap = bezel ? (pic.w * bezel + VIDEO_WIDTH / 2) / VIDEO_WIDTH : 0;   /* the slaves' bezel, beyond it */
     int y0 = oy + (h - rows * ph) / 2;
     for (int b = 0; b < n; b++) {
         int r, c, in_row;
-        if (main_above) { r = b ? 1 : 0; c = b ? b - 1 : 0; in_row = b ? n - 1 : 1; }
+        if (last_below && b == n - 1) { r = 2; c = 0; in_row = 1; }
+        else if (main_above) { r = b ? 1 : 0; c = b ? b - 1 : 0; in_row = b ? cols : 1; }
         else            { r = b / cols;  c = b % cols;      in_row = r < rows - 1 ? cols : n - r * cols; }
-        int x0 = ox + (w - in_row * pw) / 2;            /* each row centred, a short last one too */
-        g_mview.cell[b].x = x0 + c * pw + 2;
+        int step = in_row > 1 ? pw + gap : pw;
+        int x0 = ox + (w - in_row * step + (step - pw)) / 2;   /* each row centred, a short last one too */
+        g_mview.cell[b].x = x0 + c * step + 2;
         g_mview.cell[b].y = y0 + r * ph + 2;
         g_mview.cell[b].w = pic.w;
         g_mview.cell[b].h = pic.h;
@@ -273,6 +296,9 @@ static inline void multi_view__place(int n, int ox, int oy, int w, int h) {
 static inline void multi_view_draw(int ox, int oy, int w, int h) {
     int n = g_multi.n;
     multi_view__place(n, ox, oy, w, h);
+    int64_t now = emu_now_us();
+    if (g_multi.focus != g_mview.shown_focus) { g_mview.shown_focus = g_multi.focus; g_mview.focus_us = now; }
+    bool flash = now - g_mview.focus_us < MULTI_VIEW_FOCUS_SHOW_US;   /* labels off: the new focus a moment */
     float dpi = sapp_dpi_scale() > 0 ? sapp_dpi_scale() : 1.0f;
     ImDrawList *dl = igGetBackgroundDrawList();
     for (int b = 0; b < n; b++) {
@@ -281,6 +307,10 @@ static inline void multi_view_draw(int ox, int oy, int w, int h) {
         ImVec2 p0 = { (float)pic.x / dpi, (float)pic.y / dpi };
         ImVec2 p1 = { (float)(pic.x + pic.w) / dpi, (float)(pic.y + pic.h) / dpi };
         bool mine = b == g_multi.focus;
+        if (!g_mview.show_labels && !(mine && flash)) {
+            if (g_multi.pad_held[b]) ImDrawList_AddRectEx(dl, p0, p1, 0xFF40FF60u, 0.0f, 2.0f, 0);
+            continue;
+        }
         if (mine) ImDrawList_AddRectEx(dl, p0, p1, 0xFF30D0FFu, 0.0f, 3.0f, 0);
         else if (g_multi.pad_held[b])   /* a pad's button held: which board it plays */
             ImDrawList_AddRectEx(dl, p0, p1, 0xFF40FF60u, 0.0f, 2.0f, 0);

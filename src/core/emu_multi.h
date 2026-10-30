@@ -27,6 +27,14 @@
  * takes from the next round, so the order the boards run in changes nothing.
  * Each board's g_m2comm_link (outside savestates) goes in and out with it.
  *
+ * A board can run a set of its own (`--board-rom N=<zip>`, Pinboard #1918),
+ * a clone of the loaded one that differs only in its programs: Power Sled's
+ * Main and Relay beside its rides, Daytona's Turbo hack in a ring of Daytonas.
+ * Its i960 program, its 68000 program and its sample ROMs go into the board
+ * with it (emu_multi__use_set), and its profile is the active one for its
+ * frame. The data, model and texture ROMs are the loaded set's, so a set that
+ * differs there is refused.
+ *
  * The battery is detached for the run: the boards' roles go into backup RAM,
  * and the player's own file must not get a SLAVE's.
  *
@@ -45,10 +53,18 @@
 #include "m2comm.h"
 #include "rollback.h"
 #include "backup_ram.h"
+#include "rom_loader.h"
 
 #define EMU_MULTI_MAX      8
 #define EMU_MULTI_QUEUE    16u    /* frames waiting for a board; the ring moves one a round */
 #define EMU_MULTI_BOOT_MAX 1800   /* frames the cold boot may take to make its backup block */
+
+/* A board's own ROM set: its programs and samples, and the profile that runs it. */
+typedef struct {
+    const game_profile_t *p;
+    romset_t  rs;                /* the set's regions (set 0: copies of the loaded set's programs) */
+    bool      own_samples;       /* rs.samples is this set's to free (set 0 borrows the loaded set's) */
+} emu_multi_set_t;
 
 typedef struct {
     uint32_t head, n;
@@ -71,6 +87,9 @@ static struct {
     m2comm_link_t     link[EMU_MULTI_MAX];   /* each board's g_m2comm_link, peer NULL */
     m2comm_peer_t     peer[EMU_MULTI_MAX];
     uint32_t        (*op)(struct memory_bus *bus, uint32_t held);   /* the Main's operator, ring_op or link_solo */
+    bool              mixed;       /* the boards run sets of their own */
+    int               set_of[EMU_MULTI_MAX];     /* board b runs g_multi_sets[set_of[b]] */
+    int               cur_set;     /* the set in the bus */
     uint32_t          dropped, drop_said;
     uint64_t          rounds;
     int64_t           round_us;    /* the last round's time, for the window's title */
@@ -78,11 +97,26 @@ static struct {
 
 static int g_multi_want = 0;       /* --boards N; -1 `all`: the game's ring */
 
+/* --board-rom N=<zip>: board N's own set ("" the loaded one). The frontend
+ * loads it (g_multi_load_set: the zip's profile and regions). The sets stay
+ * until the next start or the next load of a set (emu_multi_sets_free): the
+ * board left in focus may run one, and the sound board reads its samples. */
+static char g_multi_rom[EMU_MULTI_MAX][512];
+/* The folder of the loaded zip when every set of its profile's ring_sets is
+ * there ("" when not): a whole site's cabinets, each its own set. */
+static char g_multi_ring_dir[512];
+static bool g_multi_ring_ok;
+static bool (*g_multi_load_set)(const char *zip, romset_t *rs, const game_profile_t **p);
+static emu_multi_set_t g_multi_sets[EMU_MULTI_MAX];
+static int g_multi_nsets;
+static int g_multi_sets_live;      /* the set the board left alone by emu_multi_stop runs */
+
 /* The boards `--boards` gets for profile p: a linked game's ring holds at most
  * link_cabinets (two when unset), `all` is that many, an unlinked game's
  * boards are as many as asked (`all`: two). */
 static inline int emu_multi_count(const game_profile_t *p, int want) {
     int ring = !p || !(p->ring_role || p->link_role) ? 0 : p->link_cabinets ? p->link_cabinets : 2;
+    if (ring && p->ring_sets && g_multi_ring_ok) ring = p->ring_sets_n;
     if (ring > EMU_MULTI_MAX) ring = EMU_MULTI_MAX;
     if (want < 0) return ring ? ring : 2;
     return ring && want > ring ? ring : want;
@@ -135,6 +169,164 @@ static inline void emu_multi__commit(void) {
     }
 }
 
+/* ---- A board's own set ------------------------------------------------------- */
+
+static inline void emu_multi_sets_free(void) {
+    g_multi_sets_live = 0;
+    for (int i = 0; i < g_multi_nsets; i++) {
+        emu_multi_set_t *m = &g_multi_sets[i];
+        if (!m->own_samples) m->rs.samples = NULL;
+        romset_free(&m->rs);
+        m->p = NULL;
+        m->own_samples = false;
+    }
+    g_multi_nsets = 0;
+}
+
+/* The ring's profile, the loaded set's: g_active_profile is the board's own
+ * while a board runs a set of its own (powsledm's Main, powsledr's Relay). */
+static inline const game_profile_t *emu_multi_ring_profile(void) {
+    return g_multi_nsets && g_multi_sets[0].p ? g_multi_sets[0].p : g_active_profile;
+}
+
+/* The ring's last board goes below it: a site's extra unit (Power Sled -
+ * Arcade's Relay), a ring of ring_sets longer than link_cabinets. */
+static inline bool emu_multi_last_below(int n) {
+    const game_profile_t *p = emu_multi_ring_profile();
+    return p && p->ring_sets && g_multi_ring_ok && n == p->ring_sets_n && n > p->link_cabinets;
+}
+
+/* Board b's set's program and profile into the bus (force: even when it is
+ * already the one there, as a boot wants). The rollback copy then puts the
+ * board's own patches of it back (Power Sled's unit bytes). */
+static inline void emu_multi__use_prog(emu_thread_ctx_t *ctx, int s, bool force) {
+    if (!g_multi.mixed || (s == g_multi.cur_set && !force)) return;
+    const emu_multi_set_t *m = &g_multi_sets[s];
+    memcpy(ctx->bus->rom, m->rs.maincpu, ctx->bus->rom_size);
+    g_active_profile = m->p;
+    g_multi.cur_set = s;
+}
+
+/* ...and its sound board's ROMs: the 68000's program (a copy, as
+ * sound_load_rom makes; boot: start the 68000 on it) and the samples (read in
+ * place: their page map follows the bank registers the board brought). */
+static inline void emu_multi__use_sound(int s, bool boot) {
+    if (!g_multi.mixed || !g_multi_sets[s].p->quirks.enable_68k_sound) return;
+    const romset_t *rs = &g_multi_sets[s].rs;
+    if (boot) {
+        if (rs->audiocpu) sound_load_rom(rs->audiocpu, (uint32_t)rs->audiocpu_size);
+        if (rs->samples)  sound_load_samples(rs->samples, (uint32_t)rs->samples_size);
+        return;
+    }
+    if (rs->audiocpu) {
+        uint32_t n = rs->audiocpu_size < M68K_ROM_SIZE ? (uint32_t)rs->audiocpu_size : M68K_ROM_SIZE;
+        memcpy(g_sound.rom, rs->audiocpu, n);
+        if (n < M68K_ROM_SIZE) memset(g_sound.rom + n, 0xFF, M68K_ROM_SIZE - n);
+    }
+    g_sound.samples      = rs->samples;
+    g_sound.samples_size = (uint32_t)rs->samples_size;
+    sound_map_pages(&g_sound);
+}
+
+/* The board the last run left alone runs a set of its own: the loaded set's
+ * programs and profile back, before the boards start again from it. */
+static inline void emu_multi_sets_restore(emu_thread_ctx_t *ctx) {
+    if (g_multi_nsets && g_multi_sets_live) {
+        const emu_multi_set_t *m = &g_multi_sets[0];
+        memcpy(ctx->bus->rom, m->rs.maincpu, ctx->bus->rom_size);
+        g_active_profile = m->p;
+        if (m->p->quirks.enable_68k_sound) {
+            if (m->rs.audiocpu) sound_load_rom(m->rs.audiocpu, (uint32_t)m->rs.audiocpu_size);
+            if (m->rs.samples)  sound_load_samples(m->rs.samples, (uint32_t)m->rs.samples_size);
+        }
+    }
+    emu_multi_sets_free();
+}
+
+/* A region two sets must share: the boards draw from, and read, the loaded one's. */
+static inline bool emu_multi__same(const char *what, const uint8_t *a, size_t an, const uint8_t *b, size_t bn,
+                                   const char *zip) {
+    if (an == bn && (an == 0 || (a && b && memcmp(a, b, an) == 0))) return true;
+    LOG_ERROR("multi: %s is not the loaded set's %s; a board's own set may differ only in its programs "
+              "and samples", zip, what);
+    return false;
+}
+
+/* Board b's set: --board-rom's, else the site's (ring_sets) when it is not the
+ * loaded one, else "" (the loaded one). */
+static inline void emu_multi__zip_of(const game_profile_t *p, int b, char *out, size_t cap) {
+    out[0] = 0;
+    if (g_multi_rom[b][0]) { snprintf(out, cap, "%s", g_multi_rom[b]); return; }
+    if (g_multi_ring_ok && p->ring_sets && b < p->ring_sets_n && p->ring_sets[b] && strcmp(p->ring_sets[b], profile_rom_set(p)) != 0)
+        snprintf(out, cap, "%s%s.zip", g_multi_ring_dir, p->ring_sets[b]);
+}
+
+/* The sets --board-rom asks for the n boards of profile p, the loaded set rs
+ * (bus->rom is its program). False when one can't be loaded or doesn't fit:
+ * the boards then all run the loaded set. */
+static inline bool emu_multi__load_sets(emu_thread_ctx_t *ctx, const game_profile_t *p, const romset_t *rs, int n) {
+    emu_multi_sets_restore(ctx);
+    static char zips[EMU_MULTI_MAX][512];
+    bool any = false;
+    for (int b = 0; b < n; b++) {
+        emu_multi__zip_of(p, b, zips[b], sizeof zips[b]);
+        any |= zips[b][0] != 0;
+    }
+    if (!any) return true;
+    if (!g_multi_load_set) { LOG_ERROR("multi: this frontend can't load a board's own set"); return false; }
+    emu_multi_set_t *base = &g_multi_sets[0];
+    base->p = p;
+    base->rs.maincpu  = (uint8_t *)malloc(ctx->bus->rom_size);
+    base->rs.maincpu_size = ctx->bus->rom_size;
+    base->rs.audiocpu = rs->audiocpu_size ? (uint8_t *)malloc(rs->audiocpu_size) : NULL;
+    base->rs.audiocpu_size = rs->audiocpu_size;
+    if (!base->rs.maincpu || (rs->audiocpu_size && !base->rs.audiocpu)) { emu_multi_sets_free(); return false; }
+    memcpy(base->rs.maincpu, ctx->bus->rom, ctx->bus->rom_size);
+    if (rs->audiocpu_size) memcpy(base->rs.audiocpu, rs->audiocpu, rs->audiocpu_size);
+    base->rs.samples = rs->samples;
+    base->rs.samples_size = rs->samples_size;
+    g_multi_nsets = 1;
+    for (int b = 0; b < n; b++) {
+        g_multi.set_of[b] = 0;
+        const char *zip = zips[b];
+        if (!zip[0]) continue;
+        int s = g_multi_nsets;
+        for (int c = 0; c < b; c++)                /* a zip two boards run is loaded once */
+            if (g_multi.set_of[c] && strcmp(zips[c], zip) == 0) { s = g_multi.set_of[c]; break; }
+        if (s == g_multi_nsets) {
+            emu_multi_set_t *m = &g_multi_sets[s];
+            memset(m, 0, sizeof *m);
+            m->own_samples = true;
+            g_multi_nsets++;
+            if (!g_multi_load_set(zip, &m->rs, &m->p) || !m->rs.loaded) {
+                LOG_ERROR("multi: board %d's set %s didn't load", b + 1, zip);
+                emu_multi_sets_free();
+                return false;
+            }
+            if (m->p->board != p->board || m->rs.maincpu_size != ctx->bus->rom_size) {
+                LOG_ERROR("multi: %s (%s) is not a board like the loaded %s's", zip, m->p->id, p->id);
+                emu_multi_sets_free();
+                return false;
+            }
+            if (!emu_multi__same("data ROMs", m->rs.main_data, m->rs.main_data_size, rs->main_data, rs->main_data_size, zip)
+             || !emu_multi__same("models", m->rs.polygons, m->rs.polygons_size, rs->polygons, rs->polygons_size, zip)
+             || !emu_multi__same("textures", m->rs.textures, m->rs.textures_size, rs->textures, rs->textures_size, zip)
+             || !emu_multi__same("COP data", m->rs.copro_data, m->rs.copro_data_size, rs->copro_data, rs->copro_data_size, zip)
+             || !emu_multi__same("TGP tables", m->rs.tgp_tables, m->rs.tgp_tables_size, rs->tgp_tables, rs->tgp_tables_size, zip)
+             || !emu_multi__same("I/O board program", m->rs.iocpu, m->rs.iocpu_size, rs->iocpu, rs->iocpu_size, zip)
+             || !emu_multi__same("music board", m->rs.mpegcpu, m->rs.mpegcpu_size, rs->mpegcpu, rs->mpegcpu_size, zip)) {
+                emu_multi_sets_free();
+                return false;
+            }
+            LOG_INFO("multi: board %d runs %s (%s)", b + 1, m->p->display_name, zip);
+        }
+        g_multi.set_of[b] = s;
+    }
+    g_multi.mixed = true;
+    g_multi.cur_set = 0;
+    return true;
+}
+
 /* ---- A board in and out ---------------------------------------------------- */
 
 static inline void emu_multi__out(emu_thread_ctx_t *ctx, int b) {
@@ -149,6 +341,7 @@ static inline void emu_multi__out(emu_thread_ctx_t *ctx, int b) {
  * mark what they change as it runs. */
 static inline void emu_multi__in(emu_thread_ctx_t *ctx, int b) {
     sound_settle();
+    emu_multi__use_prog(ctx, g_multi.set_of[b], false);
     const uint8_t *src = g_multi.slot[b];
     size_t off = 0;
     for (int i = 0; i < g_rollback.n; i++) {
@@ -158,6 +351,7 @@ static inline void emu_multi__in(emu_thread_ctx_t *ctx, int b) {
     savestate_geo_put(&g_rollback.meta.geo);
     savestate_sound_put(&g_rollback.meta.snd);
     savestate_hle_set(&g_rollback.meta.hle);
+    emu_multi__use_sound(g_multi.set_of[b], false);
     savestate_emu_t e = g_rollback.meta.emu;
     emu_state_put_latches(ctx, &e);
     emu_attn_bump();
@@ -254,7 +448,9 @@ static inline void emu_multi_set_focus(int b) {
 /* The board back to power-on with backup RAM `back` kept (net/comm_role.h's
  * power cycle) and its comm board on board b's end of the ring. */
 static inline void emu_multi__boot(emu_thread_ctx_t *ctx, const uint8_t *back, int b) {
+    emu_multi__use_prog(ctx, g_multi.set_of[b], true);   /* installed by its own profile */
     g_netplay.reset_board(g_netplay.reset_ctx);
+    emu_multi__use_sound(g_multi.set_of[b], true);       /* the reset loaded the loaded set's */
     if (back) memcpy(ctx->bus->back, back, BACKUP_RAM_KEEP);
     if (back && b && g_multi.linked && g_active_profile && g_active_profile->ring_seat)
         g_active_profile->ring_seat(ctx->bus, b - 1);   /* this slave's place: a ride's colour */
@@ -274,7 +470,8 @@ static inline void emu_multi__free(void) {
 
 /* n boards of the loaded set, from power-on; board 0 live and in focus.
  * Linked when the profile can set the roles (and `link` asks for it). */
-static inline bool emu_multi_start(emu_thread_ctx_t *ctx, const game_profile_t *p, int n, bool link) {
+static inline bool emu_multi_start(emu_thread_ctx_t *ctx, const game_profile_t *p, const romset_t *rs,
+                                   int n, bool link) {
     if (g_multi.on || n < 2 || n > EMU_MULTI_MAX || !p) return false;
     if (!g_netplay.reset_board) { LOG_ERROR("multi: no board-reset hook"); return false; }
 #ifdef M2HLE_GGPO
@@ -282,6 +479,7 @@ static inline bool emu_multi_start(emu_thread_ctx_t *ctx, const game_profile_t *
 #endif
     memset(&g_multi, 0, sizeof g_multi);
     g_multi.n = n;
+    if (!emu_multi__load_sets(ctx, p, rs, n)) return false;
     g_multi.linked = link && emu_multi__role_fn(p);
     g_multi.op = !g_multi.linked ? NULL : p->ring_op ? p->ring_op : p->link_solo;
     game_link_role_fn role = emu_multi__role_fn(p);
@@ -292,7 +490,7 @@ static inline bool emu_multi_start(emu_thread_ctx_t *ctx, const game_profile_t *
     g_multi.board = g_rollback.size;
     for (int b = 0; b < n; b++) {
         g_multi.slot[b] = (uint8_t *)malloc(g_multi.board);
-        if (!g_multi.slot[b]) { emu_multi__free(); backup_ram_reattach(); return false; }
+        if (!g_multi.slot[b]) { emu_multi__free(); backup_ram_reattach(); g_multi.mixed = false; return false; }
         g_multi.peer[b] = (m2comm_peer_t){ (void *)(intptr_t)b, emu_multi__send, emu_multi__recv, NULL, true };
     }
     g_netplay.reset_board(g_netplay.reset_ctx);
@@ -351,6 +549,7 @@ static inline void emu_multi_stop(emu_thread_ctx_t *ctx) {
     m2comm_set_peer(NULL);
     rollback_drain();
     backup_ram_reattach();
+    g_multi_sets_live = g_multi.mixed ? g_multi.cur_set : 0;   /* its sets stay: it may run one */
     LOG_INFO("multi: over after %llu rounds; board %d goes on alone",
              (unsigned long long)g_multi.rounds, g_multi.focus + 1);
     g_multi.on = false;

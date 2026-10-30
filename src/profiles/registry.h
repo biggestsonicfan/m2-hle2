@@ -73,6 +73,9 @@ const game_profile_t *const g_profiles[] = {
     &vf2o_profile,
     &airwlkrs_profile,
     &powsled_profile,
+    &powsled_arcade_profile,   /* the same set, the whole site linked (#1918) */
+    &powsledr_profile,
+    &powsledm_profile,
     &vcop_profile,
     &lastbrnx_profile,
     &lastbrnxu_profile,

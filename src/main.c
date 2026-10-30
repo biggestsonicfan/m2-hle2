@@ -244,8 +244,8 @@ static bool select_profile_for_zip(const char *path) {
 
 /* MAME clone fall-through: the parent zip's path (same directory as the picked
  * zip) from profile->parent_zip_name, or NULL for a self-contained set. */
-static const char *parent_zip_path(const char *primary_zip, char *buf, size_t cap) {
-    const char *name = g_active_profile->parent_zip_name;
+static const char *parent_zip_path_of(const game_profile_t *p, const char *primary_zip, char *buf, size_t cap) {
+    const char *name = p->parent_zip_name;
     if (!name) return NULL;
     const char *sep_f = strrchr(primary_zip, '/');
     const char *sep_b = strrchr(primary_zip, '\\');
@@ -260,6 +260,48 @@ static const char *parent_zip_path(const char *primary_zip, char *buf, size_t ca
         strcat(buf, name);
     }
     return buf;
+}
+
+static const char *parent_zip_path(const char *primary_zip, char *buf, size_t cap) {
+    return parent_zip_path_of(g_active_profile, primary_zip, buf, cap);
+}
+
+/* --boards: a board's own set (core/emu_multi.h, Pinboard #1918), its profile
+ * picked by the zip's name as a load's is. */
+static bool multi_load_set(const char *zip, romset_t *rs, const game_profile_t **pp) {
+    const char *sep_f = strrchr(zip, '/'), *sep_b = strrchr(zip, '\\');
+    const char *base = sep_f > sep_b ? sep_f : sep_b;
+    base = base ? base + 1 : zip;
+    char id[64];
+    const char *dot = strrchr(base, '.');
+    snprintf(id, sizeof id, "%.*s", (int)(dot ? (size_t)(dot - base) : strlen(base)), base);
+    const game_profile_t *p = profile_for_rom_set(id, NULL);
+    if (!p) { LOG_ERROR("multi: no profile runs %s", id); return false; }
+    char parent[512] = {0};
+    if (romset_load(rs, p->load_fn, zip, parent_zip_path_of(p, zip, parent, sizeof parent)) != 0) return false;
+    *pp = p;
+    return true;
+}
+
+/* The loaded set's site (ring_sets): every set of it beside the zip, or none. */
+static void multi_ring_find(const char *zip) {
+    const game_profile_t *p = g_active_profile;
+    g_multi_ring_ok = false;
+    g_multi_ring_dir[0] = 0;
+    if (!p || !p->ring_sets) return;
+    const char *sep_f = strrchr(zip, '/'), *sep_b = strrchr(zip, '\\');
+    const char *sep = sep_f > sep_b ? sep_f : sep_b;
+    snprintf(g_multi_ring_dir, sizeof g_multi_ring_dir, "%.*s", sep ? (int)(sep - zip + 1) : 0, zip);
+    for (int b = 0; b < p->ring_sets_n; b++) {
+        char path[600];
+        snprintf(path, sizeof path, "%s%s.zip", g_multi_ring_dir, p->ring_sets[b]);
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            LOG_INFO("multi: no %s beside %s: a ring of %d %s cabinets", path, zip, p->link_cabinets, p->id);
+            return;
+        }
+    }
+    g_multi_ring_ok = true;
 }
 
 /* The set's backup RAM, before install_fn boots the board with it. A
@@ -376,6 +418,8 @@ static void load_active_profile(const char *primary_zip) {
         gems_apply(profile_rom_set(g_active_profile));
         ages_apply(profile_rom_set(g_active_profile));   /* after gems_apply: they share the extra-hook slot */
         load_sound_board();
+        emu_multi_sets_free();      /* the last run's boards' own sets: nothing reads them now */
+        multi_ring_find(primary_zip);
         /* Inputs are delivered via the I/O ports (read by the game's vblank
          * interrupt), so attach the I/O read callback after the bus re-init. */
         input_reset();
@@ -1093,6 +1137,7 @@ static void init(void) {
      * every slice, so it has to exist before the thread starts. */
     netplay_init();
     netplay_set_reset_hook(netplay_reset_board_cb, NULL);
+    g_multi_load_set = multi_load_set;
     state.show_netplay = g_net_window != 0;
 
     /* Start the (initially STOPPED) emu thread up front so Run/Step work even
@@ -1856,9 +1901,11 @@ static void frame(void) {
         ox = 0; oy = menu_h; w = sapp_width(); h = sapp_height() - menu_h;
     }
     const bool post = !multi && frame_post_source(w, h, lerp_t);
+    sg_pass_action action = state.pass_action;
+    if (multi) action.colors[0].clear_value = (sg_color){ 0, 0, 0, 1 };   /* the boards' bezels */
 
     sg_begin_pass(&(sg_pass){
-        .action    = state.pass_action,
+        .action    = action,
         .swapchain = sglue_swapchain(),
     });
 
@@ -2151,6 +2198,14 @@ static void parse_args(int argc, char **argv) {
             i++;                                /* taken above, before anything logged */
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--board-rom") == 0 && i + 1 < argc) {
+            i++;                                /* N=<zip>: board N runs a set of its own (#1918) */
+            int b = atoi(argv[i]);
+            const char *eq = strchr(argv[i], '=');
+            if (b < 1 || b > EMU_MULTI_MAX || !eq || !eq[1])
+                LOG_WARN("--board-rom takes N=<zip>, N 1..%d", EMU_MULTI_MAX);
+            else
+                snprintf(g_multi_rom[b - 1], sizeof g_multi_rom[b - 1], "%s", eq + 1);
         } else if (strcmp(argv[i], "--boards") == 0 && i + 1 < argc) {
             i++;                                /* N boards of the set in one window */
             g_multi_want = strcmp(argv[i], "all") == 0 ? -1 : atoi(argv[i]);   /* all: the game's ring */
