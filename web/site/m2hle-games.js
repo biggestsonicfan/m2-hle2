@@ -526,6 +526,36 @@ const m2hleGames = (() => {
         },
       },
     },
+    desert: {
+      title: 'Desert Tank',
+      year: 1994, board: 'Model 2', colors: ['#c8902b', '#2a1c0b'],
+      blurb: 'A tank of your own on the desert and canyon missions: drive it, lay the turret, and fire the machine gun and the cannon.',
+      /* src/profiles/desert.h: Daytona's board, with the Model 1 I/O board's
+       * program from model1io.zip as its parent. */
+      profiles: [
+        { id: 'desert', name: 'Arcade', about: 'The only build MAME knows' },
+      ],
+      romHint: 'Your <code>desert.zip</code> and the I/O board\'s <code>model1io.zip</code>, picked together',
+      /* MAME's INPUT_PORTS(desert): LEFT / RIGHT the handle, UP / DOWN walk
+       * the turret (up aims the cannon up), B1 the accelerator, B2 the
+       * machine gun, B3 the cannon, B4 held for reverse (quirks.analog). */
+      labels: { up: 'Turret up', down: 'Turret down', left: 'Steer left', right: 'Steer right',
+                b1: 'Accelerator', b2: 'Machine gun', b3: 'Cannon', b4: 'Reverse (hold)' },
+      ownReplay: false,
+      /* No shared board: no ranking is read out of its backup RAM yet
+       * (arcade/games.mjs); its save stays in the browser. */
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'デザートタンク',
+          blurb: '砂漠と峡谷のミッションで戦車を操縦。走らせ、砲塔を向け、機関銃と主砲を撃て。',
+          profiles: { desert: { name: 'アーケード', about: 'MAME が知る唯一のバージョン' } },
+          romHint: 'お持ちの <code>desert.zip</code> と I/O ボードの <code>model1io.zip</code> を一緒に',
+          labels: { up: '砲塔を上に', down: '砲塔を下に', left: 'ハンドル左', right: 'ハンドル右',
+                    b1: 'アクセル', b2: '機関銃', b3: '主砲', b4: '後退（押し続ける）' },
+        },
+      },
+    },
   };
   const HOSTS = { play: 'sfight', srally: 'srallyc' };
   /* ?game= names that are another game's set: { game, profile }. */
