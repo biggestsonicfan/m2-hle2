@@ -511,9 +511,9 @@ const m2hleGames = (() => {
                 b1: 'Throttle', b2: 'Brake', b3: 'Punch', b4: 'Kick' },
       keys: DRIVING_KEYS,
       ownReplay: false,
-      /* No shared board: no ranking is read out of its backup RAM yet
-       * (arcade/games.mjs); its save stays in the browser. */
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'モーターレイド',
@@ -542,9 +542,9 @@ const m2hleGames = (() => {
       labels: { up: 'Turret up', down: 'Turret down', left: 'Steer left', right: 'Steer right',
                 b1: 'Accelerator', b2: 'Machine gun', b3: 'Cannon', b4: 'Reverse (hold)' },
       ownReplay: false,
-      /* No shared board: no ranking is read out of its backup RAM yet
-       * (arcade/games.mjs); its save stays in the browser. */
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'デザートタンク',
@@ -573,7 +573,9 @@ const m2hleGames = (() => {
       labels: { b1: 'Trigger', b2: 'Reload', b3: 'Unused', b4: 'Unused' },
       gun: true,
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'バーチャコップ2',
@@ -596,7 +598,9 @@ const m2hleGames = (() => {
       /* In play the buttons are 2-3-1 (MAME, m2_library.h VSTRIKER_INPUT). */
       labels: { b1: 'Short pass', b2: 'Long pass', b3: 'Shoot', b4: 'Unused' },
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'バーチャストライカー',
@@ -624,6 +628,9 @@ const m2hleGames = (() => {
                 b1: 'Throttle', b2: 'Brake', b3: 'Shift up', b4: 'Shift down' },
       keys: DRIVING_KEYS,
       ownReplay: false,
+      /* No shared board yet: Manx TT resets its rankings at every boot here; the EEPROM
+       * it checks is erased at every reset (eeprom_93c46.h), so no ranking
+       * outlives a boot (scores.sonicthefighte.rs, Pinboard #1911). */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -649,7 +656,9 @@ const m2hleGames = (() => {
       labels: { up: 'Stick up', down: 'Stick down', left: 'Stick left', right: 'Stick right',
                 b1: 'Machine gun', b2: 'Missile', b3: 'View', b4: 'Unused' },
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'スカイターゲット',
@@ -676,6 +685,9 @@ const m2hleGames = (() => {
       /* MAME's INPUT_PORTS(zerogun): two buttons a player. */
       labels: { b1: 'Shot', b2: 'Button 2', b3: 'Unused', b4: 'Unused' },
       ownReplay: false,
+      /* No shared board yet: Zero Gunner resets its rankings at every boot here; the EEPROM
+       * it checks is erased at every reset (eeprom_93c46.h), so no ranking
+       * outlives a boot (scores.sonicthefighte.rs, Pinboard #1911). */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -702,6 +714,8 @@ const m2hleGames = (() => {
        * channel (io_5649.h press) held on B3. */
       labels: { b1: 'Button 1', b2: 'Button 2', b3: 'Swing the bat', b4: 'Unused' },
       ownReplay: false,
+      /* No shared board: Dynamite Baseball keeps no ranking in its backup RAM
+       * (scores.sonicthefighte.rs, Pinboard #1911); its save stays in the browser. */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -726,6 +740,9 @@ const m2hleGames = (() => {
       labels: { up: 'Aim up', down: 'Aim down', left: 'Aim left', right: 'Aim right',
                 b1: 'Trigger', b2: 'Unused', b3: 'Unused', b4: 'Unused' },
       ownReplay: false,
+      /* No shared board yet: Gunblade NY resets its rankings at every boot here; the EEPROM
+       * it checks is erased at every reset (eeprom_93c46.h), so no ranking
+       * outlives a boot (scores.sonicthefighte.rs, Pinboard #1911). */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -754,7 +771,9 @@ const m2hleGames = (() => {
                 b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
       keys: DRIVING_KEYS,
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'INDY 500',
@@ -780,6 +799,8 @@ const m2hleGames = (() => {
                 b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
       keys: DRIVING_KEYS,
       ownReplay: false,
+      /* No shared board: Super GT 24h keeps its ranking in work RAM, filled from ROM at every boot
+       * (scores.sonicthefighte.rs, Pinboard #1911); its save stays in the browser. */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -806,7 +827,9 @@ const m2hleGames = (() => {
                 b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
       keys: DRIVING_KEYS,
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'オーバーレブ',
@@ -831,6 +854,9 @@ const m2hleGames = (() => {
                 b1: 'Accelerator', b2: 'Brake', b3: 'View 1', b4: 'View 2' },
       keys: DRIVING_KEYS,
       ownReplay: false,
+      /* No shared board yet: Super Touring Car Championship resets its rankings at every boot here; the EEPROM
+       * it checks is erased at every reset (eeprom_93c46.h), so no ranking
+       * outlives a boot (scores.sonicthefighte.rs, Pinboard #1911). */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -857,7 +883,9 @@ const m2hleGames = (() => {
       labels: { up: 'Lean forward', down: 'Lean back', left: 'Swing left', right: 'Swing right',
                 b1: 'Select 2', b2: 'Select 3', b3: 'Zoom in', b4: 'Zoom out' },
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'セガスキースーパーG',
@@ -882,7 +910,9 @@ const m2hleGames = (() => {
       labels: { up: 'Unused', down: 'Unused', left: 'Slide left', right: 'Slide right',
                 b1: 'Set', b2: 'Select up', b3: 'Pitch left', b4: 'Pitch right' },
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'セガウォータースキー',
@@ -907,7 +937,9 @@ const m2hleGames = (() => {
       labels: { up: 'Lean forward', down: 'Lean back', left: 'Steer left', right: 'Steer right',
                 b1: 'Throttle', b2: 'Unused', b3: 'View', b4: 'Unused' },
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'ウェーブランナー',
@@ -936,6 +968,9 @@ const m2hleGames = (() => {
       labels: { up: 'Slide forward', down: 'Slide back', left: 'Curve left', right: 'Curve right',
                 b1: 'Jump (front)', b2: 'Jump (tail)', b3: 'Select left', b4: 'Select right' },
       ownReplay: false,
+      /* No shared board yet: Top Skater resets its rankings at every boot here; the EEPROM
+       * it checks is erased at every reset (eeprom_93c46.h), so no ranking
+       * outlives a boot (scores.sonicthefighte.rs, Pinboard #1911). */
       arcade: false, keepSave: true,
       i18n: {
         ja: {
@@ -963,7 +998,9 @@ const m2hleGames = (() => {
       labels: { up: 'Aim up', down: 'Aim down', left: 'Aim left', right: 'Aim right',
                 b1: 'Trigger', b2: 'Missile', b3: 'Unused', b4: 'Unused' },
       ownReplay: false,
-      arcade: false, keepSave: true,
+      /* A shared board (arcade/games.mjs); the save stays in the browser too,
+       * even when the arcade cannot be reached (m2hle-page.js). */
+      keepSave: true,
       i18n: {
         ja: {
           title: 'ビハインド・エネミー・ラインズ',
