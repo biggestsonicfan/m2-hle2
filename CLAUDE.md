@@ -37,7 +37,7 @@ The load-bearing invariants (reverse-engineered, in no datasheet, do not re-deri
 | PS3 cross-play | [ps3-crossplay.md](docs/invariants/ps3-crossplay.md) | `ps3_link.h`, `rudp.h` |
 | PS3 menus | [ps3-menus.md](docs/invariants/ps3-menus.md) | `src/ui/ps3ui*.h` |
 | GGPO rollback | [ggpo.md](docs/invariants/ggpo.md) | `emu_ggpo.h`, `ggpo_lobby.h` |
-| Several boards, one window | [multi-board.md](docs/invariants/multi-board.md) | `emu_multi.h`, `multi_view.h` |
+| Several boards, one window | [multi-board.md](docs/invariants/multi-board.md) | `emu_multi.h`, `multi_view.h`, `multi_pads.h` |
 | Raw A/V out | [av-out.md](docs/invariants/av-out.md) | `av_stream.h`, `av_capture.h` |
 | Overlay plugin swap | [overlay-swap.md](docs/invariants/overlay-swap.md) | `overlay_host.h` |
 | Picture filters | [picture-filters.md](docs/invariants/picture-filters.md) | `post_shader.h`, `retro_shader.h` |
