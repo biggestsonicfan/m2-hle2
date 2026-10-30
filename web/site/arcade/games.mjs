@@ -29,6 +29,17 @@ import * as doa from './doa-ranking.mjs';
 import * as airwlkrs from './airwlkrs-ranking.mjs';
 import * as vcop from './vcop-ranking.mjs';
 import * as lastbrnx from './lastbrnx-ranking.mjs';
+import * as motoraid from './motoraid-ranking.mjs';
+import * as skytargt from './skytargt-ranking.mjs';
+import * as desert from './desert-ranking.mjs';
+import * as vcop2 from './vcop2-ranking.mjs';
+import * as vstriker from './vstriker-ranking.mjs';
+import * as indy500 from './indy500-ranking.mjs';
+import * as overrev from './overrev-ranking.mjs';
+import * as skisuprg from './skisuprg-ranking.mjs';
+import * as segawski from './segawski-ranking.mjs';
+import * as waverunr from './waverunr-ranking.mjs';
+import * as bel from './bel-ranking.mjs';
 
 const GAMES = {
   sfight: {
@@ -69,6 +80,24 @@ const MORE = [
    * no ROMs here; lastbrnxu's program was not checked, so it plays alone. */
   ['vcop', 'Virtua Cop', vcop, { sets: same('vcop') }],
   ['lastbrnx', 'Last Bronx', lastbrnx, { sets: same('lastbrnx', 'lastbrnxj') }],
+  /* Pinboard #1911: the rest of the arcade's library (m2-hle2's m2_library.h, Motor Raid,
+   * Desert Tank). Super GT 24h and Dynamite Baseball keep no ranking across power-off
+   * (README). Only the sets whose programs were seen to keep the same layout share a
+   * board: indy500d and vstrikero lay theirs out otherwise (vstrikero keeps none), and
+   * the clones with no ROMs here (motoraiddx) play alone. Manx TT, Zero Gunner, Gunblade NY,
+   * STCC and Top Skater have their modules, but m2-hle2 erases the EEPROM they check at
+   * every reset, so their rankings go back to the factory at every boot: no board yet. */
+  ['motoraid', 'Motor Raid', motoraid, { sets: same('motoraid') }],
+  ['desert', 'Desert Tank', desert, { sets: same('desert') }],
+  ['vcop2', 'Virtua Cop 2', vcop2, { sets: same('vcop2') }],
+  ['vstriker', 'Virtua Striker', vstriker, { sets: same('vstriker') }],
+  ['skytargt', 'Sky Target', skytargt, { sets: same('skytargt') }],
+  ['indy500', 'INDY 500', indy500, { sets: same('indy500') }],
+  ['overrev', 'Over Rev', overrev, { sets: same('overrev', 'overrevb') }],
+  ['skisuprg', 'Sega Ski Super G', skisuprg, { sets: same('skisuprg') }],
+  ['segawski', 'Sega Water Ski', segawski, { sets: same('segawski') }],
+  ['waverunr', 'Wave Runner', waverunr, { sets: same('waverunr') }],
+  ['bel', 'Behind Enemy Lines', bel, { sets: same('bel') }],
 ];
 for (const [id, title, m, extra] of MORE) GAMES[id] = fromModule(id, title, m, extra);
 
