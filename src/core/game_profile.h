@@ -226,8 +226,14 @@ typedef struct {
      * pot). Any set puts IN1 and IN2 as plain button ports (held bits 8-15,
      * 16-23, active low but for `in_high`), `up` / `down` walk the second
      * axis, and `press` swing a pot full scale (Dynamite Baseball's bats).
-     * The steer, pedals and guns are `wheel`'s and `gun`'s. */
-    struct { uint8_t ch[8]; uint32_t in_high, up, down, press[2]; } analog;
+     * The steer, pedals and guns are `wheel`'s and `gun`'s. `rev`: a bit per
+     * channel read the other way round (MAME PORT_REVERSE), a gun stick within
+     * its range. */
+    struct { uint8_t ch[8]; uint32_t in_high, up, down, press[2]; uint8_t rev; } analog;
+    /* Rail Chase 2's seat board on the 315-5649's ports D and E
+     * (board/seat_board.h): IN2 is its reply, and its moves are the host's
+     * force feedback (core/ffb.h). */
+    bool     seat_board;
 
     /* The I/O board is a Model 1 one behind a dual-port RAM (model1io.h: its
      * Z80 runs the program in the set's iocpu region). The wheel, pedals and

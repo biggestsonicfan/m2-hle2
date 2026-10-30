@@ -62,6 +62,7 @@
 #include "irq_timer.h"
 #include "lightgun.h"
 #include "memory.h"
+#include "seat_board.h"
 
 /* The manual's spec (see above). */
 #define IO5649_WHEEL_CENTER  0x80
@@ -83,6 +84,8 @@ typedef struct {
     bool     layout;
     uint8_t  ch[8];
     uint32_t in_high, up, down, press[2];
+    uint8_t  rev;        /* channels read the other way round */
+    bool     seat;       /* port D is the seat board's reply (seat_board.h) */
 } io5649_controls_t;
 
 /* What a layout's channel reads (quirks.analog.ch). */
@@ -254,7 +257,12 @@ static inline uint8_t io5649_layout_analog(int ch, uint32_t held) {
     if (code >= IO5649_AN_GUN1_X) {
         lightgun_advance();
         int p = (code - IO5649_AN_GUN1_X) >> 1;
-        return (uint8_t)io5649_clamp((code - IO5649_AN_GUN1_X) & 1 ? g_lightgun.y[p] : g_lightgun.x[p], 0, 255);
+        bool y = (code - IO5649_AN_GUN1_X) & 1;
+        int v = y ? g_lightgun.y[p] : g_lightgun.x[p];
+        if (g_io5649_controls.rev >> (ch & 7) & 1)      /* within the gun's range */
+            v = y ? g_lightgun_range[p].y_min + g_lightgun_range[p].y_max - v
+                  : g_lightgun_range[p].x_min + g_lightgun_range[p].x_max - v;
+        return (uint8_t)io5649_clamp(v, 0, 255);
     }
     int v;
     switch (code) {
@@ -269,6 +277,7 @@ static inline uint8_t io5649_layout_analog(int ch, uint32_t held) {
         default: return 0xFF;
     }
     /* The _REV codes are the even ones. */
+    if (g_io5649_controls.rev >> (ch & 7) & 1) v = 255 - v;
     return (uint8_t)((code & 1) == 0 ? 255 - v : v);
 }
 
@@ -319,7 +328,8 @@ static inline uint8_t io5649_read_byte(mem_region_t *r, uint32_t off) {
                    /* A motorbike's IN1 is its buttons, active low. */
                    if (g_io5649_controls.bike) return (uint8_t)~((held >> 8) & 0xFFu);
                    return io5649_gearbox();
-        case 0x06: if (g_io5649_controls.layout) return io5649_in(held, 16);
+        case 0x06: if (g_io5649_controls.seat) return seat_board_reply(r->data ? r->data[0x08] : 0xFF);
+                   if (g_io5649_controls.layout) return io5649_in(held, 16);
                    return g_io5649_controls.bike ? 0xFF : 0x00;   /* IN2: hand brake, unused */
         case 0x1E: {
             io5649_advance();
