@@ -124,6 +124,7 @@ static inline void rollback__add(const char *name, void *p, size_t n, void (*pac
     g_rollback.part[g_rollback.n].late =
         ((uint8_t *)p >= (uint8_t *)&g_sound && (uint8_t *)p < (uint8_t *)(&g_sound + 1)) ||
         ((uint8_t *)p >= (uint8_t *)&g_dsb2 && (uint8_t *)p < (uint8_t *)(&g_dsb2 + 1)) ||
+        ((uint8_t *)p >= (uint8_t *)&g_m1dx && (uint8_t *)p < (uint8_t *)(&g_m1dx + 1)) ||
         p == (void *)&g_shle || p == (void *)&g_ssyn || p == (void *)&g_rollback.meta;
     g_rollback.n++;
     g_rollback.size += n;
@@ -155,6 +156,10 @@ static inline void rollback_layout(i960_cpu_t *cpu, memory_bus_t *bus) {
         if (g_dsb2.z80) rollback__add("DSB2.cpu", &g_dsb2.zcpu, sizeof g_dsb2.zcpu, NULL, false);
         else            rollback__add("DSB2.cpu", &g_dsb2.m68k.cpu, sizeof g_dsb2.m68k.cpu, NULL, false);
         rollback__add("DSB2", &g_dsb2.st, sizeof g_dsb2.st, rollback__pack_dsb2, true);
+    }
+    if (g_m1dx.present) {                              /* Manx TT's Deluxe sound board */
+        rollback__add("M1DX.cpu", &g_m1dx.m68k.cpu, sizeof g_m1dx.m68k.cpu, NULL, false);
+        rollback__add("M1DX", &g_m1dx.st, sizeof g_m1dx.st, NULL, false);
     }
     for (int i = 0; i < g_savestate_extra_n; i++)
         if (savestate_extra_mine(i)) rollback__add(g_savestate_extra[i].name, g_savestate_extra[i].data, g_savestate_extra[i].size, NULL, false);

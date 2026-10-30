@@ -615,13 +615,20 @@ const m2hleGames = (() => {
     manxtt: {
       title: 'Manx TT Superbike',
       year: 1995, board: 'Model 2A-CRX', colors: ['#c81d1d', '#1c0b0b'],
-      blurb: 'The Isle of Man on a superbike: the Laxey Coast course and the TT course itself. It stops on the motion slider\'s safety check, as it does in MAME.',
+      blurb: 'The Isle of Man on a superbike: the Laxey Coast course and the TT course itself, set up as the Twin cabinet, which has no motion slider to check.',
       /* MAME's manxttdx machine; the DX's Model 1 sound board is not here, the
-       * CRX's own sound is (m2_library.h). */
+       * CRX's own sound is (m2_library.h). Both sets boot as a Twin: Rev D's
+       * factory settings are made TWIN, Rev C (manxttc, the Twin's own sound
+       * program) loads MAME's Twin EEPROM. */
       profiles: [
         { id: 'manxtt', name: 'Rev D', about: 'DX/Twin, Revision D' },
+        { id: 'manxttc', name: 'Rev C Twin', about: 'Twin, Revision C' },
       ],
-      romHint: 'Your <code>manxtt.zip</code> (Manx TT Superbike, Revision D)',
+      romHint: 'Your <code>manxtt.zip</code> (Manx TT Superbike, Revision D), or <code>manxttc.zip</code> and its parent <code>manxtt.zip</code>, picked together',
+      /* The touch overlay's Test and Service buttons start shown: TEST MODE sets
+       * the cabinet type (GAME ASSIGNMENTS) and the rest, Service picks a line
+       * and Test enters it. */
+      touchShow: ['test', 'service'],
       /* Motor Raid's bike (io_5649.h): B1 the throttle, B2 the brake, LEFT /
        * RIGHT lean, B3 / B4 shift. */
       labels: { up: 'Unused', down: 'Unused', left: 'Lean left', right: 'Lean right',
@@ -635,9 +642,10 @@ const m2hleGames = (() => {
       i18n: {
         ja: {
           title: 'マンクスTTスーパーバイク',
-          blurb: 'スーパーバイクでマン島を走る。ラクシー・コーストのコースと、T.T. コースそのもの。MAME と同じく、モーションスライダーの安全確認の画面で止まります。',
-          profiles: { manxtt: { name: 'リビジョン D', about: 'DX/ツイン、リビジョン D' } },
-          romHint: 'お持ちの <code>manxtt.zip</code>（マンクスTTスーパーバイク、リビジョン D）',
+          blurb: 'スーパーバイクでマン島を走る。ラクシー・コーストのコースと、T.T. コースそのもの。モーションスライダーの確認がないツイン筐体として設定されています。',
+          profiles: { manxtt: { name: 'リビジョン D', about: 'DX/ツイン、リビジョン D' },
+                      manxttc: { name: 'リビジョン C ツイン', about: 'ツイン、リビジョン C' } },
+          romHint: 'お持ちの <code>manxtt.zip</code>（マンクスTTスーパーバイク、リビジョン D）、または <code>manxttc.zip</code> と親セットの <code>manxtt.zip</code> を一緒に',
           labels: { up: '未使用', down: '未使用', left: '左に傾ける', right: '右に傾ける',
                     b1: 'スロットル', b2: 'ブレーキ', b3: 'シフトアップ', b4: 'シフトダウン' },
         },

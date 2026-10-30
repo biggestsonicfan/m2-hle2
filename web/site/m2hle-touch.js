@@ -62,7 +62,9 @@ m2hleLang.add({
  * the height and leaves bars at the sides; upright, it sits in the middle with
  * room below. STF plays on three buttons, so Button 4 starts hidden, and so
  * do the macros: the editor shows hidden buttons, and "Show" puts one back.
- * P+K takes Button 4's place, which STF does not use. */
+ * P+K takes Button 4's place, which STF does not use. The cabinet's Test and
+ * Service switches start hidden too, but for a game whose `touchShow` names
+ * them (Manx TT's TEST MODE: Pinboard #1926). */
 const M2HLE_TOUCH_LAYOUTS = {
   solo: {
     landscape: {
@@ -77,6 +79,8 @@ const M2HLE_TOUCH_LAYOUTS = {
       pb:    { x: 0.71, y: 0.80, s: 1, on: false },
       kb:    { x: 0.71, y: 0.60, s: 1, on: false },
       pkb:   { x: 0.82, y: 0.16, s: 1, on: false },
+      test:    { x: 0.06, y: 0.26, s: 1, on: false },
+      service: { x: 0.17, y: 0.10, s: 1, on: false },
     },
     portrait: {
       dpad:  { x: 0.25, y: 0.86, s: 1, on: true },
@@ -90,6 +94,8 @@ const M2HLE_TOUCH_LAYOUTS = {
       pb:    { x: 0.49, y: 0.93, s: 1, on: false },
       kb:    { x: 0.49, y: 0.78, s: 1, on: false },
       pkb:   { x: 0.86, y: 0.64, s: 1, on: false },
+      test:    { x: 0.15, y: 0.22, s: 1, on: false },
+      service: { x: 0.30, y: 0.12, s: 1, on: false },
     },
   },
   /* Twin sticks: a lever under each thumb, its shot above it on the outside (the
@@ -123,8 +129,12 @@ const M2HLE_TOUCH_LAYOUTS = {
 const m2hleTouch = (() => {
   const $ = (id) => document.getElementById(id);
   const TWIN = !!m2hleGame.twin;
+  const SHOW = m2hleGame.touchShow || [];
+  /* A twin-stick game, or one that shows controls the others hide, keeps its
+   * layout under its own key. */
+  const OWN = TWIN || SHOW.length > 0;
   const STORE = 'm2hle.touch';
-  const LAYOUT_STORE = TWIN ? STORE + '.' + m2hleGame.id : STORE;
+  const LAYOUT_STORE = OWN ? STORE + '.' + m2hleGame.id : STORE;
 
   /* `act` is the GAME_INPUT_* index for player 1 (src/core/game_profile.h, and
    * m2hle-pad.js's ACTIONS), `acts` a macro's: one button that holds several.
@@ -142,6 +152,8 @@ const m2hleTouch = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    base: 56, text: 'P+B' },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    base: 56, text: 'K+B' },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], base: 56, text: 'PKB' },
+    { id: 'test',    act: 21, base: 50 },
+    { id: 'service', act: 20, base: 50 },
   ];
   /* A twin-stick game: m2hle-pad.js's twin rows, the right lever being player 2's
    * port. `face` is the word on the button; its name is the game's (`labels`). */
@@ -176,7 +188,12 @@ const m2hleTouch = (() => {
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-  let cfg = { show: 'auto', vibrate: true, ...APPEARANCE, layouts: clone(DEFAULTS) };
+  const defaults = () => {
+    const l = clone(DEFAULTS);
+    for (const o of Object.keys(l)) for (const id of SHOW) if (l[o][id]) l[o][id].on = true;
+    return l;
+  };
+  let cfg = { show: 'auto', vibrate: true, ...APPEARANCE, layouts: defaults() };
   const override = new URLSearchParams(location.search).get('touch');
   let touchSeen = matchMedia('(pointer: coarse)').matches;
   let gameOn = false;
@@ -199,7 +216,7 @@ const m2hleTouch = (() => {
     try {
       const s = stored(STORE);
       if (s) loadLook(s);
-      const l = TWIN ? stored(LAYOUT_STORE) : s;
+      const l = OWN ? stored(LAYOUT_STORE) : s;
       if (l) loadLayouts(l.layouts);
     } catch (e) { /* private mode, or a value from somewhere else: keep the defaults */ }
   }
@@ -226,11 +243,11 @@ const m2hleTouch = (() => {
     }
   }
 
-  /* A twin-stick game writes its layout to its own key, and the look to the
-   * shared one beside the fighting games' layout, which it leaves as it was. */
+  /* A game with a layout of its own (OWN) writes it to its own key, and the look
+   * to the shared one beside the fighting games' layout, which it leaves as it was. */
   function save() {
     try {
-      if (!TWIN) { localStorage.setItem(STORE, JSON.stringify({ v: 1, ...cfg })); return; }
+      if (!OWN) { localStorage.setItem(STORE, JSON.stringify({ v: 1, ...cfg })); return; }
       const { layouts, ...look } = cfg, old = stored(STORE);
       localStorage.setItem(STORE, JSON.stringify({ v: 1, ...look, layouts: old ? old.layouts : undefined }));
       localStorage.setItem(LAYOUT_STORE, JSON.stringify({ v: 1, layouts }));
@@ -478,7 +495,7 @@ const m2hleTouch = (() => {
       if (selected) { layout()[selected].on = !layout()[selected].on; render(); }
     });
     $('te-reset').addEventListener('click', () => {
-      cfg.layouts[orient()] = clone(DEFAULTS[orient()]);
+      cfg.layouts[orient()] = defaults()[orient()];
       selected = null;
       render();
     });

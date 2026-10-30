@@ -300,6 +300,10 @@ typedef struct romset {
     /* A Digital Sound Board's 68000 program and its MPEG audio (Top Skater's DSB2). */
     uint8_t *mpegcpu;     size_t mpegcpu_size;
     uint8_t *mpeg;        size_t mpeg_size;
+    /* A second, Model 1 sound board's 68000 program and its MultiPCM samples
+     * (the Manx TT Deluxe cabinet's extra board, MAME's SEGAM1AUDIO). */
+    uint8_t *m1cpu;       size_t m1cpu_size;
+    uint8_t *m1pcm;       size_t m1pcm_size;
     bool     loaded;
 } romset_t;
 
@@ -315,6 +319,8 @@ static inline void romset_free(romset_t *rs) {
     free(rs->iocpu);
     free(rs->mpegcpu);
     free(rs->mpeg);
+    free(rs->m1cpu);
+    free(rs->m1pcm);
     memset(rs, 0, sizeof(*rs));
 }
 
@@ -325,21 +331,22 @@ static inline void romset_free(romset_t *rs) {
  * interleave or byte swap, no CRC pass. `--export-roms DIR` writes one from a
  * zip. The directory's name picks the profile, as the zip's basename does. A
  * region whose file is missing stays NULL, as it does for a set without it. */
-#define ROMSET_FILES 11
+#define ROMSET_FILES 13
 static const char *const k_romset_files[ROMSET_FILES] = {
     "maincpu.bin", "main_data.bin", "copro_data.bin", "polygons.bin",
     "textures.bin", "audiocpu.bin", "samples.bin", "tgp_tables.bin", "iocpu.bin",
-    "mpegcpu.bin", "mpeg.bin",
+    "mpegcpu.bin", "mpeg.bin", "m1cpu.bin", "m1pcm.bin",
 };
 
 static inline uint8_t **romset_region(romset_t *rs, int i, size_t **size) {
     uint8_t **r[ROMSET_FILES] = { &rs->maincpu, &rs->main_data, &rs->copro_data, &rs->polygons,
                                   &rs->textures, &rs->audiocpu, &rs->samples, &rs->tgp_tables,
-                                  &rs->iocpu, &rs->mpegcpu, &rs->mpeg };
+                                  &rs->iocpu, &rs->mpegcpu, &rs->mpeg, &rs->m1cpu, &rs->m1pcm };
     size_t *z[ROMSET_FILES] = { &rs->maincpu_size, &rs->main_data_size, &rs->copro_data_size,
                                 &rs->polygons_size, &rs->textures_size, &rs->audiocpu_size,
                                 &rs->samples_size, &rs->tgp_tables_size,
-                                &rs->iocpu_size, &rs->mpegcpu_size, &rs->mpeg_size };
+                                &rs->iocpu_size, &rs->mpegcpu_size, &rs->mpeg_size,
+                                &rs->m1cpu_size, &rs->m1pcm_size };
     *size = z[i];
     return r[i];
 }

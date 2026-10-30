@@ -49,6 +49,7 @@
 #include "scsp.h"
 #include "model1_sound.h"   /* Daytona's board in place of this one (quirks.model1_sound) */
 #include "dsb2.h"           /* Top Skater's MPEG music board, on the same line */
+#include "m1dx.h"           /* Manx TT Deluxe's Model 1 sound board, on the same line */
 #include "emu_times.h"   /* host time spent here, for get_status */
 #include "thread_mutex.h" /* the sound thread */
 
@@ -738,6 +739,7 @@ static inline void sound_uart_service(sound_state_t *ss, uint64_t now) {
             if (ss->model1) m1snd_rx(&ss->m1, u->byte[u->r]);
             else            scsp_midi_in(&ss->scsp, u->byte[u->r]);
             if (g_dsb2.present) dsb2_rx(u->byte[u->r]);
+            if (g_m1dx.present) m1dx_rx(u->byte[u->r]);
             u->deliver = 0;
             u->sent++;
         }
@@ -904,6 +906,7 @@ static inline void sound_reset(void) {
     g_sound.bank5 = 0x600000u;
     m1snd_reset(&g_sound.m1);
     dsb2_reset();
+    m1dx_reset();
     sound_set_bus();
     sound_map_pages(&g_sound);
     if (rom_loaded) sound_boot_68k();
@@ -946,6 +949,13 @@ static inline void sound_load_samples(const uint8_t *bytes, uint32_t size) {
 static inline void sound_load_dsb2(const uint8_t *rom, size_t rom_size, const uint8_t *mpeg, size_t mpeg_size) {
     sound_settle();
     dsb2_load(rom, rom_size, mpeg, mpeg_size);
+}
+
+/* The set's second Model 1 sound board (m1dx.h), or none (NULL). The caller
+ * keeps the ROMs alive. */
+static inline void sound_load_m1dx(const uint8_t *rom, size_t rom_size, const uint8_t *pcm, size_t pcm_size) {
+    sound_settle();
+    m1dx_load(rom, rom_size, pcm, pcm_size);
 }
 
 /* Hook the UART callbacks. Call after mem_init(). */
@@ -1019,6 +1029,7 @@ static int g_sound_mute;
 
 static inline void sound_out_push(int16_t l, int16_t r) {
     if (g_dsb2.present) dsb2_sample(&l, &r);   /* its time moves with the board's, muted or not */
+    if (g_m1dx.present) m1dx_sample(&l, &r);
     uint64_t index = g_sound.out_total++;
     if (g_sound_mute) return;
     if (g_sound_tap) g_sound_tap(l, r, index, g_sound_tap_ud);

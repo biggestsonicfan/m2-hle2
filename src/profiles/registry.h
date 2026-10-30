@@ -95,6 +95,7 @@ const game_profile_t *const g_profiles[] = {
     &daytonata_profile,
     &daytonagtx_profile,
     &manxtt_profile,
+    &manxttc_profile,
     &skytargt_profile,
     &vcop2_profile,
     &zeroguna_profile,

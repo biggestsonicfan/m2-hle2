@@ -314,7 +314,8 @@ static inline bool emu_multi__load_sets(emu_thread_ctx_t *ctx, const game_profil
              || !emu_multi__same("COP data", m->rs.copro_data, m->rs.copro_data_size, rs->copro_data, rs->copro_data_size, zip)
              || !emu_multi__same("TGP tables", m->rs.tgp_tables, m->rs.tgp_tables_size, rs->tgp_tables, rs->tgp_tables_size, zip)
              || !emu_multi__same("I/O board program", m->rs.iocpu, m->rs.iocpu_size, rs->iocpu, rs->iocpu_size, zip)
-             || !emu_multi__same("music board", m->rs.mpegcpu, m->rs.mpegcpu_size, rs->mpegcpu, rs->mpegcpu_size, zip)) {
+             || !emu_multi__same("music board", m->rs.mpegcpu, m->rs.mpegcpu_size, rs->mpegcpu, rs->mpegcpu_size, zip)
+             || !emu_multi__same("Deluxe sound board", m->rs.m1cpu, m->rs.m1cpu_size, rs->m1cpu, rs->m1cpu_size, zip)) {
                 emu_multi_sets_free();
                 return false;
             }

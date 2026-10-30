@@ -74,6 +74,7 @@ static const struct { const char *id; game_region_kind_t kind; } g_region_unhook
     { "pltkids",         REGION_TODO },
     { "pltkidsa",        REGION_TODO },
     { "manxtt",          REGION_TODO },   /* m2_library.h */
+    { "manxttc",         REGION_TODO },   /* m2_library.h */
     { "skytargt",        REGION_TODO },   /* m2_library.h */
     { "vcop2",           REGION_TODO },   /* m2_library.h */
     { "zeroguna",        REGION_TODO },   /* m2_library.h */

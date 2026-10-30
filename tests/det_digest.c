@@ -461,6 +461,7 @@ static void install_board(void *ctx) {
         if (romset.audiocpu && romset.audiocpu_size > 0) sound_load_rom(romset.audiocpu, (uint32_t)romset.audiocpu_size);
         if (romset.samples && romset.samples_size > 0)   sound_load_samples(romset.samples, (uint32_t)romset.samples_size);
         sound_load_dsb2(romset.mpegcpu, romset.mpegcpu_size, romset.mpeg, romset.mpeg_size);
+        sound_load_m1dx(romset.m1cpu, romset.m1cpu_size, romset.m1pcm, romset.m1pcm_size);
     }
     input_reset();
     input_attach(&bus);
