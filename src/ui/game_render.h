@@ -1733,8 +1733,11 @@ static inline void gm_mat4_view(float *m, float cx, float cy, float cz,
 #  define GAME_RENDER_ATLAS_ROWS 1
 #endif
 
-/* The decoded atlas as last uploaded: 2048×2048 R8, sheet 0 over sheet 1. */
-static uint8_t g_game_render_atlas_px[GEO3D_ATLAS_W * GEO3D_ATLAS_H];
+/* The decoded atlas as last uploaded: 2048×2048 R8, sheet 0 over sheet 1.
+ * The current render bank's (game_render_use_bank): the renderer's own. */
+#define GAME_RENDER_ATLAS_BYTES ((size_t)GEO3D_ATLAS_W * GEO3D_ATLAS_H)
+static uint8_t  g_game_render_atlas_px0[GAME_RENDER_ATLAS_BYTES];
+static uint8_t *g_game_render_atlas_px = g_game_render_atlas_px0;
 
 /* Which atlas rows the last decode rewrote, for the upload that follows. */
 static uint8_t g_game_render_atlas_row[GEO3D_ATLAS_H];
@@ -1782,7 +1785,7 @@ static inline void game_render__atlas_send(void) {
     }
 #endif
     sg_update_image(g_game_render.atlas_image, &(sg_image_data){
-        .mip_levels[0] = { .ptr = g_game_render_atlas_px, .size = sizeof g_game_render_atlas_px },
+        .mip_levels[0] = { .ptr = g_game_render_atlas_px, .size = GAME_RENDER_ATLAS_BYTES },
     });
 }
 
@@ -2029,6 +2032,72 @@ static inline void game_render_upload_luts(const uint8_t *luma, const uint8_t *c
         for (int r = 0; r < g_game_render.ramp_count; r++) game_render__ramp_fill(r);
         g_game_render.ramp_dirty = true;
     }
+}
+
+/* ---- Render banks (Pinboard #1910) ---------------------------------------- */
+
+/* What one board's picture needs of its own when several boards share the
+ * renderer (core/emu_multi.h): the texture atlas and its pixels, the LUT
+ * textures, and when each last went up (game_frame__upload). sokol updates a
+ * dynamic image once a frame, and the atlas decodes only the texture RAM a
+ * board changed, so each board keeps its own. Bank 0 is the renderer's own,
+ * made by game_render_init; the frontend swaps one in before a board's draw. */
+typedef struct {
+    bool     made;
+    sg_image atlas_image, luma_image, cxlat_image;
+    sg_view  atlas_view, luma_view, cxlat_view;
+    uint8_t *atlas_px;
+    bool     atlas_valid, luts_valid;    /* game_frame__upload's */
+    uint32_t atlas_gen, luts_gen;
+} game_render_bank_t;
+
+static game_render_bank_t  g_game_render_bank0 = { .made = true };
+static game_render_bank_t *g_game_render_bank  = &g_game_render_bank0;
+
+/* A bank of its own; its first upload decodes the whole atlas. */
+static inline bool game_render_bank_make(game_render_bank_t *b) {
+    memset(b, 0, sizeof *b);
+    b->atlas_px = (uint8_t *)calloc(1, GAME_RENDER_ATLAS_BYTES);
+    if (!b->atlas_px) return false;
+    b->atlas_image = sg_make_image(&(sg_image_desc){
+        .width = GEO3D_ATLAS_W, .height = GEO3D_ATLAS_H, .pixel_format = SG_PIXELFORMAT_R8,
+        .usage = { .dynamic_update = true }, .label = "geo3d-atlas-bank" });
+    b->atlas_view = sg_make_view(&(sg_view_desc){ .texture.image = b->atlas_image });
+    b->luma_image = sg_make_image(&(sg_image_desc){
+        .width = 256, .height = (int)(LUMA_SIZE / 256), .pixel_format = SG_PIXELFORMAT_R8,
+        .usage = { .dynamic_update = true }, .label = "geo3d-lumaram-bank" });
+    b->luma_view = sg_make_view(&(sg_view_desc){ .texture.image = b->luma_image });
+    b->cxlat_image = sg_make_image(&(sg_image_desc){
+        .width = 256, .height = (int)(COLORXLAT_SIZE / 256), .pixel_format = SG_PIXELFORMAT_R8,
+        .usage = { .dynamic_update = true }, .label = "geo3d-colorxlat-bank" });
+    b->cxlat_view = sg_make_view(&(sg_view_desc){ .texture.image = b->cxlat_image });
+    b->made = true;
+    return true;
+}
+
+static inline void game_render_bank_free(game_render_bank_t *b) {
+    if (!b->made || b == &g_game_render_bank0) return;
+    sg_destroy_view(b->atlas_view);  sg_destroy_image(b->atlas_image);
+    sg_destroy_view(b->luma_view);   sg_destroy_image(b->luma_image);
+    sg_destroy_view(b->cxlat_view);  sg_destroy_image(b->cxlat_image);
+    free(b->atlas_px);
+    memset(b, 0, sizeof *b);
+}
+
+/* The renderer draws with bank b (NULL: its own) from here. */
+static inline void game_render_use_bank(game_render_bank_t *b) {
+    if (!b) b = &g_game_render_bank0;
+    game_render_bank_t *cur = g_game_render_bank;
+    if (b == cur) return;
+    cur->atlas_image = g_game_render.atlas_image; cur->atlas_view = g_game_render.atlas_view;
+    cur->luma_image  = g_game_render.luma_image;  cur->luma_view  = g_game_render.luma_view;
+    cur->cxlat_image = g_game_render.cxlat_image; cur->cxlat_view = g_game_render.cxlat_view;
+    cur->atlas_px    = g_game_render_atlas_px;
+    g_game_render.atlas_image = b->atlas_image; g_game_render.atlas_view = b->atlas_view;
+    g_game_render.luma_image  = b->luma_image;  g_game_render.luma_view  = b->luma_view;
+    g_game_render.cxlat_image = b->cxlat_image; g_game_render.cxlat_view = b->cxlat_view;
+    g_game_render_atlas_px    = b->atlas_px;
+    g_game_render_bank = b;
 }
 
 /* ---- Per-frame draw ------------------------------------------------------ */

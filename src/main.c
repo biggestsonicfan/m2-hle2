@@ -65,6 +65,7 @@
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
 #include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
 #include "post_shader.h"     /* the CRT filter and libretro presets over the picture */
+#include "multi_view.h"      /* --boards N: every board in one window (#1910) */
 #include "shader_window.h"   /* ...and the Video menu that picks one */
 #include "m2lua_ui.h"        /* M2emulator's game scripts: their drawing, keys and menu */
 #include "m2lua_mcp.h"       /* ...and the bridge's script_* commands */
@@ -346,8 +347,10 @@ static void load_active_profile(const char *primary_zip) {
     emu_mutex_lock(&state.emu.mutex);
     replay_game_loaded();   /* a recording ends; a replay lets go of the board */
     tas_break("another game was loaded");
+    emu_multi_stop(&state.emu);   /* the other boards are the set going's */
     m2lua_unload();         /* the script's ROM patches come off the set going */
     emu_mutex_unlock(&state.emu.mutex);
+    multi_view_set_loaded();      /* and their pictures: made again for this set */
 
     g_mcp.installing = 1;              /* get_status: not rom_loaded until the end */
     if (romset_load(&state.romset, g_active_profile->load_fn, primary_zip, parent_zip_ptr) == 0) {
@@ -1796,10 +1799,14 @@ static void frame(void) {
      * highlights track live state without tearing. */
     if (state.emu_started) emu_update_snapshots(&state.emu);
 
+    /* --boards N: the rounds owed, each board drawn into its own target. */
+    const bool multi = multi_view_frame(&state.emu, &state.bus, &state.romset, &state.geo3d,
+                                        state.emu_started && emu_is_running(&state.emu));
+
     /* Compose the tile layers and scan this frame's 3D (shared with main_sdl.c). */
-    game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset,
-                       state.emu_started);
-    float lerp_t = state.emu_started ? game_frame_lerp() : 1.0f;
+    if (!multi) game_frame_prepare(&state.video, &state.geo3d, &state.bus, &state.romset,
+                                   state.emu_started);
+    float lerp_t = state.emu_started && !multi ? game_frame_lerp() : 1.0f;
 
     netplay_cli_pump();
     netplay_room_announce();
@@ -1824,7 +1831,11 @@ static void frame(void) {
 
     int ox, oy, w, h;
     bool win_overlay = frame_game_box(&ox, &oy, &w, &h);
-    const bool post = frame_post_source(w, h, lerp_t);
+    if (multi) {   /* the boards' grid takes the whole window below the menu bar */
+        int menu_h = s_menu_bar_visible ? (int)(igGetFrameHeight() * sapp_dpi_scale()) : 0;
+        ox = 0; oy = menu_h; w = sapp_width(); h = sapp_height() - menu_h;
+    }
+    const bool post = !multi && frame_post_source(w, h, lerp_t);
 
     sg_begin_pass(&(sg_pass){
         .action    = state.pass_action,
@@ -1833,7 +1844,8 @@ static void frame(void) {
 
     /* Draw the game letterboxed into the swapchain, then ImGui on top.
      * Layer order: back-back colour → background tiles → (3D, Phase 9) → FG/HUD. */
-    window_draw_game(ox, oy, w, h, post, win_overlay, lerp_t);
+    if (multi) multi_view_draw(ox, oy, w, h);
+    else window_draw_game(ox, oy, w, h, post, win_overlay, lerp_t);
 
     simgui_render();
     sg_end_pass();
@@ -1881,6 +1893,7 @@ static void cleanup(void) {
     overlay_host_shutdown();   /* before game_render_shutdown: it owns sg images */
     av_capture_shutdown();
     post_shader_shutdown();
+    multi_view_free_all();     /* before game_render_shutdown: the boards' banks */
     game_render_shutdown();
     video_shutdown(&state.video);
     simgui_shutdown();
@@ -1929,6 +1942,8 @@ static void event(const sapp_event* ev) {
 
     /* A key the Controls window is binding goes to it, not the game. */
     if (controls_key_event(ev)) return;
+    /* --boards N: a click on a board, or Ctrl+1..8, moves the focus. */
+    if (multi_view_event(ev)) return;
 
     /* Game input flows through the emulated I/O ports (read by the game's vblank
      * interrupt) — set/clear the host held mask here. Routed regardless of ImGui
@@ -2116,6 +2131,13 @@ static void parse_args(int argc, char **argv) {
             i++;                                /* taken above, before anything logged */
         } else if (strcmp(argv[i], "--headless") == 0) {
             g_headless = 1;
+        } else if (strcmp(argv[i], "--boards") == 0 && i + 1 < argc) {
+            i++;                                /* N boards of the set in one window */
+            g_multi_want = strcmp(argv[i], "all") == 0 ? -1 : atoi(argv[i]);   /* all: the game's ring */
+            if (g_multi_want != -1 && (g_multi_want < 2 || g_multi_want > EMU_MULTI_MAX)) {
+                LOG_WARN("--boards takes 2..%d or all; one board it is", EMU_MULTI_MAX);
+                g_multi_want = 0;
+            }
         } else if (strcmp(argv[i], "--scripts") == 0 && i + 1 < argc) {
             snprintf(g_scripts_dir, sizeof g_scripts_dir, "%s", argv[++i]);  /* <set>.lua's folder */
         } else if (strcmp(argv[i], "--no-scripts") == 0) {
@@ -2377,6 +2399,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     if (!g_headless && !g_replay_cli_set) replay_settings_load();
     if (!g_headless) lightgun_ui_settings_load();   /* the crosshair (Pinboard #1496) */
     scripts_setup();
+    if (g_headless && g_multi_want) { LOG_WARN("--boards needs the window: one board under --headless"); g_multi_want = 0; }
     if (g_headless) exit(headless_main());
     /* Capture mode wants the game moving, not a first frame held on pause. */
     if (g_kiosk_on) g_autorun = 1;

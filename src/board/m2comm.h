@@ -53,7 +53,7 @@
  *     M2COMM_RESEND passes, where MAME's TCP never loses one.
  *   - No VSYNC frames (0xFC): MAME sends them only for its frame-sync option.
  *   - FG reads take nothing (MAME's read_fg): frames come only at the pass.
- *   - Two nodes, no relay.
+ *   - Two nodes over datagrams (more only in one process, below), no relay.
  *   - MAME ships the whole frame size, and Power Sled reads all of it
  *     (m2comm_set_whole_frame): its ROM keeps a ring of 0x180-byte node slots,
  *     the frame received landing one slot up from the sender's, so slot k
@@ -64,6 +64,11 @@
  *     once the race fills it, so the window still goes over, and the receiver
  *     makes the rest: past its window the sender's frame is what it last took
  *     from this node, this node's own frame two slots down.
+ *   - A ring of more than two (m2comm_set_mame_frames, core/emu_multi.h:
+ *     boards of one process, where nothing is lost and size costs nothing)
+ *     ships MAME's whole frame, as MAME does: each node's sends are the next
+ *     node's to take, and the frame taken lands at 0x2000 + frame offset, so
+ *     the ROM's slots shift one node a hop round the ring.
  * A board set to be the MASTER with nobody on the link waits for a ring that
  * never comes up: Daytona's NETWORK CHECKING ends in CANCELLED and a reboot,
  * forever. Each start of the board as a master alone is counted
@@ -128,6 +133,7 @@ typedef struct {
     uint32_t quiet;                 /* passes the master has gone unanswered */
     uint32_t sent, taken;           /* data frames out and in, for diagnostics */
     bool     whole_frame;           /* MAME's whole frame from the window (m2comm_set_whole_frame) */
+    bool     mame_frames;           /* MAME's whole frame over the link (m2comm_set_mame_frames) */
     bool     cable;                 /* the virtual TOSlink: output into input, with no peer */
     bool     lone_seen;             /* this start of the board is counted in lone_masters */
     uint32_t lone_masters;          /* starts as a master with nobody on the link (core/link_check.h) */
@@ -201,8 +207,18 @@ static inline void m2comm__send(m2comm_link_t *l, uint32_t len) {
     p->send(p->ctx, l->msg, len);
 }
 
-static inline void m2comm__send_data(m2comm_state_t *s, m2comm_link_t *l) {
+/* What a data frame carries: the window, or MAME's whole frame size. */
+static inline uint32_t m2comm__payload(const m2comm_state_t *s, const m2comm_link_t *l) {
     uint32_t n = m2comm__window(s);
+    if (!l->mame_frames) return n;
+    uint32_t size = (uint32_t)s->shared[0x12] | (uint32_t)s->shared[0x13] << 8;
+    uint32_t room = M2COMM_RAM_SIZE - M2COMM_FRAME_START - n;
+    if (room > M2COMM_WINDOW_MAX) room = M2COMM_WINDOW_MAX;   /* a datagram's most */
+    return size < room ? size : room;
+}
+
+static inline void m2comm__send_data(m2comm_state_t *s, m2comm_link_t *l) {
+    uint32_t n = m2comm__payload(s, l);
     l->msg[0] = l->id;
     memcpy(l->msg + 1, s->shared + M2COMM_FRAME_START, n);
     m2comm__send(l, 1u + n);
@@ -268,11 +284,11 @@ static inline void m2comm__pass_down(m2comm_state_t *s, m2comm_link_t *l) {
 static inline void m2comm__pass_up(m2comm_state_t *s, m2comm_link_t *l) {
     bool master = m2comm__is_master(s);
     const m2comm_peer_t *p = m2comm__peer(l);
-    uint32_t n = m2comm__window(s), len;
+    uint32_t n = m2comm__window(s), size = m2comm__payload(s, l), len;
     while ((len = p->recv(p->ctx, l->msg, sizeof l->msg)) > 0) {
-        if (l->msg[0] > l->count || len != 1u + n) continue;   /* the ring's own traffic, or torn */
-        if (l->whole_frame) m2comm__take_whole(s, n);
-        memcpy(s->shared + M2COMM_FRAME_START + n, l->msg + 1, n);
+        if (l->msg[0] > l->count || len != 1u + size) continue;   /* the ring's own traffic, or torn */
+        if (l->whole_frame && !l->mame_frames) m2comm__take_whole(s, n);
+        memcpy(s->shared + M2COMM_FRAME_START + n, l->msg + 1, size);
         s->zfg ^= 1u;
         l->taken++;
         l->quiet = 0;
@@ -418,6 +434,11 @@ static inline uint32_t m2comm_lone_masters(void) { return g_m2comm_link.lone_mas
 /* After m2comm_install: a data frame taken fills MAME's whole frame size from
  * 0x2000 + offset (the ROM's ring of node slots), not just the window. */
 static inline void m2comm_set_whole_frame(bool on) { g_m2comm_link.whole_frame = on; }
+
+/* MAME's whole frame size over the link, not the window: a ring of more than
+ * two nodes, in one process (core/emu_multi.h). Outlives the board's resets,
+ * as the peer does; every node of the ring must have it. */
+static inline void m2comm_set_mame_frames(bool on) { g_m2comm_link.mame_frames = on; }
 
 /* Whether the comm board is linked to another host's cabinet: its host then
  * paces it by the link's clock (core/link_pace.h). Not a twin's (the other
