@@ -66,7 +66,9 @@
  * frames, as MAME does. --peek HEXADDR adds that byte to each line (the mode
  * at 50002A, the sub-mode at 500030), to pair frames with a MAME log.
  * --peek32 HEXADDR adds that word, signed (Sega Rally's LOD budget at
- * 20AAC0). --i960-timing table|board charges the i960 MAME's table or the
+ * 20AAC0); --peekf HEXADDR adds that word as a float. Up to 8 peeks, in
+ * the order given. --dump HEXADDR:HEXSIZE:FILE appends those bytes of
+ * every printed frame to FILE. --i960-timing table|board charges the i960 MAME's table or the
  * board's timing (i960_timing.h) whatever the profile says.
  *
  * --m2comm-phantom links the comm board (board/m2comm.h) to a second cabinet
@@ -744,7 +746,12 @@ static void parse_script(const char *s) {
 /* The command line's settings that only main uses; the rest go straight
  * into the globals above. */
 typedef struct {
-    uint32_t    frames, from, peek_addr, peek32_addr;
+    uint32_t    frames, from;
+    uint32_t    peek_addr[8];
+    char        peek_kind[8];   /* 'b' byte, 'w' signed word, 'f' float */
+    int         peeks;
+    uint32_t    dump_addr, dump_size;   /* --dump: these bytes of every frame */
+    FILE       *dump_out;
     bool        frames_given, sound_cols, cpu_cols;
     const char *out_path, *script_text, *inputs_path, *profile_id;
 } dd_opts_t;
@@ -771,8 +778,19 @@ static int parse_run_arg(dd_opts_t *o, int argc, char **argv, int *i) {
     else if (arg_val(argc, argv, *i, "--out"))    o->out_path = argv[++*i];
     else if (!strcmp(a, "--sound"))                o->sound_cols = true;
     else if (!strcmp(a, "--cpu"))                  o->cpu_cols = true;
-    else if (arg_val(argc, argv, *i, "--peek"))   o->peek_addr = (uint32_t)strtoul(argv[++*i], NULL, 16);
-    else if (arg_val(argc, argv, *i, "--peek32")) o->peek32_addr = (uint32_t)strtoul(argv[++*i], NULL, 16);
+    else if (arg_val(argc, argv, *i, "--dump")) {
+        char path[1024] = {0};
+        if (sscanf(argv[++*i], "%x:%x:%1023s", &o->dump_addr, &o->dump_size, path) != 3
+            || !o->dump_size || !(o->dump_out = fopen(path, "wb"))) {
+            fprintf(stderr, "--dump HEXADDR:HEXSIZE:FILE\n");
+            return 2;
+        }
+    }
+    else if ((arg_val(argc, argv, *i, "--peek") || arg_val(argc, argv, *i, "--peek32")
+              || arg_val(argc, argv, *i, "--peekf")) && o->peeks < 8) {
+        o->peek_kind[o->peeks] = a[6] == '3' ? 'w' : a[6] == 'f' ? 'f' : 'b';
+        o->peek_addr[o->peeks++] = (uint32_t)strtoul(argv[++*i], NULL, 16);
+    }
     else if (arg_val(argc, argv, *i, "--profile")) o->profile_id = argv[++*i];
     else return 0;
     return 1;
@@ -999,9 +1017,15 @@ static void frame_print(const dd_opts_t *o, FILE *out) {
         fprintf(out, " %016llx %llu", (unsigned long long)fnv(FNV0, g_sound.ram, sizeof g_sound.ram),
                 (unsigned long long)g_sound.out_total);
     }
-    if (o->peek_addr) fprintf(out, " %02x", mem_read8(&bus, o->peek_addr));
-    if (o->peek32_addr) fprintf(out, " %d", (int32_t)mem_read32(&bus, o->peek32_addr));
+    for (int k = 0; k < o->peeks; k++) {
+        uint32_t w = mem_read32(&bus, o->peek_addr[k]);
+        union { uint32_t u; float f; } v = { w };
+        if (o->peek_kind[k] == 'b')      fprintf(out, " %02x", mem_read8(&bus, o->peek_addr[k]));
+        else if (o->peek_kind[k] == 'w') fprintf(out, " %d", (int32_t)w);
+        else                             fprintf(out, " %.4f", (double)v.f);
+    }
     fputc('\n', out);
+    for (uint32_t k = 0; o->dump_out && k < o->dump_size; k++) fputc(mem_read8(&bus, o->dump_addr + k), o->dump_out);
 }
 
 /* One slice (traced on --trace's frame), the link's host clock around its
