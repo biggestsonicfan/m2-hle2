@@ -219,16 +219,22 @@ static const game_profile_t *startup_profile(void) {
  * the set's default. False when no profile runs the set, or it is a prepared
  * one (registry.h) that no board can run yet: nothing is loaded then, as the
  * handheld and the libretro core refuse it (profile_missing_message). */
-static bool select_profile_for_zip(const char *path) {
+/* The zip's set name: its basename without the extension. */
+static void zip_set_id(const char *path, char *id, size_t cap) {
     const char *sep_f = strrchr(path, '/');
     const char *sep_b = strrchr(path, '\\');
     const char *base  = (sep_f > sep_b ? sep_f : sep_b);
     base = base ? base + 1 : path;
-    char id[64] = {0};
     const char *dot = strrchr(base, '.');
     size_t n = dot ? (size_t)(dot - base) : strlen(base);
-    if (n >= sizeof(id)) n = sizeof(id) - 1;
+    if (n >= cap) n = cap - 1;
     memcpy(id, base, n);
+    id[n] = 0;
+}
+
+static bool select_profile_for_zip(const char *path) {
+    char id[64];
+    zip_set_id(path, id, sizeof id);
     const game_profile_t *p = profile_for_rom_set(id, g_active_profile);
     if (!p) {
         char why[256];
@@ -392,6 +398,9 @@ static void load_active_profile(const char *primary_zip) {
      * bus and resets the CPU, which must not race the run loop. */
     if (state.emu_started) { emu_stop(&state.emu); emu_sleep_ms(10); }
     sound_settle();   /* load_fn frees the sample ROMs the sound thread reads */
+    /* A twin's other cabinet (SOLO) is laid out over the set going: its swap
+     * would copy through the freed ROM. The next pass opens it on the new set. */
+    emu_ggpo_shutdown(&state.emu);
     emu_mutex_lock(&state.emu.mutex);
     replay_game_loaded();   /* a recording ends; a replay lets go of the board */
     tas_break("another game was loaded");
@@ -805,12 +814,29 @@ static void menu_file(void) {
     igEndMenu();
 }
 
+/* A profile picked in the menu. One that runs the loaded set loads it again
+ * under itself, as Open would: its hooks, its backup RAM and a site's boards
+ * (Power Sled - Arcade's Main and Relay sets, Pinboard #1920) are made at the
+ * load, and only swapping the pointer left the board running the last
+ * profile's. Any other is the profile the next Open starts from. */
+static void pick_profile(const game_profile_t *p) {
+    if (p == g_active_profile) return;
+    g_active_profile = p;
+    if (!s_loaded_zip[0] || !state.romset.loaded) return;
+    char id[64];
+    zip_set_id(s_loaded_zip, id, sizeof id);
+    if (profile_for_rom_set(id, p) != p) return;
+    bool running = state.emu_started && emu_is_running(&state.emu);
+    load_active_profile(s_loaded_zip);
+    if (running && state.romset.loaded) emu_run(&state.emu);
+}
+
 static void menu_profile(void) {
     if (!igBeginMenu("Profile")) return;
     for (size_t i = 0; i < g_profile_count; i++) {
         bool sel = (g_active_profile == g_profiles[i]);
         if (igMenuItemBoolPtr(g_profiles[i]->display_name, NULL, &sel, true))
-            g_active_profile = g_profiles[i];
+            pick_profile(g_profiles[i]);
     }
     igSeparator();
     igMenuItemBoolPtr("Controls...", NULL, &state.show_controls, true);
