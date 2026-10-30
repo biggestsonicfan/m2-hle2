@@ -125,19 +125,26 @@ static inline void game_frame__upload(memory_bus_t *bus) {
      * since the last upload (sampled before uploading, so a write that lands
      * meanwhile uploads again next frame). The atlas is 4 MB: re-sending it
      * every frame was the largest single cost on a handheld GPU. */
-    static bool     s_atlas_valid = false, s_luts_valid = false;
-    static uint32_t s_atlas_gen, s_luts_gen;
+    /* The render bank's (game_render_use_bank): each board of several has its
+     * own atlas. A bank's first decode is the whole of texture RAM: the flags
+     * are the writes since whichever board drew last. */
+    game_render_bank_t *k = g_game_render_bank;
     uint32_t tex_gen = bus->gen_tex, lut_gen = bus->gen_lut + cabinet_picture_gen();
-    if (!s_atlas_valid || tex_gen != s_atlas_gen) {
+    if (!k->atlas_valid || tex_gen != k->atlas_gen) {
+        bool whole = !k->atlas_valid;
         game_render_upload_atlas(bus->texram0, bus->texram1, TEXRAM0_SIZE,
-                                 bus->tex_dirty[0], bus->tex_dirty[1]);
-        s_atlas_valid = true;
-        s_atlas_gen   = tex_gen;
+                                 whole ? NULL : bus->tex_dirty[0], whole ? NULL : bus->tex_dirty[1]);
+        if (whole) {   /* the flags were read whole: none is left for later */
+            memset((void *)bus->tex_dirty[0], 0, sizeof bus->tex_dirty[0]);
+            memset((void *)bus->tex_dirty[1], 0, sizeof bus->tex_dirty[1]);
+        }
+        k->atlas_valid = true;
+        k->atlas_gen   = tex_gen;
     }
-    if (!s_luts_valid || lut_gen != s_luts_gen) {
+    if (!k->luts_valid || lut_gen != k->luts_gen) {
         game_render_upload_luts(bus->luma, cabinet_picture_xlat(bus));
-        s_luts_valid = true;
-        s_luts_gen   = lut_gen;
+        k->luts_valid = true;
+        k->luts_gen   = lut_gen;
     }
 }
 

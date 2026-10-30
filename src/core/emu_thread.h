@@ -1213,9 +1213,13 @@ static inline bool emu_netplay_allows_slice(emu_thread_ctx_t *ctx, int64_t slice
 /* Rollback netplay (Pinboard #575): its step stands in for the one below. */
 #include "emu_ggpo.h"
 
+/* Several boards side by side (Pinboard #1910): the window runs them. */
+#include "emu_multi.h"
+
 /* The run loop's RUNNING state: one slice, then its pacing. False when no
  * slice ran and the loop goes straight round again. */
 static inline bool emu_run_running(emu_thread_ctx_t *ctx) {
+    if (emu_multi_on()) { emu_nap_us(1000); return false; }
     emu_ggpo_lobby_pump();
     emu_ggpo_solo_netplay(ctx);
     if (emu_ggpo_wanted()) return emu_ggpo_step(ctx);

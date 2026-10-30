@@ -430,6 +430,20 @@ typedef struct game_profile {
      * has no link. */
     game_link_role_fn   link_role;
 
+    /* The role for the boards of one process only (`--boards`, core/
+     * emu_multi.h), for a game whose link is not netplay's yet. NULL: the
+     * boards take link_role's. */
+    game_link_role_fn   ring_role;
+
+    /* The most cabinets on one ring of the game (`--boards`): Daytona's eight
+     * (8人まで対戦できます). 0: two, Virtual-On's one-on-one. */
+    uint8_t             link_cabinets;
+
+    /* A SLAVE's place among the ring's slaves (0..link_cabinets-2), written
+     * into its backup block before it boots, for a game whose slaves must
+     * differ (Power Sled's ride colours). NULL: the slaves are all alike. */
+    void              (*ring_seat)(struct memory_bus *bus, int seat);
+
     /* A GGPO match plays the link: both cabinets on each machine, one player
      * on each (core/emu_twin.h). A role outside backup RAM (Power Sled's unit,
      * the program's bytes) must be a savestate extra, as it swaps with the

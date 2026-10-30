@@ -171,6 +171,15 @@ static inline bool powsled_link_role(memory_bus_t *bus, game_link_role_t role) {
     return true;
 }
 
+/* `--boards` (core/emu_multi.h): each ride its own colour, as the Main's
+ * NETWORK screen wants (one each of SILVER, RED, BLACK and YELLOW; two alike
+ * are an ERROR, "change RIDE ID (color)"). Every settings copy gets it, so
+ * any two agree (FUN_edc30). */
+static inline void powsled_ring_seat(memory_bus_t *bus, int seat) {
+    if (!bus->back || seat < 0 || seat > 3) return;
+    for (uint32_t copy = 0; copy < 3; copy++) bus->back[copy * 0x100u + 8u] = (uint8_t)seat;
+}
+
 /* The Main's operator, for a ride played alone (emu_ggpo.h, SOLO; Pinboard
  * #1110). The race state, 0x53E744 on every unit, is 4 between races, 5 with
  * entry open, 6 once it is closed, 7 racing and 8 on the results, then 4
@@ -245,6 +254,8 @@ static const game_profile_t powsled_profile = {
     .install_fn      = powsled_install,
     .hook_count      = 0,
     .link_role       = powsled_link_role,
+    .link_cabinets   = 5,      /* the Main and four rides (no Relay unit yet) */
+    .ring_seat       = powsled_ring_seat,
     .link_twin       = true,   /* GGPO: the Main (1P) and a ride (2P) on each machine */
     .link_solo       = powsled_solo_op,   /* alone: a Main beside the ride, its panel worked */
     .input = {
