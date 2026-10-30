@@ -75,6 +75,8 @@ typedef struct {
     bool     flip;               /* GL hands back the bottom row first */
     bool     nv12;               /* convert on the GPU; see the top of the file */
     bool     want_card;          /* --av-test-card, asked for before init */
+    bool     wait;               /* --replay-video: wait for a slot and a readback, never drop */
+    uint64_t seen;               /* the newest board frame av_capture_due has taken */
 
     sg_image color_img, depth_img;
     sg_view  color_att, depth_att, color_tex;
@@ -109,6 +111,8 @@ typedef struct {
 static av_capture_t g_av_cap;
 
 static inline bool av_capture_ready(void)    { return g_av_cap.ready; }
+static inline void av_capture_set_wait(bool on) { g_av_cap.wait = on; }
+static inline uint64_t av_capture_seen(void)  { return g_av_cap.seen; }
 static inline sg_view av_capture_color_att(void) { return g_av_cap.color_att; }
 static inline sg_view av_capture_depth_att(void) { return g_av_cap.depth_att; }
 static inline sg_view av_capture_color_tex(void) { return g_av_cap.color_tex; }
@@ -318,8 +322,8 @@ static inline bool av__cap_map(uint32_t idx, uint8_t *dst) {
     if (!ctx || !g_av_cap.stage[idx]) return false;
     D3D11_MAPPED_SUBRESOURCE m;
     HRESULT hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_av_cap.stage[idx], 0,
-                                         D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
-    if (FAILED(hr)) return false;          /* still drawing: drop it, do not stall */
+                                         D3D11_MAP_READ, g_av_cap.wait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+    if (FAILED(hr)) return false;          /* still drawing: drop it, do not stall (unless wait) */
     if (!g_av_cap.nv12) {
         av__cap_copy_out((const uint8_t *)m.pData, m.RowPitch, dst);
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_av_cap.stage[idx], 0);
@@ -329,7 +333,7 @@ static inline bool av__cap_map(uint32_t idx, uint8_t *dst) {
      * still, a map that would wait is a dropped frame, never a stall. */
     D3D11_MAPPED_SUBRESOURCE mc;
     hr = ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_av_cap.stage_c[idx], 0,
-                                 D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mc);
+                                 D3D11_MAP_READ, g_av_cap.wait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &mc);
     bool ok = SUCCEEDED(hr);
     if (ok) {
         const uint32_t w = (uint32_t)g_av_cap.w;
@@ -344,7 +348,9 @@ static inline bool av__cap_map(uint32_t idx, uint8_t *dst) {
 
 #elif defined(SOKOL_GLCORE) || defined(SOKOL_GLES3)
     if (!g_av_cap.fence[idx]) return false;
-    GLenum st = glClientWaitSync(g_av_cap.fence[idx], 0, 0);
+    GLenum st = g_av_cap.wait   /* a file wants the frame: give the GPU a second */
+              ? glClientWaitSync(g_av_cap.fence[idx], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000u)
+              : glClientWaitSync(g_av_cap.fence[idx], 0, 0);
     bool done = (st == GL_ALREADY_SIGNALED || st == GL_CONDITION_SATISFIED);
     glDeleteSync(g_av_cap.fence[idx]);
     g_av_cap.fence[idx] = 0;
@@ -752,6 +758,7 @@ static inline bool av_capture_due(uint64_t *frame, uint64_t *sample) {
         s = g_frame_clock.sample;
         if (f == g_frame_clock.frame || spin >= 4) break;
     }
+    g_av_cap.seen = f;
     if (!s_primed) { s_primed = true; s_last = f; return false; }
     if (f == s_last) return false;
     if (f < s_last) s_last = f;                 /* the board was reset under us */
@@ -764,6 +771,29 @@ static inline bool av_capture_due(uint64_t *frame, uint64_t *sample) {
 }
 
 /* ---- Per-frame service --------------------------------------------------- */
+
+/* The oldest copy in flight into a queue slot, or dropped. */
+static inline void av__cap_harvest(void) {
+    uint32_t idx = (uint32_t)(g_av_cap.taken % AV_CAP_SLOTS);
+    uint8_t *dst = av_stream_video_slot();
+    while (!dst && g_av_cap.wait && av_stream_active()) {   /* the encoder is behind: wait */
+        emu_nap_us(1000);
+        dst = av_stream_video_slot();
+    }
+    if (!dst)
+        av_stream_video_drop(g_av_cap.tag_frame[idx], AV_DROP_QUEUE);
+    else if (av__cap_map(idx, dst))
+        av_stream_video_commit(g_av_cap.tag_frame[idx], g_av_cap.tag_sample[idx]);
+    else
+        av_stream_video_drop(g_av_cap.tag_frame[idx], AV_DROP_READBACK);
+    g_av_cap.taken++;
+}
+
+/* Every copy still in flight, now: the last AV_CAP_LAG frames of a recording
+ * that ends (--replay-video), which no later submit will come to harvest. */
+static inline void av_capture_flush(void) {
+    while (g_av_cap.ready && g_av_cap.taken < g_av_cap.submitted) av__cap_harvest();
+}
 
 /*
  * Harvest the copy issued AV_CAP_LAG frames ago into a queue slot, then issue
@@ -784,17 +814,7 @@ static inline void av_capture_submit(uint64_t frame, uint64_t sample) {
         g_av_cap.taken = g_av_cap.submitted;
     }
 
-    if (g_av_cap.submitted - g_av_cap.taken >= AV_CAP_LAG) {
-        uint32_t idx = (uint32_t)(g_av_cap.taken % AV_CAP_SLOTS);
-        uint8_t *dst = av_stream_video_slot();
-        if (!dst)
-            av_stream_video_drop(g_av_cap.tag_frame[idx], AV_DROP_QUEUE);
-        else if (av__cap_map(idx, dst))
-            av_stream_video_commit(g_av_cap.tag_frame[idx], g_av_cap.tag_sample[idx]);
-        else
-            av_stream_video_drop(g_av_cap.tag_frame[idx], AV_DROP_READBACK);
-        g_av_cap.taken++;
-    }
+    if (g_av_cap.submitted - g_av_cap.taken >= AV_CAP_LAG) av__cap_harvest();
     /* Belt and braces: the harvest above keeps this from ever firing, but a
      * ring that laps itself would copy over a slot still waiting to be read. */
     while (g_av_cap.submitted - g_av_cap.taken >= AV_CAP_SLOTS) {

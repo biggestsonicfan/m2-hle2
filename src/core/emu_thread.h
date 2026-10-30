@@ -255,6 +255,14 @@ static struct {
     volatile uint64_t frame;    /* the g_emu_frames value get_status reports */
 } g_frame_clock;
 
+/* The frame gate (--replay-video, ui/replay_video.h): while it is on, the board
+ * does not begin a frame until the renderer has drawn the last one, and runs
+ * as fast as the renderer and the encoder behind it allow, not at 60 Hz. A
+ * recording to a file wants every frame and no clock; a stream wants the clock
+ * and drops frames, which is why the gate is off unless a file is being made. */
+static volatile int      g_emu_frame_gate;
+static volatile uint64_t g_emu_frame_drawn;   /* the newest g_frame_clock.frame drawn */
+
 /* Clear the run loop's own per-boot latches. Part of a board reset, and separate
  * from install_fn because these live here: a handler left "in service" across a
  * reset would swallow the first interrupt of the new boot, which on two
@@ -1141,6 +1149,14 @@ static inline void emu_pace_linked(emu_thread_ctx_t *ctx, int64_t work_t1) {
 /* Pace the board to 60 Hz after a slice that reached its vblank: sleep out to
  * the next 16.67ms tick, measured from work_t1, where the slice's work ended. */
 static inline void emu_pace_frame(emu_thread_ctx_t *ctx, int64_t work_t1) {
+    if (g_emu_frame_gate) {
+        /* No tick: wait for the renderer instead (g_emu_frame_gate). */
+        ctx->frame_deadline_us = 0;
+        while (g_emu_frame_gate && g_emu_frame_drawn < g_frame_clock.frame && !ctx->request_stop)
+            emu_nap_us(200);
+        g_emu_times.pace_us += emu_now_us() - work_t1;
+        return;
+    }
     if (m2comm_linked()) { emu_pace_linked(ctx, work_t1); return; }
     link_pace_stop(&ctx->link_pace);
     int64_t now = emu_now_us();
