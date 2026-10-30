@@ -102,6 +102,7 @@ static char     g_follow_out[512];   /* --follow-out DIR: lead a one-way follow 
 static uint32_t g_follow_every;      /* --follow-every FRAMES between its join points */
 static bool     g_replay_cli_set;    /* --record-replays / --replay-format: the command line, not replay.cfg */
 static char     g_replay_open_arg[512];   /* --replay FILE: open it once a game is loaded */
+static char     g_tas_open_arg[512];      /* --tas FILE: a TAS movie, opened once its game is loaded */
 static int  g_browse_model = -1;   /* --model N: open single-model browser on N */
 static int  g_objview_on    = 0;   /* --objview: open the object viewer at boot */
 static int  g_objview_model = -1;  /* --objview N: and select model N */
@@ -515,7 +516,11 @@ static bool replay_cli_arg(int argc, char **argv, int *i) {
     } else if (!strcmp(a, "--replay") && more) {
         snprintf(g_replay_open_arg, sizeof g_replay_open_arg, "%s", argv[++*i]);
     } else if (!strcmp(a, "--replay-video") && more) {
-        replay_video_set(argv[++*i]);      /* headless, every frame into FILE, then exit */
+        replay_video_set(argv[++*i], false);   /* headless, every frame into FILE, then exit */
+    } else if (!strcmp(a, "--tas") && more) {
+        snprintf(g_tas_open_arg, sizeof g_tas_open_arg, "%s", argv[++*i]);
+    } else if (!strcmp(a, "--tas-video") && more) {
+        replay_video_set(argv[++*i], true);    /* the --tas movie, as --replay-video */
     } else if (!strcmp(a, "--ffmpeg") && more) {
         replay_video_set_ffmpeg(argv[++*i]);
     } else {
@@ -538,6 +543,60 @@ static void replay_open_arg(void) {
     snprintf(g_replay_ui.path, sizeof g_replay_ui.path, "%s", g_replay_open_arg);
     g_replay_ui.show = !err;
     g_replay_open_arg[0] = '\0';
+}
+
+/* --tas FILE, before the ROM loads: a movie plays only on the profile it was
+ * made on, so that profile is the one loaded. A --rom of another set (hotd.zip
+ * for a hotdo movie, Pinboard #1927) gives way to the movie's own set when its
+ * zip is beside it. False, and why in the log, when the movie cannot play. */
+static bool tas_rom_arg(void) {
+    if (!g_tas_open_arg[0]) return true;
+    char id[32];
+    const char *err = tas_file_profile(g_tas_open_arg, id, sizeof id);
+    if (err) { LOG_ERROR("--tas %s: %s", g_tas_open_arg, err); return false; }
+    const game_profile_t *p = profile_by_id(id);
+    if (!p) { LOG_ERROR("--tas %s: made on profile '%s', which this build does not have", g_tas_open_arg, id); return false; }
+    if (g_profile_arg[0] && strcmp(g_profile_arg, id))
+        LOG_WARN("--profile %s: the movie was made on %s; playing it there", g_profile_arg, id);
+    char set[64];
+    zip_set_id(g_rom_path, set, sizeof set);
+    if (!profile_runs_set(p, set)) {
+        char want[600];
+        const char *sep_f = strrchr(g_rom_path, '/'), *sep_b = strrchr(g_rom_path, '\\');
+        const char *sep = sep_f > sep_b ? sep_f : sep_b;
+        snprintf(want, sizeof want, "%.*s%s.zip", sep ? (int)(sep - g_rom_path + 1) : 0, g_rom_path, profile_rom_set(p));
+        FILE *f = fopen(want, "rb");
+        if (!f || strlen(want) >= sizeof g_rom_path) {
+            if (f) fclose(f);
+            LOG_ERROR("--tas %s: the movie was made on %s (%s): give it --rom %s.zip, not %s.zip",
+                      g_tas_open_arg, p->display_name, id, profile_rom_set(p), set);
+            return false;
+        }
+        fclose(f);
+        LOG_WARN("--tas: the movie was made on %s; loading %s instead of %s.zip", id, want, set);
+        snprintf(g_rom_path, sizeof g_rom_path, "%s", want);
+    }
+    g_active_profile = p;   /* select_profile_for_zip keeps it: it runs the set */
+    return true;
+}
+
+/* --tas FILE: open the movie once its game is loaded, from its start, playing
+ * (not recording). The board runs on it once it runs: --run, or the Run
+ * button, or --tas-video's recorder. False when it would not open. */
+static bool tas_open_arg(void) {
+    if (!g_tas_open_arg[0]) return true;
+    emu_mutex_lock(&state.emu.mutex);
+    const char *err = tas_load_file(&state.emu, g_tas_open_arg, false);
+    if (!err) {
+        g_tas.recording = false;
+        tas_seek(0, true);
+    }
+    emu_mutex_unlock(&state.emu.mutex);
+    if (err) LOG_ERROR("--tas %s: %s", g_tas_open_arg, err);
+    else     LOG_INFO("tas: playing %s (%u frames)", g_tas_open_arg, g_tas.mv.n);
+    g_tas_ui.show = !err && !g_headless;
+    g_tas_open_arg[0] = '\0';
+    return !err;
 }
 
 static void netplay_reset_board_cb(void *ctx) {
@@ -1176,9 +1235,11 @@ static void init(void) {
     emu_ensure_started();
 
     if (g_rom_path[0]) {
+        tas_rom_arg();                                /* a failure is logged; --tas then says why too */
         load_active_profile(g_rom_path);
         if (state.romset.loaded) load_state_arg();   /* a failure is logged; the board boots fresh */
         if (state.romset.loaded) replay_open_arg();
+        if (state.romset.loaded) tas_open_arg();     /* a failure is logged */
         if (state.romset.loaded) comm_link_arg();     /* a failure is logged; the board runs unlinked */
         if (g_autorun && state.romset.loaded) emu_run(&state.emu);
     }
@@ -1577,7 +1638,7 @@ static void headless_loop(bool av_on) {
         if (av_on) {
             headless_shot(headless_av_frame());
             g_emu_frame_drawn = av_capture_seen();   /* the frame gate (--replay-video) */
-            if (video && replay_video_pump()) break;
+            if (video && replay_video_pump(&state.emu)) break;
             if (!g_emu_frame_gate) headless_sleep_ms(1);
         } else {
             emu_sleep_ms(5);
@@ -1628,7 +1689,12 @@ static int headless_main(void) {
 
     bool av_on = false;
     if (replay_video_on()) {
-        if (!g_replay_open_arg[0]) { LOG_ERROR("--replay-video needs --replay FILE"); return 2; }
+        if (!replay_video_tas() && !g_replay_open_arg[0] && g_tas_open_arg[0])
+            replay_video_use_tas();          /* --replay-video with a movie: the same thing */
+        if (replay_video_tas() ? !g_tas_open_arg[0] : !g_replay_open_arg[0]) {
+            LOG_ERROR(replay_video_tas() ? "--tas-video needs --tas FILE" : "--replay-video needs --replay FILE");
+            return 2;
+        }
         g_av_port = 0;                      /* the server is the recorder's, on any free port */
         av_stream_set_format(AV_FORMAT_NV12);   /* made on the GPU; the file is 4:2:0 anyway */
         g_autorun = 1;
@@ -1640,13 +1706,16 @@ static int headless_main(void) {
     }
 
     emu_ensure_started();
+    if (!tas_rom_arg()) return 2;
     load_active_profile(g_rom_path);
     if (!state.romset.loaded) { LOG_ERROR("--headless: ROM set did not load"); return 1; }
     if (!load_state_arg()) return 1;
     replay_open_arg();
+    if (!tas_open_arg()) return 1;
     if (replay_video_on() && !replay_video_start()) return 1;
     if (!comm_link_arg()) return 1;
-    if (g_autorun) emu_run(&state.emu);
+    /* A movie's video starts the board itself, on its first recorded frame. */
+    if (g_autorun && !(replay_video_on() && replay_video_tas())) emu_run(&state.emu);
 
     if (!g_no_tray) headless_tray_start();
     headless_loop(av_on);

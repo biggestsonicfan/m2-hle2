@@ -621,7 +621,12 @@ static inline void av_stream_shutdown(void) {
     /* Both the accept and any send in flight are blocking calls on the writer
      * thread. Closing the listener ends the accept; the client socket is only
      * SHUT DOWN from here, never closed, so its handle cannot be recycled
-     * under the thread that is still holding it. */
+     * under the thread that is still holding it. On Linux a close does not
+     * wake an accept() blocked on the socket; a shutdown does (Pinboard #1927:
+     * --replay-video wrote its file and then hung here). */
+#ifndef _WIN32
+    if (net_sock_valid(g_av.listen_sock)) shutdown(g_av.listen_sock, SHUT_RDWR);
+#endif
     net_close(&g_av.listen_sock);
     if (net_sock_valid(g_av.client)) {
 #ifdef _WIN32

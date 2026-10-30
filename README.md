@@ -485,6 +485,17 @@ software GL; a smaller `--av-size` is quicker). The video starts at the first pa
 playback, after the boot the game's own view runs through unpaced. ffmpeg is looked for on
 `PATH` unless `--ffmpeg` names it. See `src/ui/replay_video.h`.
 
+**A TAS movie to a video file** (`--tas` / `--tas-video`, Pinboard #1927): the same, for a
+`.m2tas` movie from the TAS window. `--tas FILE` opens the movie and plays it from its start
+(on its own, with `--run`, it plays in the window); `--tas-video` writes it from frame 0 to its
+last frame and exits. A movie plays only on the game it was made on: its profile is the one
+loaded, whatever `--profile` says, and a `--rom` of another set of that game (`hotd.zip` for a
+`hotdo` movie) gives way to the movie's own zip when it is in the same folder.
+
+```
+m2hle --rom hotdo.zip --tas run.m2tas --tas-video run.mp4 [--av-size 1396x1080] [--ffmpeg PATH]
+```
+
 **With `--headless`** the emulator brings up a graphics device with no window and no swapchain,
 so no desktop session is needed — a server can stream. That path is D3D11 only for now; on a GL
 build use `--kiosk`, which streams just as well from a parked window.

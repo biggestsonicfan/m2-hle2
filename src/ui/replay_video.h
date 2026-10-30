@@ -1,9 +1,10 @@
 /*
  * replay_video.h -- --replay-video FILE: play a replay with no window and
  * write it to a video file, every frame and its sound, then exit (Pinboard
- * #1925).
+ * #1925). --tas-video FILE does the same for a TAS movie (Pinboard #1927).
  *
  *     m2hle --rom sfight.zip --replay match.m2replay --replay-video match.mp4
+ *     m2hle --rom hotdo.zip --tas run.m2tas --tas-video run.mp4
  *
  * It is the A/V server (core/av_stream.h) with its client in the process: the
  * server listens on a free port of 127.0.0.1, and the thread below reads it as
@@ -21,8 +22,11 @@
  *
  * WHAT IS IN THE FILE. From the first paced frame of the playback (a replay in
  * the game's own view runs unpaced through the boot first, and that is not
- * recorded) to the frame its feed ended, or left the record ("split"). The
- * sound has the board's DC offset taken out, as av-record.py does.
+ * recorded) to the frame its feed ended, or left the record ("split"). A
+ * movie is held at its start until the recorder is connected, so its file
+ * begins on the movie's frame 0 and ends on its last; one that stopped short
+ * counts as a split. The sound has the board's DC offset taken out, as
+ * av-record.py does.
  */
 #ifndef REPLAY_VIDEO_H
 #define REPLAY_VIDEO_H
@@ -61,6 +65,7 @@ static struct {
     char path[512];             /* --replay-video FILE */
     char ffmpeg[512];           /* --ffmpeg PATH, else "ffmpeg" */
     int  phase;
+    bool tas;                   /* the source is the TAS movie (--tas-video), not a replay */
     bool split;                 /* the playback left the record: the file ends there */
     int64_t next_note_us;
 
@@ -81,11 +86,14 @@ static struct {
 
 static inline bool replay_video_on(void) { return g_rv.phase != RV_OFF; }
 
-/* --replay-video FILE (and --ffmpeg PATH) from the command line. */
-static inline void replay_video_set(const char *path) {
+/* --replay-video FILE / --tas-video FILE (and --ffmpeg PATH) from the command line. */
+static inline void replay_video_set(const char *path, bool tas) {
     snprintf(g_rv.path, sizeof g_rv.path, "%s", path);
     g_rv.phase = RV_WAIT;
+    g_rv.tas = tas;
 }
+static inline bool replay_video_tas(void) { return g_rv.tas; }
+static inline void replay_video_use_tas(void) { g_rv.tas = true; }
 static inline void replay_video_set_ffmpeg(const char *exe) {
     snprintf(g_rv.ffmpeg, sizeof g_rv.ffmpeg, "%s", exe);
 }
@@ -285,8 +293,9 @@ static inline bool replay_video_start(void) {
         LOG_ERROR("--replay-video: a path with a \" in it cannot be handed to ffmpeg");
         return false;
     }
-    if (!replay_playing()) {
-        LOG_ERROR("--replay-video: no replay is playing (give it one with --replay FILE)");
+    if (g_rv.tas ? !tas_live() : !replay_playing()) {
+        LOG_ERROR(g_rv.tas ? "--tas-video: no movie is open (give it one with --tas FILE)"
+                           : "--replay-video: no replay is playing (give it one with --replay FILE)");
         return false;
     }
 #ifndef _WIN32
@@ -303,10 +312,19 @@ static inline bool replay_video_start(void) {
     return true;
 }
 
-/* Where the playback is: (frame, frames, ended, split). */
+/* Where the playback is: (frame, frames, ended, split). A movie that stopped
+ * before its end (tas_break) is a split. */
 static inline replay__pos_t rv__pos(void) {
+    if (g_rv.tas) {
+        replay__pos_t p = { g_tas.frame, g_tas.mv.n, g_tas.frame >= g_tas.mv.n, false };
+        p.split = !tas_live() && !p.ended;
+        return p;
+    }
     return replay__pos(&g_replay_play, g_replay_play.on && g_replay_play.native_on);
 }
+
+static inline bool rv__playing(void) { return g_rv.tas ? tas_live() : replay_playing(); }
+static inline bool rv__unpaced(void) { return g_rv.tas ? tas_unpaced() : replay_play_unpaced(); }
 
 /* The end: no more frames wanted, the board back on its clock. The frames
  * still in the readback ring go out first: nothing later will push them. */
@@ -319,17 +337,18 @@ static inline void rv__end(void) {
 }
 
 /* Once per pass of the headless loop. True when the file is done (or failed)
- * and the process should exit. */
-static inline bool replay_video_pump(void) {
+ * and the process should exit. A movie's board is stopped until here: this
+ * starts it on its first recorded frame. */
+static inline bool replay_video_pump(emu_thread_ctx_t *ctx) {
     switch (g_rv.phase) {
     case RV_WAIT:
         if (g_rv.finished) { g_rv.phase = RV_DONE; return true; }   /* the recorder gave up */
-        if (!replay_playing()) {
-            rv__fail("the replay stopped before it played%s", "");
+        if (!rv__playing()) {
+            rv__fail(g_rv.tas ? "the movie stopped before it played%s" : "the replay stopped before it played%s", "");
             rv__end();
             return false;
         }
-        if (replay_play_unpaced() || !av_stream_active()) return false;
+        if (rv__unpaced() || !av_stream_active()) return false;
         /* The first paced frame: record from here, every frame. */
         av_capture_set_wait(true);
         g_rv.start_sample = g_frame_clock.sample;
@@ -338,6 +357,7 @@ static inline bool replay_video_pump(void) {
         g_emu_frame_gate  = 1;
         g_rv.phase = RV_REC;
         LOG_INFO("replay-video: recording %s", g_rv.path);
+        if (g_rv.tas) emu_run(ctx);
         return false;
     case RV_REC: {
         replay__pos_t p = rv__pos();
@@ -347,7 +367,7 @@ static inline bool replay_video_pump(void) {
             LOG_INFO("replay-video: frame %u of %u", p.frame, p.frames);
         }
         /* Ended, once the frame it ended on is drawn (the board waits on it). */
-        if ((!replay_playing() || p.ended || p.split) && av_capture_seen() >= g_frame_clock.frame) {
+        if ((!rv__playing() || p.ended || p.split) && av_capture_seen() >= g_frame_clock.frame) {
             g_rv.split = p.split;
             if (p.split)
                 LOG_WARN("replay-video: the playback left the record at frame %u; the video ends there", p.frame);
@@ -383,7 +403,7 @@ static inline int replay_video_finish(void) {
         g_rv.thread_on = false;
     }
     if (!g_rv.ok || g_rv.error[0]) {
-        LOG_ERROR("--replay-video %s: %s", g_rv.path, g_rv.error[0] ? g_rv.error : "not written");
+        LOG_ERROR("%s %s: %s", g_rv.tas ? "--tas-video" : "--replay-video", g_rv.path, g_rv.error[0] ? g_rv.error : "not written");
         return 1;
     }
     LOG_INFO("replay-video: wrote %s%s", g_rv.path, g_rv.split ? " (up to where the playback split)" : "");
