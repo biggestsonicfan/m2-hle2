@@ -69,7 +69,7 @@ static struct {
     emu_multi_queue_t sent[EMU_MULTI_MAX];   /* this round's for board b */
     m2comm_link_t     link[EMU_MULTI_MAX];   /* each board's g_m2comm_link, peer NULL */
     m2comm_peer_t     peer[EMU_MULTI_MAX];
-    uint32_t        (*op)(struct memory_bus *bus, uint32_t held);   /* the Main's operator, link_solo */
+    uint32_t        (*op)(struct memory_bus *bus, uint32_t held);   /* the Main's operator, ring_op or link_solo */
     uint32_t          dropped, drop_said;
     uint64_t          rounds;
     int64_t           round_us;    /* the last round's time, for the window's title */
@@ -207,7 +207,7 @@ static inline void emu_multi_round(emu_thread_ctx_t *ctx, void (*drawn)(void *us
         if (mine) netplay_release_inputs();
         else {
             /* A Main nobody plays is worked by the profile's operator from the
-             * player's keys (Power Sled's, link_solo), as GGPO's SOLO does. */
+             * player's keys (Power Sled's ring_op), as GGPO's SOLO does. */
             uint32_t held = g_multi.held[b];
             if (b == 0 && g_multi.linked && g_multi.op) held = g_multi.op(ctx->bus, g_input.held);
             g_input.net_held = held; g_input.use_net = 1;
@@ -266,7 +266,7 @@ static inline bool emu_multi_start(emu_thread_ctx_t *ctx, const game_profile_t *
     memset(&g_multi, 0, sizeof g_multi);
     g_multi.n = n;
     g_multi.linked = link && emu_multi__role_fn(p);
-    g_multi.op = g_multi.linked ? p->link_solo : NULL;
+    g_multi.op = !g_multi.linked ? NULL : p->ring_op ? p->ring_op : p->link_solo;
     game_link_role_fn role = emu_multi__role_fn(p);
     replay_rec_break("multi");
     follow_lead_break("multi");
