@@ -56,6 +56,50 @@ static inline int powsled_load(romset_t *rs, const char *child, const char *pare
     return rom_recipe_load(rs, child, parent, &powsled_recipe);
 }
 
+/* The Relay unit (powsledr, Revision A, ROM board 834-12970): its own program,
+ * a build of its own (most of its bytes differ from the Slave's), its own
+ * sound program and twice the samples; the data, models and textures are the
+ * Slave's. The comm board's Z80 (epr-18022.ic2) is MAME's m2comm, not loaded. */
+static const rom_part_t powsledr_parts[] = {
+    ROM_PAIR32(ROM_MAINCPU,   0x0000000, "epr-19472a.15", 0x7a947eb7, "epr-19473a.16", 0x165d77ae),
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "fpr-19468.11",  0x56fae4e2, "fpr-19469.12",  0x5579c922),
+    ROM_PAIR32(ROM_POLYGONS,  0x0000000, "fpr-19455.17",  0x165ee345, "fpr-19456.21",  0xc3b2e2c5),
+    ROM_PAIR32(ROM_TEXTURES,  0x0000000, "fpr-19458.27",  0xf24acca2, "fpr-19457.25",  0x79d7e6fa),
+    ROM_SWAP16(ROM_AUDIOCPU,  0x0000000, "epr-19467.31",  0x5e8b9763),
+    ROM_SWAP16(ROM_SAMPLES,   0x0000000, "fpr-19460.32",  0x456967cc),
+    ROM_SWAP16(ROM_SAMPLES,   0x0400000, "fpr-19461.34",  0x7b91d65b),
+};
+
+static const rom_recipe_t powsledr_recipe = {
+    .set  = "powsledr",
+    .size = { [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000,
+              [ROM_COPRO_DATA] = 0x800000,
+              [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x800000,
+              [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000 },
+    .parts = powsledr_parts, .count = sizeof powsledr_parts / sizeof powsledr_parts[0],
+};
+
+static inline int powsledr_load(romset_t *rs, const char *child, const char *parent) {
+    return rom_recipe_load(rs, child, parent, &powsledr_recipe);
+}
+
+/* The Main unit (powsledm) is not dumped. MAME's init_powsledm makes one from
+ * the Relay's program with three bytes, and so does this, at load: the set's
+ * program is then the Main's wherever it goes (a board of its own in
+ * `--boards` copies it into the bus). In the Relay's build the mode literal
+ * (mov 2,g13 at 0x1571C) becomes 1, and the node ID's setbit 8 at 0x1584C
+ * (0x100, the Relay) becomes setbit 9 (0x200, the Main), its inverted copy at
+ * 0x1585C with it. */
+static inline int powsledm_load(romset_t *rs, const char *child, const char *parent) {
+    int rc = rom_recipe_load(rs, child, parent, &powsledr_recipe);
+    if (rc == 0 && rs->maincpu && rs->maincpu_size > 0x1585Du) {
+        rs->maincpu[0x1571C] = 0x01;   /* Main mode */
+        rs->maincpu[0x1584C] = 0x89;   /* node ID 0x200 */
+        rs->maincpu[0x1585D] = 0xFD;   /* ...inverted */
+    }
+    return rc;
+}
+
 static inline uint32_t powsled_read32(const uint8_t *buf, uint32_t off) {
     return (uint32_t)buf[off] | (uint32_t)buf[off + 1] << 8
          | (uint32_t)buf[off + 2] << 16 | (uint32_t)buf[off + 3] << 24;
@@ -112,30 +156,36 @@ static inline void powsled_seed_settings(const romset_t *rs, memory_bus_t *bus) 
             mem_write8(bus, 0x01D00000u + copy * 0x100u + i, rs->maincpu[POWSLED_SETTINGS_DEFAULTS + i]);
 }
 
-static inline void powsled_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+/* slave_build: the Slave's program, whose unit is patched in (powsled_set_unit)
+ * and whose settings defaults are at 0xEDC00. The Relay's build (powsledr, and
+ * powsledm made from it) runs as its bytes say. */
+static inline void powsled_install_build(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus,
+                                         const char *id, bool slave_build) {
     if (!rs->loaded) { LOG_ERROR("powsled_install: romset not loaded"); return; }
 
     i960_reset(cpu);
     mem_init(bus, rs->maincpu, rs->maincpu_size);
-    powsled_set_unit(bus, g_powsled_unit);
-    powsled_seed_settings(rs, bus);
+    if (slave_build) {
+        powsled_set_unit(bus, g_powsled_unit);
+        powsled_seed_settings(rs, bus);
+    }
     /* The unit is the program's bytes, so they go with the board: a GGPO
      * match swaps the Main and the ride through the one bus (emu_twin.h). */
     if (bus->rom && bus->rom_size >= POWSLED_CAM_AT + 4u) {
-        savestate_extra("powsled", "UNIT", &g_powsled_unit, sizeof g_powsled_unit);
-        savestate_extra("powsled", "UNIT.mode", bus->rom + POWSLED_MODE_AT, 1);
-        savestate_extra("powsled", "UNIT.id", bus->rom + POWSLED_ID_AT, 4);
-        savestate_extra("powsled", "UNIT.cam", bus->rom + POWSLED_CAM_AT, 1);
+        savestate_extra(id, "UNIT", &g_powsled_unit, sizeof g_powsled_unit);
+        savestate_extra(id, "UNIT.mode", bus->rom + POWSLED_MODE_AT, 1);
+        savestate_extra(id, "UNIT.id", bus->rom + POWSLED_ID_AT, 4);
+        savestate_extra(id, "UNIT.cam", bus->rom + POWSLED_CAM_AT, 1);
     }
 
     model2b_cop_install(bus, rs->copro_data, rs->copro_data_size);
-    savestate_extra("powsled", "M2BCOP", &g_m2bc, sizeof g_m2bc);
-    savestate_extra("powsled", "SHARC", &g_shc, sizeof g_shc);
+    savestate_extra(id, "M2BCOP", &g_m2bc, sizeof g_m2bc);
+    savestate_extra(id, "SHARC", &g_shc, sizeof g_shc);
     m2comm_install(bus, 0x180u);
     m2comm_set_whole_frame(true);
-    savestate_extra("powsled", "M2COMM", &g_m2comm, sizeof g_m2comm);
+    savestate_extra(id, "M2COMM", &g_m2comm, sizeof g_m2comm);
     io5649_reset();
-    savestate_extra("powsled", "IO5649", &g_io5649, sizeof g_io5649);
+    savestate_extra(id, "IO5649", &g_io5649, sizeof g_io5649);
 
     if (rs->main_data && bus->main_data) {
         size_t n = rs->main_data_size < MAIN_DATA_SIZE ? rs->main_data_size : MAIN_DATA_SIZE;
@@ -158,6 +208,26 @@ static inline void powsled_install(const romset_t *rs, i960_cpu_t *cpu, memory_b
         if (start_ip_ptr < rs->maincpu_size) cpu->sfr.ip = powsled_read32(rs->maincpu, start_ip_ptr);
     }
     LOG_INFO("powsled_install: PRCB=0x%08X initial IP=0x%08X", prcb, cpu->sfr.ip);
+}
+
+/* Each unit's state goes under its own profile's name (savestate_extra_mine);
+ * the unit bytes too, so a ring of mixed units copies the same parts for each. */
+static inline void powsled_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    powsled_install_build(rs, cpu, bus, "powsled", true);
+}
+static inline void powsledr_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    powsled_install_build(rs, cpu, bus, "powsledr", false);
+}
+static inline void powsledm_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    powsled_install_build(rs, cpu, bus, "powsledm", false);
+}
+/* "Power Sled - Arcade" runs the Slave's set as the default profile does; only
+ * its ring is the whole site (k_powsled_ring_sets). */
+static inline int powsled_arcade_load(romset_t *rs, const char *child, const char *parent) {
+    return powsled_load(rs, child, parent);
+}
+static inline void powsled_arcade_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
+    powsled_install_build(rs, cpu, bus, "powsled_arcade", true);
 }
 
 /* A link's MASTER is the Main unit, its SLAVE a ride: the unit is the
@@ -247,8 +317,14 @@ static inline uint32_t powsled_ring_op(memory_bus_t *bus, uint32_t held) {
 /* The ring's cabinets: the Main is the site's big screen over the line of
  * rides (the LIVE camera) and the operator's panel; each ride a sled. */
 static const char *const k_powsled_ring_names[] = {
-    "MAIN (screen + operator)", "SILVER ride", "RED ride", "BLACK ride", "YELLOW ride", NULL,
+    "MAIN (screen + operator)", "SILVER ride", "RED ride", "BLACK ride", "YELLOW ride", "RELAY (big screen)", NULL,
 };
+
+/* The units of a whole site, the "Power Sled - Arcade" profile's ring when the
+ * Main's and the Relay's sets are beside powsled.zip (`--boards all`, Pinboard
+ * #1918): the Main runs powsledm, the four rides the Slave's program, the Relay
+ * powsledr. Without them it is the default profile's ring of five. */
+static const char *const k_powsled_ring_sets[] = { "powsledm", "powsled", "powsled", "powsled", "powsled", "powsledr" };
 
 /* MAME INPUT_PORTS_START(powsled): IN0 the cabinet (COIN1 0x01, COIN2 0x02,
  * TEST 0x04, SERVICE1 0x08, START 0x10 / 0x20, SERVICE2 0x40, Cancel Error
@@ -266,54 +342,65 @@ static const char *const k_powsled_ring_names[] = {
  * entry closes on a second P2 Call. The Main's IN1 has three more buttons
  * MAME leaves out (its high nibble, FUN_bd4b0's commands 5, 0x100 and 0x300):
  * bit 4, the first, starts the race (state 6 -> 7). */
-static const game_profile_t powsled_profile = {
-    .id              = "powsled",
-    .display_name    = "Power Sled (Slave, Rev A)",
-    .parent_zip_name = NULL,
-    .board           = BOARD_MODEL2B_CRX,
-    .load_fn         = powsled_load,
-    .install_fn      = powsled_install,
-    .hook_count      = 0,
-    .link_role       = powsled_link_role,
-    .link_cabinets   = 5,      /* the Main and four rides (no Relay unit yet) */
-    .ring_seat       = powsled_ring_seat,
-    .ring_op         = powsled_ring_op,     /* --boards: the rides' attract until a rider calls */
-    .ring_names      = k_powsled_ring_names,
-    .link_twin       = true,   /* GGPO: the Main (1P) and a ride (2P) on each machine */
-    .link_solo       = powsled_solo_op,   /* alone: a Main beside the ride, its panel worked */
-    .input = {
-        .bits = {
-            [GAME_INPUT_P1_COIN]  = 0x00000001,
-            [GAME_INPUT_P2_COIN]  = 0x00000002,
-            [GAME_INPUT_TEST]     = 0x00000004,
-            [GAME_INPUT_SERVICE]  = 0x00000008,
-            [GAME_INPUT_P1_START] = 0x00000010,
-            [GAME_INPUT_P2_START] = 0x00000020,
-            [GAME_INPUT_P1_B1]    = 0x00000100,
-            [GAME_INPUT_P1_B2]    = 0x00000200,
-            [GAME_INPUT_P2_B1]    = 0x00000400,
-            [GAME_INPUT_P2_B2]    = 0x00000800,
-            [GAME_INPUT_P1_B4]    = 0x00000080,   /* Cancel Error */
-            [GAME_INPUT_P1_LEFT]  = 0x00001000,   /* the pedals (quirks.pedal) */
-            [GAME_INPUT_P1_RIGHT] = 0x00002000,
-            [GAME_INPUT_P2_LEFT]  = 0x00004000,
-            [GAME_INPUT_P2_RIGHT] = 0x00008000,
-            [GAME_INPUT_P1_B3]    = 0x00010000,   /* Cancel Network Check */
-            [GAME_INPUT_P2_B3]    = 0x00020000,   /* the Main's IN1 bit 4: start the race */
-            [GAME_INPUT_P2_B4]    = 0x00040000,   /* ... bit 5 (command 0x100) */
-            [GAME_INPUT_P1_UP]    = 0x00100000,   /* ... bit 7 (command 0x300) */
-        },
-    },
-    .quirks = {
-        .enable_68k_sound = true,
-        .irq_vectors      = true,
-        .board_vblank     = true,
-        .sled             = true,
-        .pedal            = { .p1_left = 0x1000, .p1_right = 0x2000, .p2_left = 0x4000,
-                              .p2_right = 0x8000, .cancel_net = 0x10000,
-                              .right_up = 0x70, .right_down = 0x90, .left_up = 0x90, .left_down = 0x70 },
-        .region           = { .kind = REGION_TODO, .why = "the country setting is not found yet" },
-    },
-};
+/* Every unit's profile: the three sets run one game (MAME's powsledr and
+ * powsledm are clones of powsled, so a split set finds its shared chips there). */
+#define POWSLED_PROFILE(name, set, title, parent, sets, sets_n)                                               \
+    static const game_profile_t name##_profile = {                                                            \
+        .id              = #name,                                                                             \
+        .display_name    = title,                                                                             \
+        .rom_set         = set,                                                                               \
+        .load_fn         = name##_load,                                                                       \
+        .install_fn      = name##_install,                                                                    \
+        .parent_zip_name = parent,                                                                            \
+        .board           = BOARD_MODEL2B_CRX,                                                                 \
+        .hook_count      = 0,                                                                                 \
+        .link_role       = powsled_link_role,                                                                 \
+        .link_cabinets   = 5,      /* the Main and four rides; six with the Relay */                          \
+        .ring_seat       = powsled_ring_seat,                                                                 \
+        .ring_op         = powsled_ring_op,     /* --boards: the rides' attract until a rider calls */        \
+        .ring_names      = k_powsled_ring_names,                                                              \
+        .ring_sets       = sets, .ring_sets_n = sets_n,                                                       \
+        .link_twin       = true,   /* GGPO: the Main (1P) and a ride (2P) on each machine */                  \
+        .link_solo       = powsled_solo_op,   /* alone: a Main beside the ride, its panel worked */           \
+        .input = {                                                                                            \
+            .bits = {                                                                                         \
+                [GAME_INPUT_P1_COIN]  = 0x00000001,                                                           \
+                [GAME_INPUT_P2_COIN]  = 0x00000002,                                                           \
+                [GAME_INPUT_TEST]     = 0x00000004,                                                           \
+                [GAME_INPUT_SERVICE]  = 0x00000008,                                                           \
+                [GAME_INPUT_P1_START] = 0x00000010,                                                           \
+                [GAME_INPUT_P2_START] = 0x00000020,                                                           \
+                [GAME_INPUT_P1_B1]    = 0x00000100,                                                           \
+                [GAME_INPUT_P1_B2]    = 0x00000200,                                                           \
+                [GAME_INPUT_P2_B1]    = 0x00000400,                                                           \
+                [GAME_INPUT_P2_B2]    = 0x00000800,                                                           \
+                [GAME_INPUT_P1_B4]    = 0x00000080,   /* Cancel Error */                                      \
+                [GAME_INPUT_P1_LEFT]  = 0x00001000,   /* the pedals (quirks.pedal) */                         \
+                [GAME_INPUT_P1_RIGHT] = 0x00002000,                                                           \
+                [GAME_INPUT_P2_LEFT]  = 0x00004000,                                                           \
+                [GAME_INPUT_P2_RIGHT] = 0x00008000,                                                           \
+                [GAME_INPUT_P1_B3]    = 0x00010000,   /* Cancel Network Check */                              \
+                [GAME_INPUT_P2_B3]    = 0x00020000,   /* the Main's IN1 bit 4: start the race */              \
+                [GAME_INPUT_P2_B4]    = 0x00040000,   /* ... bit 5 (command 0x100) */                         \
+                [GAME_INPUT_P1_UP]    = 0x00100000,   /* ... bit 7 (command 0x300) */                         \
+            },                                                                                                \
+    },                                                                                                        \
+        .quirks = {                                                                                           \
+            .enable_68k_sound = true,                                                                         \
+            .irq_vectors      = true,                                                                         \
+            .board_vblank     = true,                                                                         \
+            .sled             = true,                                                                         \
+            .pedal            = { .p1_left = 0x1000, .p1_right = 0x2000, .p2_left = 0x4000,                   \
+                                  .p2_right = 0x8000, .cancel_net = 0x10000,                                  \
+                                  .right_up = 0x70, .right_down = 0x90, .left_up = 0x90, .left_down = 0x70 }, \
+            .region           = { .kind = REGION_TODO, .why = "the country setting is not found yet" },       \
+    },                                                                                                        \
+    };
+
+POWSLED_PROFILE(powsled,        NULL,      "Power Sled (Slave, Rev A)", NULL, NULL, 0)
+POWSLED_PROFILE(powsled_arcade, "powsled", "Power Sled - Arcade", NULL, k_powsled_ring_sets, 6)
+POWSLED_PROFILE(powsledr,       NULL,      "Power Sled (Relay, Rev A)", "powsled.zip", NULL, 0)
+POWSLED_PROFILE(powsledm,       NULL,      "Power Sled (Main, made from the Relay)", "powsled.zip", NULL, 0)
+#undef POWSLED_PROFILE
 
 #endif /* PROFILES_POWSLED_H */

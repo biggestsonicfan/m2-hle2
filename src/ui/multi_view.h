@@ -122,8 +122,11 @@ static void multi_view__drawn(void *user, int b) {
 }
 
 /* The boards made, once the set is loaded and running (`--boards N`). */
-static inline void multi_view__start(emu_thread_ctx_t *ctx, const geo3d_state_t *base) {
+static inline void multi_view__start(emu_thread_ctx_t *ctx, const romset_t *rs, const geo3d_state_t *base) {
     g_mview.started = true;
+    emu_mutex_lock(&ctx->mutex);
+    emu_multi_sets_restore(ctx);   /* a board left alone on a set of its own: the loaded one again */
+    emu_mutex_unlock(&ctx->mutex);
     const game_profile_t *p = g_active_profile;
     int n = emu_multi_count(p, g_multi_want);
     if (g_multi_want > n)
@@ -135,7 +138,7 @@ static inline void multi_view__start(emu_thread_ctx_t *ctx, const geo3d_state_t 
             return;
         }
     emu_mutex_lock(&ctx->mutex);
-    bool ok = emu_multi_start(ctx, p, n, true);
+    bool ok = emu_multi_start(ctx, p, rs, n, true);
     emu_mutex_unlock(&ctx->mutex);
     if (!ok) { LOG_ERROR("multi: %d boards of %s could not start", n, p ? p->id : "?"); multi_view_free_all(); return; }
     g_mview.ramp  = g_game_render.ramp_enabled;
@@ -193,7 +196,7 @@ static inline int multi_view_menu(emu_thread_ctx_t *ctx, bool loaded) {
 static inline bool multi_view_frame(emu_thread_ctx_t *ctx, memory_bus_t *bus, const romset_t *rs,
                                     const geo3d_state_t *base, bool running) {
     if (!g_multi_want) return false;
-    if (!g_mview.started && running && rs->loaded && g_active_profile) multi_view__start(ctx, base);
+    if (!g_mview.started && running && rs->loaded && g_active_profile) multi_view__start(ctx, rs, base);
     if (!emu_multi_on()) return false;
     g_mview.bus = bus;
     g_mview.rs  = rs;
