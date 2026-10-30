@@ -755,6 +755,31 @@ const m2hleGames = (() => {
         },
       },
     },
+    rchase2: {
+      title: 'Rail Chase 2',
+      year: 1994, board: 'Model 2B-CRX', colors: ['#b8532a', '#1a120c'],
+      blurb: 'A ride on rails with a mounted gun for each rider: the stick walks the sight, the trigger fires. The seat jolts and leans through the pad\'s rumble.',
+      profiles: [
+        { id: 'rchase2', name: 'Rev A', about: 'Revision A' },
+      ],
+      romHint: 'Your <code>rchase2.zip</code> (Rail Chase 2, Revision A)',
+      /* Two gun sticks on the A/D (m2_library.h), B1 the trigger. The
+       * cabinet's motion seat is the pad's rumble (seat_board.h, ffb.h). */
+      labels: { up: 'Aim up', down: 'Aim down', left: 'Aim left', right: 'Aim right',
+                b1: 'Trigger', b2: 'Unused', b3: 'Unused', b4: 'Unused' },
+      ownReplay: false,
+      arcade: false, keepSave: true,
+      i18n: {
+        ja: {
+          title: 'レールチェイス2',
+          blurb: 'レールの上を突き進むライド、銃座はプレイヤーごとに一つ。スティックで照準を動かし、トリガーで撃て。シートの揺れはパッドの振動で。',
+          profiles: { rchase2: { name: 'リビジョン A', about: 'リビジョン A' } },
+          romHint: 'お持ちの <code>rchase2.zip</code>（レールチェイス2、リビジョン A）',
+          labels: { up: '照準を上に', down: '照準を下に', left: '照準を左に', right: '照準を右に',
+                    b1: 'トリガー', b2: '未使用', b3: '未使用', b4: '未使用' },
+        },
+      },
+    },
     indy500: {
       title: 'INDY 500',
       year: 1995, board: 'Model 2B-CRX', colors: ['#1d4fd8', '#d8c81d'],

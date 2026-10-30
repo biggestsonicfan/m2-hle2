@@ -101,6 +101,7 @@ const game_profile_t *const g_profiles[] = {
     &zerogunj_profile,
     &dynabb_profile,
     &gunblade_profile,
+    &rchase2_profile,
     &indy500_profile,
     &indy500d_profile,
     &sgt24h_profile,

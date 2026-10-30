@@ -13,7 +13,8 @@
  *
  *   Model 2A (TGP):     manxtt, skytargt, vcop2, zeroguna
  *   Model 2B (SHARC):   vstriker, vstrikero, zerogun, zerogunj, dynabb,
- *                       gunblade, indy500, indy500d, sgt24h, overrevb
+ *                       gunblade, rchase2, indy500, indy500d, sgt24h,
+ *                       overrevb
  *   Model 2C (TGPx4):   overrev, stcc, skisuprg, segawski, waverunr,
  *                       topskatr, topskatru, topskatruo, topskatrj, bel
  *
@@ -425,6 +426,25 @@ static const rom_part_t gunblade_parts[] = {
 };
 #define GUNBLADE_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x800000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
 
+/* MAME's iocpu (epr-17895.ic8, the Drive I/O board's Z80) is not in the
+ * zip, and nothing on the main board reads it: board/seat_board.h answers
+ * for that board. */
+static const rom_part_t rchase2_parts[] = {
+    ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-18045a.15", 0xbfca0314, "epr-18046a.16", 0x0b8d3074),
+    ROM_PAIR32(ROM_MAINCPU, 0x0100000, "epr-18074a.13", 0xca4b58df, "epr-18075a.14", 0xb82672e4),
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "mpr-18037.11", 0xdea8f896, "mpr-18038.12", 0x441f7709),
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0400000, "mpr-18039.9", 0xb98c6f06, "mpr-18040.10", 0x0d872667),
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0800000, "mpr-18041.7", 0xe511ab0a, "mpr-18042.8", 0xe9a04159),
+    ROM_PAIR32(ROM_MAIN_DATA, 0x0c00000, "mpr-18043.5", 0xff84dfd6, "mpr-18044.6", 0xab9b406d),
+    ROM_PAIR32(ROM_POLYGONS, 0x0000000, "mpr-18031.17", 0x25d0deae, "mpr-18032.21", 0xdbae35c2),
+    ROM_PAIR32(ROM_POLYGONS, 0x0400000, "mpr-18033.18", 0x1e75946c, "mpr-18034.22", 0x215235ad),
+    ROM_PAIR32(ROM_TEXTURES, 0x0000000, "mpr-18035.27", 0x4423f66e, "mpr-18036.25", 0x69221cf5),
+    ROM_SWAP16(ROM_AUDIOCPU, 0x0000000, "epr-18047.31", 0x4c31d459),
+    ROM_SWAP16(ROM_SAMPLES, 0x0000000, "mpr-18029.32", 0xf6804150),
+    ROM_SWAP16(ROM_SAMPLES, 0x0400000, "mpr-18030.34", 0x1167615d),
+};
+#define RCHASE2_SIZES [ROM_MAINCPU] = 0x200000, [ROM_MAIN_DATA] = 0x2000000, [ROM_COPRO_DATA] = 0x800000, [ROM_POLYGONS] = 0x1000000, [ROM_TEXTURES] = 0x1000000, [ROM_AUDIOCPU] = 0x80000, [ROM_SAMPLES] = 0x800000
+
 static const rom_part_t indy500_parts[] = {
     ROM_PAIR32(ROM_MAINCPU, 0x0000000, "epr-18598a.15", 0x3cdcac0f, "epr-18599a.16", 0x32bde9a2),
     ROM_PAIR32(ROM_MAIN_DATA, 0x0000000, "mpr-18237.11", 0x37e4255a, "mpr-18238.12", 0xbf837bac),
@@ -733,6 +753,7 @@ M2LIB_RECIPE(dynabb97, NULL, 0, DYNABB97_SIZES)
 M2LIB_RECIPE(dynabb, NULL, 0, DYNABB_SIZES)
 M2LIB_FUNCS(dynabb, BOARD_MODEL2B_CRX, 0, &dynabb97_recipe)
 M2LIB_SET(gunblade,  GUNBLADE_SIZES,  BOARD_MODEL2B_CRX, 0)
+M2LIB_SET(rchase2,   RCHASE2_SIZES,   BOARD_MODEL2B_CRX, 0)
 M2LIB_RECIPE(indy500, indy500to_parts, M2LIB_N(indy500to_parts), INDY500_SIZES)
 M2LIB_FUNCS(indy500, BOARD_MODEL2B_CRX, 0, NULL)
 M2LIB_SET(indy500d,  INDY500D_SIZES,  BOARD_MODEL2B_CRX, 0)
@@ -947,6 +968,23 @@ M2LIB_PROFILE(dynabb, "Dynamite Baseball", BOARD_MODEL2B_CRX, M2LIB_TWO_BUTTONS,
                           .press = { 0x01000000, 0x02000000 } });
 M2LIB_PROFILE(gunblade, "Gunblade NY (Revision A)", BOARD_MODEL2B_CRX,
               M2LIB_GUNSTICK_INPUT(0x04, 0x08, 0, 0), .io_5649 = true, M2LIB_GUNSTICKS);
+/* Rail Chase 2: the gun sticks of Gunblade NY's input, on other channels
+ * (P2 X, P1 X, P2 Y, P1 Y) and every pot read the other way (MAME
+ * PORT_REVERSE), MAME `rchase2`'s ranges. Port D is the seat board's reply
+ * (seat_board.h), port E its commands: the seat's moves play on the host's
+ * rumble (core/ffb.h). */
+M2LIB_PROFILE(rchase2, "Rail Chase 2 (Revision A)", BOARD_MODEL2B_CRX,
+              M2LIB_GUNSTICK_INPUT(0x04, 0x08, 0, 0), .io_5649 = true, .seat_board = true,
+              .gun = {
+                  { .up = 0x02000000, .down = 0x01000000, .left = 0x08000000, .right = 0x04000000,
+                    .trigger = 0x100, .x_min = 0x3a, .x_max = 0xca, .x_rest = 0x82,
+                    .y_min = 0x1c, .y_max = 0xcb, .y_rest = 0x73 },
+                  { .up = 0x20000000, .down = 0x10000000, .left = 0x80000000, .right = 0x40000000,
+                    .trigger = 0x200, .x_min = 0x34, .x_max = 0xc7, .x_rest = 0x7d,
+                    .y_min = 0x1c, .y_max = 0xcb, .y_rest = 0x73 },
+              },
+              .analog = { .ch = { IO5649_AN_GUN2_X, IO5649_AN_GUN1_X, IO5649_AN_GUN2_Y, IO5649_AN_GUN1_Y },
+                          .rev = 0x0F });
 M2LIB_PROFILE(indy500, "INDY 500 Twin (Revision A, Newer)", BOARD_MODEL2B_CRX, M2LIB_WHEEL_INPUT,
               .io_5649 = true, .wheel = { M2LIB_WHEEL, M2LIB_WHEEL_VIEW },
               .analog = { .ch = { IO5649_AN_STEER, IO5649_AN_ACCEL, IO5649_AN_BRAKE } });

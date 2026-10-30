@@ -80,6 +80,7 @@ static const struct { const char *id; game_region_kind_t kind; } g_region_unhook
     { "zerogunj",        REGION_TODO },   /* m2_library.h */
     { "dynabb",          REGION_TODO },   /* m2_library.h */
     { "gunblade",        REGION_TODO },   /* m2_library.h */
+    { "rchase2",         REGION_TODO },   /* m2_library.h */
     { "indy500",         REGION_TODO },   /* m2_library.h */
     { "indy500d",        REGION_TODO },   /* m2_library.h */
     { "sgt24h",          REGION_TODO },   /* m2_library.h */

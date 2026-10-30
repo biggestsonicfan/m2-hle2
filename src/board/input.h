@@ -477,6 +477,8 @@ static inline void input_io5649_controls(void) {
     c->down    = q->analog.down;
     c->press[0] = q->analog.press[0];
     c->press[1] = q->analog.press[1];
+    c->rev      = q->analog.rev;
+    c->seat     = q->seat_board;
     /* A gun stick on a channel (Gunblade NY, Behind Enemy Lines): the guns'
      * controls and ranges, as a light gun's. */
     if (c->layout && q->gun[0].x_max) input_lightgun_setup();

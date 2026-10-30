@@ -53,13 +53,14 @@ typedef enum {
     DRIVE_UNCENTER,      /* 0x4x: pushed on the way it is turned */
     DRIVE_PUSH,          /* 0x5x right, 0x6x left */
     DRIVE_TORQUE,        /* Sega Rally: a steady turning force, 1-32 */
+    DRIVE_SEAT,          /* Rail Chase 2's seat moving (seat_board.h): a jolt 1-7 */
 } drive_kind_t;
 
 typedef struct {
     uint8_t cmd;
     uint8_t kind;        /* drive_kind_t */
     uint8_t level;       /* 0-7; DRIVE_TORQUE 1-32 */
-    int8_t  dir;         /* DRIVE_PUSH, DRIVE_TORQUE: +1 right, -1 left; else 0 */
+    int8_t  dir;         /* DRIVE_PUSH, DRIVE_TORQUE, DRIVE_SEAT: +1 right, -1 left; else 0 */
 } drive_effect_t;
 
 static inline drive_effect_t drive_board_decode(uint8_t cmd) {
