@@ -18,9 +18,10 @@
  * Air Walkers, Power Sled, Virtua Cop, Last Bronx, Pilot Kids, Motor Raid,
  * Desert Tank and the rest of MAME's library (m2_library.h, on the site since
  * Pinboard #1909), with the clones of #1286 (the page's ?game=,
- * web/site/m2hle-games.js). The homebrew is left out, not hidden: a smaller
- * binary. See WEB-PORT.md. Both STF profiles are there, since each is its own
- * lobby space. */
+ * web/site/m2hle-games.js), and the homebrew sfight program (sfight_homebrew.h:
+ * the Megamix compiler's set, ?homebrew=1, Pinboard #1934). The snake is left
+ * out, not hidden: a smaller binary. See WEB-PORT.md. Both STF profiles are
+ * there, since each is its own lobby space. */
 #include "srallyc.h"
 #include "vonj.h"
 #include "dynamcop.h"
@@ -38,9 +39,9 @@
 #include "motoraid.h"  /* runs since Pinboard #1627, on the site since #1628 */
 #include "desert.h"    /* runs since Pinboard #1890, on the site since #1908 */
 #include "m2_library.h" /* the rest of MAME's library, Pinboard #1872, on the site since #1909 */
+#include "sfight_homebrew.h"
 #ifndef M2HLE_WEB
 #include "m2snake.h"
-#include "sfight_homebrew.h"
 #endif
 /* Prepared, not runnable (Pinboard #660): the sets noclip reads that the
  * board cannot run yet. A few hundred bytes of chip lists, so the web build
@@ -120,9 +121,9 @@ const game_profile_t *const g_profiles[] = {
     &topskatruo_profile,
     &topskatrj_profile,
     &bel_profile,
+    &sfight_homebrew_profile,
 #ifndef M2HLE_WEB
     &m2snake_profile,
-    &sfight_homebrew_profile,
 #endif
 };
 

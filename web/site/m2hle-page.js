@@ -155,7 +155,28 @@ function loadZip(zips) {
   /* ?follow= names the leader's profile before the game loads (m2hle-follow.js), and
    * the arcade (stf-arcade.mjs, if it loaded) puts the shared board in localStorage. */
   followReady.then(() => window.stfArcade && window.stfArcade.ready)
+    .then(() => homebrewChannel(zips))
     .then(() => loadZipNow(zips), (e) => romError(m2hleLang.t('page.follow.bad', { error: e.message })));
+}
+
+/* ?homebrew=1: the set is a homebrew build on a stock board (the Megamix
+ * compiler's, Pinboard #1934), loaded by file name (web_rom_homebrew). Its GGPO
+ * channel is homebrew_ and its zip's SHA-256 (the first 8 bytes; the lobby's
+ * names are a-z, 0-9 and _), so a challenge only finds a board built to the
+ * same bytes: a rollback match on two different programs is a desync. */
+function homebrewChannel(zips) {
+  const on = params.get('homebrew') === '1';
+  Module._web_rom_homebrew(on ? 1 : 0);
+  if (!on) return setGgpoChannel('');
+  return crypto.subtle.digest('SHA-256', zips[0]).then((d) =>
+    setGgpoChannel('homebrew_' + Array.from(new Uint8Array(d).slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('')));
+}
+
+function setGgpoChannel(c) {
+  const n = Module.lengthBytesUTF8(c) + 1, sp = Module._malloc(n);
+  Module.stringToUTF8(c, sp, n);
+  Module._web_ggpo_channel(sp);
+  Module._free(sp);
 }
 
 /* A malloc'd copy of `bytes` in the emulator's heap, or 0. */
@@ -484,8 +505,21 @@ var Module = {
      * browser can boot the game with no file dialog; a split set gives one per
      * zip (?rom=vonj.zip&rom=von.zip). A production site hosts no ROMs, so there
      * is nothing for it to find; other origins are refused. */
-    const urls = new URLSearchParams(location.search).getAll('rom')
+    const urls = new URLSearchParams(location.search).getAll('rom').filter((dev) => dev !== 'opener')
       .map((dev) => new URL(dev, location.href)).filter((url) => url.origin === location.origin);
+    /* ?rom=opener: the page that opened this one sends the set. The Megamix
+     * compiler (Pinboard #1934) builds it in the player's browser, so there is
+     * no URL to give: on { m2hle: 'ready' } it posts { m2hle: 'rom', zip }, an
+     * ArrayBuffer, as a file the player picked. */
+    if (params.get('rom') === 'opener' && window.opener) {
+      const take = (e) => {
+        if (e.source !== window.opener || !e.data || e.data.m2hle !== 'rom' || !(e.data.zip instanceof ArrayBuffer)) return;
+        window.removeEventListener('message', take);
+        loadZip([new Uint8Array(e.data.zip)]);
+      };
+      window.addEventListener('message', take);
+      window.opener.postMessage({ m2hle: 'ready' }, '*');
+    }
     if (urls.length > 0) {
       Promise.all(urls.map((url) => fetch(url)
         .then((r) => r.ok ? r.arrayBuffer() : Promise.reject(new Error(url.pathname + ': ' + r.status)))))
