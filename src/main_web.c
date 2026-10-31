@@ -1319,11 +1319,30 @@ EMSCRIPTEN_KEEPALIVE const char *web_rom_parent(void) {
 }
 
 /*
+ * A homebrew program on a stock board (?homebrew=1, Pinboard #1934): the
+ * Megamix compiler builds a sfight set in the player's browser, its EPROMs and
+ * data ROMs its own, so its files are found by name, not by the stock CRCs,
+ * and the set's any_program profile runs it (web_rom_load). Set before
+ * web_rom_load; it stays until set again.
+ */
+static bool g_web_homebrew;
+EMSCRIPTEN_KEEPALIVE void web_rom_homebrew(int on) { g_web_homebrew = on != 0; }
+
+/* The GGPO channel a join with no name goes to: the page gives a homebrew
+ * build's (its zip's hash), so only boards with the same bytes meet; "" for
+ * the profile's id. */
+static char g_web_ggpo_channel[64];
+EMSCRIPTEN_KEEPALIVE void web_ggpo_channel(const char *c) {
+    snprintf(g_web_ggpo_channel, sizeof g_web_ggpo_channel, "%s", c ? c : "");
+}
+
+/*
  * Load the ROM set from the bytes of the zip the player picked, and of any
  * web_rom_extra gave (a split clone's parent). `zip` is a malloc'd buffer the
  * page filled; this takes it over and frees it, and the extras, before
  * returning, because a zip is 18 MB that nothing needs once the regions are
- * extracted. Strict: every file must be in one of the zips by CRC (rom_loader.h).
+ * extracted. Strict: every file must be in one of the zips by CRC (rom_loader.h),
+ * but for a homebrew set (web_rom_homebrew).
  *
  * Returns 0 and starts the board, or -1 (web_rom_missing names what was not
  * found) or -2 (no profile).
@@ -1339,7 +1358,7 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     replay_game_loaded();   /* a recording ends; a replay lets go of the board */
     /* The last game's script and its text go: the page hands the new set's over. */
     m2lua_load_source(NULL, NULL, &state.bus, &state.romset, false);
-    rl_mem_zip_set(zip, (size_t)len, true);
+    rl_mem_zip_set(zip, (size_t)len, !g_web_homebrew);
     for (int i = 0; i < g_web_rom_extra_n; i++)
         rl_mem_zip_add(g_web_rom_extra[i], (size_t)g_web_rom_extra_len[i]);
     int rc = g_active_profile->load_fn(&state.romset, NULL, NULL);
@@ -1348,13 +1367,32 @@ EMSCRIPTEN_KEEPALIVE int web_rom_load(uint8_t *zip, int len) {
     free(zip);
     web_rom_extra_free();
     if (rc != 0) return -1;
+    bool homebrew = false;
+    if (g_web_homebrew) {
+        /* The page's profile may have no interrupt table to tell the game by
+         * (the Console version's): the set's any_program profile decides, and
+         * hands the set's own game back to its default profile. */
+        const game_profile_t *any = g_active_profile;
+        for (size_t i = 0; i < g_profile_count && !any->any_program; i++)
+            if (g_profiles[i]->any_program && !strcmp(profile_rom_set(g_profiles[i]), profile_rom_set(g_active_profile)))
+                any = g_profiles[i];
+        g_active_profile = profile_for_program(any, state.romset.maincpu, state.romset.maincpu_size);
+        homebrew = g_active_profile->any_program;
+    }
+    if (homebrew)
+        LOG_INFO("web: the program ROM is not the set's game: running it as %s", g_active_profile->display_name);
     /* The model lookup is built from the ROM's model table: a new set needs a new one. */
     geo3d_lookup_invalidate();
 
-    /* The set's backup RAM, kept in this browser's localStorage. A scripted run
+    /* The set's backup RAM, kept in this browser's localStorage (a homebrew
+     * program's under a key of its own, not over the game's). A scripted run
      * (?script=) boots blank, so that two runs of a script are the same run. */
-    if (g_backup_want != 0 && g_web_script_n == 0 && !g_web_follow)
-        backup_ram_open(profile_rom_set(g_active_profile), g_web_keep_save);
+    if (g_backup_want != 0 && g_web_script_n == 0 && !g_web_follow) {
+        char key[64];
+        backup_ram_key(key, sizeof key, profile_rom_set(g_active_profile), homebrew,
+                       state.romset.maincpu, state.romset.maincpu_size);
+        backup_ram_open(key, g_web_keep_save);
+    }
     web_install_board();
     emu_run(&state.emu);
     state.last_us = 0;
@@ -1879,7 +1917,8 @@ EMSCRIPTEN_KEEPALIVE int web_ggpo_post(const char *kind, const char *a, const ch
     ggl_cmd_kind_t k;
     if (!ggl_cmd_kind_named(kind, &k)) return 0;
     if (k == GGL_CMD_CONNECT && (!a || !a[0])) a = GGL_DEFAULT_URL;
-    if (k == GGL_CMD_JOIN && (!a || !a[0])) a = g_active_profile ? g_active_profile->id : "m2";
+    if (k == GGL_CMD_JOIN && (!a || !a[0]))
+        a = g_web_ggpo_channel[0] ? g_web_ggpo_channel : g_active_profile ? g_active_profile->id : "m2";
     ggl_post(k, a ? a : "", b ? b : "");
     return 1;
 #else
