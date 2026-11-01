@@ -86,6 +86,7 @@ the next game cheaper instead of being spent on a single ROM set.
 | Netplay | RPCN matchmaking (our server or the official np.rpcs3.net) + direct peer-to-peer delay lockstep (`--netplay`); GGPO rollback through its own lobby (desktop, web and libretro builds); rooms of up to eight with a winner-stays queue; cross-play with the PS3 release on the official server |
 | PS3-release menus | The Console profile's title, main menu, Arcade / Offline Versus settings and online lobby, redrawn after the PS3 release (libretro core and web build) |
 | Automation | In-process MCP bridge over TCP (`--mcp`) |
+| Fullscreen | Game mode (`--fullscreen`, Alt+Enter, F11): the game alone on the monitor, in front and taking the keys; Esc leaves it |
 | Recording | Capture mode (`--kiosk`): chrome-free window at a fixed capture size, parked off the desktop, run from a tray icon |
 | Streaming | Raw board video and audio on one socket and one clock (`--av-port`), and a plugin that paints over the picture (`--overlay`) |
 | Picture filters | The Arcade switch (a real board's tone curve, ghosting, noise and 4:3 shape; every build), and over it Lost Judgment's CRT scanlines, as YAMP ports them, or a libretro GLSL shader preset of your own (web and Linux builds): the Video menu, `--arcade`, `--crt`, `--shader`; the browser's Picture tab. Depth per pixel (`--pixel-depth`, off by default) draws each pixel at its own depth instead of the board's one sort key a polygon |
@@ -408,6 +409,16 @@ remembered in `video.cfg` beside the netplay settings (`%APPDATA%\m2hle2`, `~/.c
 the command line applies over it for one run. In the browser it is the menu's **Picture** tab:
 choose a preset's files or a whole folder, and only the files the preset uses are kept (in the
 browser's IndexedDB) for the next visit.
+
+## Fullscreen
+
+`--fullscreen` (or **File → Fullscreen**, **Alt+Enter**, **F11**) is capture mode's picture for
+playing: the window covers its monitor and shows the game alone — no menu bar, no debug windows —
+and it makes itself the foreground window, so the keys and pads reach the game without a click.
+Esc, Alt+Enter or F11 leaves it (Esc does not quit while it is on; F11 is the TAS window's own
+while that is open). The cursor hides after two seconds still. The prompts a player answers
+(play again, an empty room, a linked cabinet alone) still come up over the game.
+**File → Start in fullscreen** remembers it in `display.cfg` beside `video.cfg`.
 
 ## Recording (capture mode)
 
