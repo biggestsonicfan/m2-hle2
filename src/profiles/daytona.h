@@ -165,8 +165,9 @@ DAYTONA_RECIPE(daytonagtx, "model1io.zip")
  * at 0x1D00080 -- and else from the ROM's factory block at 0x39D60. A copy is
  * valid when its first 8 bytes are the factory block's ("SEGA" ...) and the
  * u16 at +8 is the CRC (ROM 0x292D8: table at 0x39DE0, seed 0) of +0x0A..+0x7F.
- * The byte at +0x0B is LINK ID: 0 SINGLE, 1 MASTER, 2 SLAVE; +0x7C counts the
- * boots.
+ * The byte at +0x0B is LINK ID: 0 SINGLE, 1 MASTER, 2 SLAVE; +0x0C is CAR
+ * NUMBER, 0..7 for cars 1..8 (the same GAME SYSTEM screen, ROM 0x2A3C0); +0x7C
+ * counts the boots.
  *
  * The factory value is MASTER: this is the twin cabinet's set, and a board alone
  * waits for its other half, prints CANCELLED and reboots (ROM 0x1B5F4), forever.
@@ -180,6 +181,7 @@ DAYTONA_RECIPE(daytonagtx, "model1io.zip")
 #define DAYTONA_FACTORY        0x39D60u
 #define DAYTONA_CRC_TABLE      0x39DE0u
 #define DAYTONA_SETTINGS_LINK  0x0Bu
+#define DAYTONA_SETTINGS_CAR   0x0Cu
 #define DAYTONA_SETTINGS_BOOTS 0x7Cu
 
 /* Where a build keeps its factory block; the CRC table follows it at +0x80
@@ -220,18 +222,31 @@ static inline void daytona_settings_single(memory_bus_t *bus, const uint8_t *rom
  * EEPROM is blank at every power-on here, so the boot takes backup RAM's copy,
  * which daytona_settings_single made valid at the install. The board's comm
  * ring then counts the cabinets and numbers them. False for the 1993 build. */
-static inline bool daytona_settings_role(memory_bus_t *bus, uint32_t factory, game_link_role_t role) {
-    static const uint8_t link_id[3] = { 0, 1, 2 };   /* ALONE, MASTER, SLAVE */
+static inline bool daytona_settings_put(memory_bus_t *bus, uint32_t factory, uint32_t at, uint8_t v) {
     const uint8_t *rom = bus->rom;
     uint32_t table = factory + 0x80u;
     if (!factory || !rom || !bus->back || bus->rom_size < table + 0x200u) return false;
     uint8_t *b = bus->back + DAYTONA_SETTINGS;
     if (memcmp(b, rom + factory, 8) != 0) return false;
-    b[DAYTONA_SETTINGS_LINK] = link_id[role <= GAME_LINK_SLAVE ? role : GAME_LINK_ALONE];
+    b[at] = v;
     uint16_t crc = daytona_settings_crc(rom, table, b + 0x0A, 0x76);
     b[8] = (uint8_t)crc;
     b[9] = (uint8_t)(crc >> 8);
     return true;
+}
+
+static inline bool daytona_settings_role(memory_bus_t *bus, uint32_t factory, game_link_role_t role) {
+    static const uint8_t link_id[3] = { 0, 1, 2 };   /* ALONE, MASTER, SLAVE */
+    return daytona_settings_put(bus, factory, DAYTONA_SETTINGS_LINK,
+                                link_id[role <= GAME_LINK_SLAVE ? role : GAME_LINK_ALONE]);
+}
+
+/* CAR NUMBER for a cabinet of the ring (Pinboard #1937): the MASTER (seat -1)
+ * car 1, the slaves cars 2..8 in ring order. The ring numbers its nodes by
+ * itself, but the car each cabinet races is this setting, so a ring of boards
+ * that all kept the factory 0 put every player in car 1. */
+static inline void daytona_settings_car(memory_bus_t *bus, uint32_t factory, int seat) {
+    if (seat >= -1 && seat <= 6) daytona_settings_put(bus, factory, DAYTONA_SETTINGS_CAR, (uint8_t)(seat + 1));
 }
 
 /* The colour tables by cabinet (Pinboard #1056). The settings' +0x1A is CABINET
@@ -305,6 +320,9 @@ static inline void daytona_install_build(const romset_t *rs, i960_cpu_t *cpu, me
     } \
     static inline bool name##_ring_role(memory_bus_t *bus, game_link_role_t role) { \
         return daytona_settings_role(bus, factory_at, role); \
+    } \
+    static inline void name##_ring_seat(memory_bus_t *bus, int seat) { \
+        daytona_settings_car(bus, factory_at, seat); \
     }
 DAYTONA_INSTALL(daytona,    DAYTONA_FACTORY)
 DAYTONA_INSTALL(daytona93,  0)
@@ -358,6 +376,7 @@ static uint32_t daytona_gtx_read_cb(mem_region_t *r, uint32_t addr, int size) {
 
 static inline void daytonagtx_backup(const romset_t *rs, memory_bus_t *bus) { daytonagtx_base_backup(rs, bus); }
 static inline bool daytonagtx_ring_role(memory_bus_t *bus, game_link_role_t role) { return daytonagtx_base_ring_role(bus, role); }
+static inline void daytonagtx_ring_seat(memory_bus_t *bus, int seat) { daytonagtx_base_ring_seat(bus, seat); }
 
 static inline void daytonagtx_install(const romset_t *rs, i960_cpu_t *cpu, memory_bus_t *bus) {
     daytonagtx_base_install(rs, cpu, bus);
@@ -466,6 +485,7 @@ static const game_profile_t daytona_profile = {
     .link_setting = DAYTONA_LINK_SETTING,
     .link_cable   = true,   /* a ring of one: 1人まで対戦できます */
     .ring_role    = daytona_ring_role,
+    .ring_seat    = daytona_ring_seat,   /* each cabinet its own car */
     .link_cabinets = 8,
     .input        = DAYTONA_INPUT,
     .quirks       = DAYTONA_QUIRKS(0x83fbb4, 3190),
@@ -482,7 +502,8 @@ static const game_profile_t daytona_profile = {
         .id = #name, .display_name = title, .parent_zip_name = "daytona.zip", \
         .board = BOARD_MODEL2, .load_fn = load, .install_fn = name##_install, \
         .backup_fn = name##_backup, .link_setting = DAYTONA_LINK_SETTING, \
-        .link_cable = true, .ring_role = name##_ring_role, .link_cabinets = 8, \
+        .link_cable = true, .ring_role = name##_ring_role, .ring_seat = name##_ring_seat, \
+        .link_cabinets = 8, \
         .input = DAYTONA_INPUT, .quirks = DAYTONA_QUIRKS(table, count), \
     };
 /* noclip games.js `daytona93`: its own table, 2822 entries. */

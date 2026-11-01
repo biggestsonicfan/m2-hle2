@@ -445,9 +445,10 @@ typedef struct game_profile {
      * (8人まで対戦できます). 0: two, Virtual-On's one-on-one. */
     uint8_t             link_cabinets;
 
-    /* A SLAVE's place among the ring's slaves (0..link_cabinets-2), written
-     * into its backup block before it boots, for a game whose slaves must
-     * differ (Power Sled's ride colours). NULL: the slaves are all alike. */
+    /* A cabinet's place in the ring, written into its backup block before it
+     * boots, for a game whose cabinets must differ: -1 the MASTER, then the
+     * slaves 0..link_cabinets-2 (Power Sled's ride colours, Daytona's car
+     * numbers). NULL: the cabinets differ only in their role. */
     void              (*ring_seat)(struct memory_bus *bus, int seat);
 
     /* The MASTER's operator in a ring (`--boards`), when it is not link_solo's:
