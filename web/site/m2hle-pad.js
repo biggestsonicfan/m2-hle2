@@ -35,6 +35,7 @@ m2hleLang.add({
     'pad.button': 'Button {n}',
     'pad.axis': 'Axis {n} {dir}',
     'pad.sub.macros': 'Macros: one press holds several buttons',
+    'pad.sub.twin': 'Both levers in one press: the game reads guard and jump only when the two land on the same frame',
     'pad.sub.page': 'The page: offline only, as the button beside the menu',
     'pad.sub.cab': 'The cabinet: the first pad only',
     'pad.none': 'Not set',
@@ -63,6 +64,7 @@ m2hleLang.add({
     'pad.button': 'ボタン{n}',
     'pad.axis': '軸{n} {dir}',
     'pad.sub.macros': 'マクロ：1回押すと複数のボタンを同時に押します',
+    'pad.sub.twin': '1回で両レバー：ガードとジャンプは両レバーが同じフレームに入ったときだけ出ます',
     'pad.sub.page': 'ページ：オフライン時のみ。メニュー横のボタンと同じです',
     'pad.sub.cab': '筐体：1台目のパッドのみ',
     'pad.none': '未設定',
@@ -124,6 +126,11 @@ const m2hlePad = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* A twin-stick game's gestures, both levers in one press: guard is left lever
+     * right + right lever left, jump the two outward. The game reads them only
+     * when both land on the same frame (Pinboard #1940). Unbound by default. */
+    { id: 'guard', acts: [3, 12], twin: true, gesture: true },
+    { id: 'jump',  acts: [2, 13], twin: true, gesture: true },
     /* The cabinet's own switches, the first pad only: the board's Service and
      * Test, and a racing game's gear buttons (m2hleGame.gears), one per gate of
      * the lever (src/board/io_5649.h). Unbound until the player binds them. */
@@ -177,7 +184,7 @@ const m2hlePad = (() => {
     b2:     [{ b: 4 }],
     rshot:  [{ b: 7 }],
     rdash:  [{ b: 5 }],
-    b3: [], b4: [],
+    b3: [], b4: [], guard: [], jump: [],
     start:  [{ b: 9 }],
     coin:   [{ b: 8 }],
     pause: [], service: [], test: [],
@@ -205,7 +212,7 @@ const m2hlePad = (() => {
     b2:     [{ b: 9 }],
     rshot:  [{ b: 0 }],
     rdash:  [{ b: 7 }],
-    b3: [], b4: [],
+    b3: [], b4: [], guard: [], jump: [],
     start:  [{ b: 5 }],
     coin: [], pause: [], service: [], test: [],
   };
@@ -577,6 +584,12 @@ const m2hlePad = (() => {
         const sub = document.createElement('li');
         sub.className = 'pad-sub';
         sub.textContent = m2hleLang.t('pad.sub.macros');
+        rows.appendChild(sub);
+      }
+      if (a.gesture && a === ACTIONS.find((x) => x.gesture)) {
+        const sub = document.createElement('li');
+        sub.className = 'pad-sub';
+        sub.textContent = m2hleLang.t('pad.sub.twin');
         rows.appendChild(sub);
       }
       if (a.cab && a === ACTIONS.find((x) => x.cab)) {

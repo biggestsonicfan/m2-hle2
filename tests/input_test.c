@@ -66,6 +66,11 @@ static void test_combos(void) {
           input_combo_parse("p2:gear1") == 0 && input_combo_parse("p3:service") == 0 &&
           input_combo_parse("gear5") == 0,
           "the cabinet's service, test and gear buttons parse, for player 1 only (Pinboard #1137)");
+    /* Virtual-On's levers are P1's and P2's directions: one key, both levers. */
+    CHECK(input_combo_parse("right+p2:left") == ((1u << GAME_INPUT_P1_RIGHT) | (1u << GAME_INPUT_P2_LEFT)) &&
+          input_combo_parse("p2:right+p1:left") == ((1u << GAME_INPUT_P1_LEFT) | (1u << GAME_INPUT_P2_RIGHT)) &&
+          input_combo_parse("p3:up+p2:up") == 0 && input_combo_parse("up+p2:") == 0,
+          "a combo may take both levers of one player: \"right+p2:left\"");
     {   /* a gear button puts the lever in its gate and it stays there (io_5649.h) */
         io5649_controls_t saved = g_io5649_controls;
         g_io5649_controls = (io5649_controls_t){ .shift_up = 1u, .shift_down = 2u,
@@ -130,7 +135,8 @@ static void test_key_map(void) {
     }
     CHECK(combo_ok && !strcmp(input_combo_format((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P1_B2), buf, sizeof buf), "b1+b2") &&
           !strcmp(input_combo_format(1u << GAME_INPUT_SERVICE, buf, sizeof buf), "service") &&
-          !strcmp(input_combo_format((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P2_B1), buf, sizeof buf), ""),
+          !strcmp(input_combo_format((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_P2_B1), buf, sizeof buf), "b1+p2:b1") &&
+          !strcmp(input_combo_format((1u << GAME_INPUT_P1_B1) | (1u << GAME_INPUT_SERVICE), buf, sizeof buf), ""),
           "action masks write as the combo text that parses back to them");
     CHECK(input_action_by_name("p2_start") == GAME_INPUT_P2_START && input_action_by_name("test") == GAME_INPUT_TEST &&
           input_action_by_name("p3_up") == -1, "actions by their controls-file names");
