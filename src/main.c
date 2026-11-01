@@ -64,6 +64,7 @@
 #include "replay_video.h"    /* --replay-video: a replay into a video file, headless */
 #include "tas_window.h"      /* tool-assisted play (Pinboard #1462) */
 #include "kiosk.h"           /* --kiosk: chrome-free capture window + tray icon */
+#include "game_fullscreen.h"  /* --fullscreen: the game alone on the monitor, focused */
 #include "overlay_host.h"    /* --overlay: a plugin paints layers over the picture */
 #include "post_shader.h"     /* the CRT filter and libretro presets over the picture */
 #include "multi_view.h"      /* --boards N: every board in one window (#1910) */
@@ -142,6 +143,7 @@ static int  g_no_sound_board = 0;
 static int  g_kiosk_w    = KIOSK_DEFAULT_WIDTH;
 static int  g_kiosk_h    = KIOSK_DEFAULT_HEIGHT;
 static int  g_kiosk_show = 0;      /* --kiosk-show: start it on screen, not parked */
+static int  g_fullscreen_cli = 0;  /* --fullscreen: start in fullscreen game mode */
 static int  g_av_port    = 0;      /* --av-port N: raw A/V server, 0 = off */
 static int  g_av_w       = AV_DEFAULT_WIDTH;
 static int  g_av_h       = AV_DEFAULT_HEIGHT;
@@ -875,6 +877,8 @@ static void menu_file(void) {
      * and parks off the desktop, and a tray icon becomes the way back. */
     if (igMenuItemEx("Capture mode (OBS)", NULL, false, true))
         kiosk_enter(g_kiosk_w, g_kiosk_h, false);
+    /* Fullscreen: the same picture, but on the monitor and in front. */
+    game_fullscreen_menu();
     igSeparator();
     if (igMenuItemEx("Quit", "Esc", false, true)) sapp_request_quit();
     igEndMenu();
@@ -1204,6 +1208,10 @@ static void init(void) {
     });
     kiosk_window_ready();
     if (g_kiosk_on) kiosk_enter(g_kiosk_w, g_kiosk_h, g_kiosk_show != 0);
+    /* Fullscreen: sokol opened the window that way (app_desc), as an X11
+     * window manager ignores the request until it has mapped the window;
+     * this hides the UI and takes the focus. */
+    else if (sapp_is_fullscreen()) game_fullscreen_set(true);
 
     mem_init(&state.bus, NULL, 0);
     i960_reset(&state.cpu);
@@ -1745,6 +1753,12 @@ static void draw_board_windows(void) {
 }
 
 /* The debug windows and the menu bar: everything but the game. */
+/* The overlays a player answers in the game: play again, an empty room. */
+static void draw_game_prompts(void) {
+    netplay_empty_room_overlay();
+    netplay_vs_again_overlay();
+}
+
 static void draw_windows(void) {
     draw_menu_bar();
     draw_file_dialog();
@@ -1771,8 +1785,7 @@ static void draw_windows(void) {
 #if M2HLE_PADS
     multi_pads_window(pads_running());
 #endif
-    netplay_empty_room_overlay();
-    netplay_vs_again_overlay();
+    draw_game_prompts();
     if (state.show_demo)        igShowDemoWindow(&state.show_demo);
 }
 
@@ -1992,8 +2005,9 @@ static void frame(void) {
     netplay_ggpo_announce();
 
     /* Capture mode draws the game and nothing else: no menu bar, no debug
-     * windows, nothing for a recording to pick up. */
-    const bool draw_ui = !kiosk_active();
+     * windows, nothing for a recording to pick up. Fullscreen game mode
+     * neither, but keeps the prompts a player has to answer. */
+    const bool draw_ui = !kiosk_active() && !game_fullscreen_on();
 
     /* Before anything draws: draw_menu_bar() and the game viewport below must
      * agree on the same answer for this frame. Capture mode has no menu bar at
@@ -2004,7 +2018,8 @@ static void frame(void) {
 
     frame_objview_request();
     if (draw_ui) draw_windows();
-    if (draw_ui) link_check_prompt(&state.emu);
+    else if (game_fullscreen_on()) draw_game_prompts();
+    if (draw_ui || game_fullscreen_on()) link_check_prompt(&state.emu);
 
     av_stream_pass();
 
@@ -2046,6 +2061,7 @@ static void frame(void) {
     /* Capture mode's sign of life: the presented frame rate, in the tray
      * tooltip and periodically in the log. Inert otherwise. */
     kiosk_frame_tick((float)sapp_frame_duration());
+    game_fullscreen_tick((float)sapp_frame_duration());
 }
 
 static void cleanup(void) {
@@ -2133,6 +2149,7 @@ static void event(const sapp_event* ev) {
     if (ev->type == SAPP_EVENTTYPE_KEY_UP)                      input_key_up((int)ev->key_code);
     m2lua_ui_event(ev);
     lightgun_ui_event(ev);
+    game_fullscreen_mouse(ev);
 #if M2HLE_PADS
     if (ev->type == SAPP_EVENTTYPE_FOCUSED)   pads_focus(true);
     if (ev->type == SAPP_EVENTTYPE_UNFOCUSED) pads_focus(false);
@@ -2140,6 +2157,7 @@ static void event(const sapp_event* ev) {
 
     if (ev->type != SAPP_EVENTTYPE_KEY_DOWN) return;
     if (tas_ui_hotkey(&state.emu, ev)) return;
+    if (game_fullscreen_key(ev)) return;    /* Alt+Enter, F11; Esc leaves it */
     event_hotkey(ev);
 }
 
@@ -2378,6 +2396,8 @@ static void parse_args(int argc, char **argv) {
                 LOG_WARN("--kiosk-size wants WxH (e.g. 1920x1080); keeping %dx%d",
                          g_kiosk_w, g_kiosk_h);
             }
+        } else if (strcmp(argv[i], "--fullscreen") == 0) {
+            g_fullscreen_cli = 1;              /* game_fullscreen.h */
         } else if (strcmp(argv[i], "--kiosk-show") == 0) {
             g_kiosk_show = 1;                  /* start on screen, not parked */
         } else if (strcmp(argv[i], "--av-port") == 0 && i + 1 < argc) {
@@ -2556,6 +2576,7 @@ static sapp_desc app_desc(void) {
          * 1920x1080 window on a 125% desktop would present a 1536x864
          * swapchain — which is what OBS would then record. */
         .high_dpi    = g_kiosk_on ? true : false,
+        .fullscreen  = !g_kiosk_on && (g_fullscreen_cli || g_gfs.start_on),
         /* sokol's default became depth-only; everything here is built for
          * the depth-stencil swapchain it used to give. */
         .depth_format = SAPP_PIXELFORMAT_DEPTH_STENCIL,
@@ -2587,6 +2608,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
      * only what its command line says, as the graders boot blank. */
     if (!g_headless && !g_replay_cli_set) replay_settings_load();
     if (!g_headless) lightgun_ui_settings_load();   /* the crosshair (Pinboard #1496) */
+    if (!g_headless) game_fullscreen_settings_load(); /* "Start in fullscreen" (#1939) */
     scripts_setup();
     if (g_headless && g_multi_want) { LOG_WARN("--boards needs the window: one board under --headless"); g_multi_want = 0; }
     if (replay_video_on()) g_headless = 1;   /* a file needs no window */
