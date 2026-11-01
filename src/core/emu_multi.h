@@ -453,8 +453,8 @@ static inline void emu_multi__boot(emu_thread_ctx_t *ctx, const uint8_t *back, i
     g_netplay.reset_board(g_netplay.reset_ctx);
     emu_multi__use_sound(g_multi.set_of[b], true);       /* the reset loaded the loaded set's */
     if (back) memcpy(ctx->bus->back, back, BACKUP_RAM_KEEP);
-    if (back && b && g_multi.linked && g_active_profile && g_active_profile->ring_seat)
-        g_active_profile->ring_seat(ctx->bus, b - 1);   /* this slave's place: a ride's colour */
+    if (back && g_multi.linked && g_active_profile && g_active_profile->ring_seat)
+        g_active_profile->ring_seat(ctx->bus, b - 1);   /* its place: a ride's colour, a car */
     geodl_snaps_clear();
     input_reset();
     ctx->total_steps       = 0;
