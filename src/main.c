@@ -2500,7 +2500,9 @@ static void parse_args(int argc, char **argv) {
              * --macro kp1=p2:b1+b2+b3. Repeatable; see input_combo_parse.
              * Players 3 and 4 of a four-player cabinet have keys only this
              * way: --macro t=p3:up, --macro kp8=p4:up. A racing cabinet's
-             * gear buttons too: --macro q=gearn, --macro w=gear1 .. gear4. */
+             * gear buttons too: --macro q=gearn, --macro w=gear1 .. gear4.
+             * Virtual-On's two levers in one press, guard and jump:
+             * --macro space=right+p2:left, --macro b=left+p2:right. */
             char spec[64];
             snprintf(spec, sizeof spec, "%s", argv[++i]);
             char *eq = strchr(spec, '=');

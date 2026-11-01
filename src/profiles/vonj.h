@@ -320,6 +320,7 @@ static inline void vonj_match_info(memory_bus_t *bus, game_match_info_t *out) {
             [GAME_INPUT_P2_B1]    = VONJ_R_SHOT, \
             [GAME_INPUT_P2_B2]    = VONJ_R_DASH, \
         }, \
+        .twin_levers = true, \
     }, \
     .board = BOARD_MODEL2B_CRX, \
     .hook_count = 0, \

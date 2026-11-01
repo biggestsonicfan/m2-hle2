@@ -37,6 +37,8 @@ m2hleLang.add({
     'keys.act.gearn': 'Neutral', 'keys.act.gear1': '1st gear', 'keys.act.gear2': '2nd gear',
     'keys.act.gear3': '3rd gear', 'keys.act.gear4': '4th gear',
     'keys.sub.cab': 'The cabinet: player 1 only',
+    'keys.sub.twin': 'Both levers in one press: the game reads guard and jump only when the two land on the same frame',
+    'keys.act.guard': 'Guard (both levers in)', 'keys.act.jump': 'Jump (both levers out)',
     'keys.none': 'Not set',
     'keys.remove': 'Remove',
     'keys.remove.from': 'Remove {key} from {action}',
@@ -57,6 +59,8 @@ m2hleLang.add({
     'keys.act.gearn': 'ニュートラル', 'keys.act.gear1': '1速', 'keys.act.gear2': '2速',
     'keys.act.gear3': '3速', 'keys.act.gear4': '4速',
     'keys.sub.cab': '筐体：プレイヤー1のみ',
+    'keys.sub.twin': '1回で両レバー：ガードとジャンプは両レバーが同じフレームに入ったときだけ出ます',
+    'keys.act.guard': 'ガード（両レバー内）', 'keys.act.jump': 'ジャンプ（両レバー外）',
     'keys.none': '未設定',
     'keys.remove': '削除',
     'keys.remove.from': '{action}から{key}を削除',
@@ -93,6 +97,12 @@ const m2hleKeys = (() => {
     { id: 'pb',    label: 'P + B',     acts: [4, 6],    macro: true },
     { id: 'kb',    label: 'K + B',     acts: [5, 6],    macro: true },
     { id: 'pkb',   label: 'P + K + B', acts: [4, 5, 6], macro: true },
+    /* A twin-lever game's (m2hleGame.twin) gestures, player 1's tab only: both
+     * levers in one press, left lever right + right lever left (player 2's
+     * directions are the right lever, src/profiles/vonj.h). The game reads guard
+     * and jump only when the two land on the same frame (Pinboard #1940). */
+    { id: 'guard', acts: [3, 12], twin: true },
+    { id: 'jump',  acts: [2, 13], twin: true },
     /* The cabinet's own switches, player 1's tab only: the board's Service and
      * Test, and a racing game's gear buttons (m2hleGame.gears), one per gate of
      * the lever (src/board/io_5649.h). Unbound until the player binds them. */
@@ -105,7 +115,7 @@ const m2hleKeys = (() => {
     { id: 'gear4',   act: 26, cab: true, gears: true },
     /* The page's Pause (m2hle-page.js), not a game button: it holds nothing. */
     { id: 'pause', acts: [],        page: true },
-  ].filter((a) => !a.gears || m2hleGame.gears);
+  ].filter((a) => (!a.gears || m2hleGame.gears) && (!a.twin || m2hleGame.twin));
   for (const a of ACTIONS) a.mask = (a.acts || [a.act]).reduce((m, i) => m | (1 << i), 0);
   for (const a of ACTIONS) a.label = m2hleGame.labels[a.id] || a.label || m2hleLang.t('keys.act.' + a.id);
   const P2_OFFSET = 10;
@@ -115,11 +125,11 @@ const m2hleKeys = (() => {
   const DEFAULTS = {
     p1: { up: ['ArrowUp'], down: ['ArrowDown'], left: ['ArrowLeft'], right: ['ArrowRight'],
           b1: ['KeyZ'], b2: ['KeyX'], b3: ['KeyC'], b4: ['KeyV'], start: ['Digit1'], coin: ['Digit5'],
-          pk: [], pb: [], kb: [], pkb: [], service: ['F1', 'Digit9'], test: ['F2'],
+          pk: [], pb: [], kb: [], pkb: [], guard: [], jump: [], service: ['F1', 'Digit9'], test: ['F2'],
           gearn: [], gear1: [], gear2: [], gear3: [], gear4: [], pause: ['KeyP', 'Pause'] },
     p2: { up: ['KeyI'], down: ['KeyK'], left: ['KeyJ'], right: ['KeyL'],
           b1: ['Delete'], b2: ['End'], b3: ['PageDown'], b4: ['Home'], start: ['Digit2'], coin: ['Digit6'],
-          pk: [], pb: [], kb: [], pkb: [], service: [], test: [],
+          pk: [], pb: [], kb: [], pkb: [], guard: [], jump: [], service: [], test: [],
           gearn: [], gear1: [], gear2: [], gear3: [], gear4: [], pause: [] },
   };
   for (const p of ['p1', 'p2']) Object.assign(DEFAULTS[p], (m2hleGame.keys || {})[p]);
@@ -174,7 +184,7 @@ const m2hleKeys = (() => {
     let m = 0;
     for (const p of ['p1', 'p2']) {
       const shift = p === 'p2' ? P2_OFFSET : 0;
-      for (const a of ACTIONS) if (!(a.cab && shift) && binds[p][a.id].includes(code)) m |= a.mask << shift;
+      for (const a of ACTIONS) if (!((a.cab || a.twin) && shift) && binds[p][a.id].includes(code)) m |= a.mask << shift;
     }
     return m >>> 0;
   }
@@ -273,6 +283,7 @@ const m2hleKeys = (() => {
    * cabinet's buttons, the page's keys. */
   function subOf(a) {
     if (a.macro && a === ACTIONS.find((x) => x.macro)) return 'keys.sub.macros';
+    if (a.twin && a === ACTIONS.find((x) => x.twin)) return 'keys.sub.twin';
     if (a.cab && a === ACTIONS.find((x) => x.cab)) return 'keys.sub.cab';
     if (a.page) return 'keys.sub.page';
     return null;
@@ -336,7 +347,7 @@ const m2hleKeys = (() => {
     }
     rows.textContent = '';
     for (const a of ACTIONS) {
-      if (a.cab && player !== 'p1') continue;
+      if ((a.cab || a.twin) && player !== 'p1') continue;
       const sub = subOf(a);
       if (sub) rows.appendChild(subRow(sub));
       rows.appendChild(keyRow(a));
