@@ -202,15 +202,18 @@ static inline uint8_t *zip__find_in_set(const char *child_zip, const char *paren
                                         const char *filename, size_t *out_size,
                                         uint32_t expected_crc, uint32_t *actual) {
     uint8_t *data = NULL;
-    if (child_zip)  data = zip_extract(child_zip,  filename, out_size, actual);
-    if (!data && parent_zip) data = zip_extract(parent_zip, filename, out_size, actual);
+    const char *from = NULL;
+    if (child_zip && (data = zip_extract(child_zip, filename, out_size, actual))) from = child_zip;
+    if (!data && parent_zip && (data = zip_extract(parent_zip, filename, out_size, actual))) from = parent_zip;
     if (!data && (data = zip__by_crc_in_set(child_zip, parent_zip, expected_crc, out_size))) *actual = expected_crc;
-    /* A file under the right name with the wrong CRC: the set may hold the
+    /* A file under the right name with the wrong CRC: its zip may hold the
      * right one under another name (daytonagtx.zip has bank0.bin and bank1.bin
-     * the other way round from MAME's list). Take that one if it is there. */
+     * the other way round from MAME's list). Take that one if it is there, but
+     * only from the same zip: a homebrew sfight.zip's own data ROMs must not be
+     * swapped for the stock ones in schamp.zip beside it (Pinboard #1946). */
     if (data && *actual != expected_crc) {
         size_t n2 = 0;
-        uint8_t *by_crc = zip__by_crc_in_set(child_zip, parent_zip, expected_crc, &n2);
+        uint8_t *by_crc = zip_extract_by_crc(from, expected_crc, &n2);
         if (by_crc) { free(data); data = by_crc; *out_size = n2; *actual = expected_crc; }
     }
     return data;
