@@ -128,11 +128,28 @@ jobs:
             python3 python3-setuptools libncurses-dev
 
       # batocera's buildroot fork at the commit batocera.linux master pins.
+      # Now and then master pins a buildroot commit batocera never pushed
+      # (4 Nov 2026: 9341347, "not our ref"); then take the newest master
+      # commit whose buildroot can be fetched, with a warning.
       - name: Fetch batocera.linux and its buildroot
         id: br
         run: |
-          git clone --depth 1 https://github.com/batocera-linux/batocera.linux.git "$RUNNER_TEMP/batocera"
-          git -C "$RUNNER_TEMP/batocera" submodule update --init --depth 1 buildroot
+          B="$RUNNER_TEMP/batocera"
+          git clone --depth 30 --filter=blob:none https://github.com/batocera-linux/batocera.linux.git "$B"
+          git init -q "$RUNNER_TEMP/brprobe"
+          for c in $(git -C "$B" rev-list --first-parent HEAD); do
+            s=$(git -C "$B" rev-parse "$c:buildroot")
+            if git -C "$RUNNER_TEMP/brprobe" fetch -q --depth 1 https://github.com/batocera-linux/buildroot.git "$s"; then
+              break
+            fi
+            echo "::warning::batocera.linux $c pins buildroot $s, which batocera-linux/buildroot does not have; trying the commit before"
+            c=
+          done
+          rm -rf "$RUNNER_TEMP/brprobe"
+          test -n "$c"
+          git -C "$B" checkout -q "$c"
+          git -C "$B" log -1 --format='batocera.linux %h %ci %s'
+          git -C "$B" submodule update --init --depth 1 buildroot
           git -C "$RUNNER_TEMP/batocera" submodule status buildroot
           echo "rev=$(git -C "$RUNNER_TEMP/batocera" rev-parse HEAD:buildroot)" >> "$GITHUB_OUTPUT"
 
