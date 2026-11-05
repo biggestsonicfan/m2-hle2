@@ -346,12 +346,20 @@ static inline int controls_view_button(int a) {
 }
 
 /* A player-2 action a pad or wheel button can press: only a view button
- * (Daytona's VR3 / VR4). */
+ * (Daytona's VR3 / VR4), or the right lever of a twin-lever game's player
+ * (Virtual-On, game_input_map_t). */
 static inline bool controls_p2_choice(uint32_t acts) {
+    const game_profile_t *p = g_active_profile;
+    bool twin = p && p->input.twin_levers;
     for (int a = GAME_INPUT_P2_UP; a <= GAME_INPUT_P2_COIN; a++)
-        if ((acts & (1u << a)) && !controls_view_button(a)) return false;
+        if ((acts & (1u << a)) && !controls_view_button(a) && !(twin && p->input.bits[a])) return false;
     return true;
 }
+
+/* Both levers of a twin-lever game in one press: the game reads guard and jump
+ * only when the two land on the same frame (Pinboard #1940). */
+#define CTL_TWIN_GUARD (ACT(GAME_INPUT_P1_RIGHT) | ACT(GAME_INPUT_P2_LEFT))
+#define CTL_TWIN_JUMP  (ACT(GAME_INPUT_P1_LEFT) | ACT(GAME_INPUT_P2_RIGHT))
 
 /* An action's row label, with what a driving game makes of it. */
 static inline void controls_action_label(int a, char *buf, size_t cap) {
@@ -370,6 +378,11 @@ static inline void controls_action_label(int a, char *buf, size_t cap) {
             snprintf(buf, cap, p->quirks.wheel.view[1] ? "%s (view %d)" : "%s (view)", g_ctl_action_label[a], v);
             return;
         }
+    }
+    if (p && p->input.twin_levers && a <= GAME_INPUT_P2_RIGHT && a % 10 <= 3) {
+        static const char *const dir[4] = { "up", "down", "left", "right" };
+        snprintf(buf, cap, "%s lever %s", a < GAME_INPUT_P2_UP ? "Left" : "Right", dir[a % 10]);
+        return;
     }
     if (what) snprintf(buf, cap, "%s (%s)", g_ctl_action_label[a], what);
     else      snprintf(buf, cap, "%s", g_ctl_action_label[a]);
@@ -436,12 +449,19 @@ static const uint32_t g_ctl_pad_choices[] = {
     ACT(GAME_INPUT_P1_B2) | ACT(GAME_INPUT_P1_B3), ACT(GAME_INPUT_P1_B1) | ACT(GAME_INPUT_P1_B2) | ACT(GAME_INPUT_P1_B3),
     ACT(GAME_INPUT_P1_B3) | ACT(GAME_INPUT_P1_B4),
     ACT(GAME_INPUT_P2_B3), ACT(GAME_INPUT_P2_B4),   /* Daytona's VR3 / VR4 (controls_p2_choice) */
+    /* A twin-lever game's right lever and its buttons, and both levers at once. */
+    ACT(GAME_INPUT_P2_UP), ACT(GAME_INPUT_P2_DOWN), ACT(GAME_INPUT_P2_LEFT), ACT(GAME_INPUT_P2_RIGHT),
+    ACT(GAME_INPUT_P2_B1), ACT(GAME_INPUT_P2_B2), CTL_TWIN_GUARD, CTL_TWIN_JUMP,
 };
 #define CTL_PAD_CHOICES (int)(sizeof g_ctl_pad_choices / sizeof g_ctl_pad_choices[0])
 
 /* acts in words: "Button 1 + Button 2", "none". */
 static inline const char *controls_acts_text(uint32_t acts, char *buf, size_t cap) {
     if (!acts) { snprintf(buf, cap, "none"); return buf; }
+    if (g_active_profile && g_active_profile->input.twin_levers) {
+        if (acts == CTL_TWIN_GUARD) { snprintf(buf, cap, "Guard (both levers in)"); return buf; }
+        if (acts == CTL_TWIN_JUMP)  { snprintf(buf, cap, "Jump (both levers out)"); return buf; }
+    }
     size_t n = 0;
     buf[0] = '\0';
     for (int a = 0; a < GAME_INPUT_COUNT && n < cap; a++)

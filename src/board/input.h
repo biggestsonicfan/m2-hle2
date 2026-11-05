@@ -328,8 +328,10 @@ static inline int input_cabinet_name(const char *s, size_t n) {
  * optionally after "p2:" for player 2, or "p3:" / "p4:" for players 3 and 4
  * of a four-player cabinet (INPUT_COMBO_FAR) -- "b1+b2", "p2:b1+b2+b3",
  * "p3:up". Without a prefix (or with "p1:") it may name the cabinet's own
- * buttons too: "service", "gear3". Returns the action mask, or 0 if the text
- * is not one. */
+ * buttons too: "service", "gear3". "p1:" / "p2:" may also start a later part,
+ * for one player's two levers (Virtual-On's are P1's and P2's directions):
+ * "right+p2:left", both levers in on one frame. Returns the action mask, or 0
+ * if the text is not one. */
 /* A combo's "pN:" prefix, skipped: the player's first action in *base, and
  * INPUT_COMBO_FAR for players 3 and 4. */
 static inline uint32_t input__combo_player(const char **s, int *base) {
@@ -344,7 +346,14 @@ static inline uint32_t input__combo_player(const char **s, int *base) {
 static inline uint32_t input_combo_parse(const char *s) {
     int base;
     uint32_t acts = input__combo_player(&s, &base);
+    const char *first = s;
     while (*s) {
+        if (s != first && (s[0] == 'p' || s[0] == 'P') && (s[1] == '1' || s[1] == '2') && s[2] == ':') {
+            if (acts & INPUT_COMBO_FAR) return 0;
+            base = s[1] == '2' ? GAME_INPUT_P2_UP : GAME_INPUT_P1_UP;
+            s += 3;
+            if (!*s) return 0;
+        }
         size_t n = strcspn(s, "+");
         int found = input_combo_name(s, n);
         int cab = found < 0 && base == GAME_INPUT_P1_UP && !acts ? input_cabinet_name(s, n) : -1;
@@ -404,8 +413,8 @@ static inline void input_key_up(int kc) {
 }
 
 /* acts as input_combo_parse (or sdl_pads.h's actions_by_name) reads it, in
- * buf: "b1+b2", "p2:up", "service", "gear3", "none". "" for a mix it cannot
- * write (two players' actions, or a cabinet button with another). */
+ * buf: "b1+b2", "p2:up", "right+p2:left", "service", "gear3", "none". "" for
+ * a mix it cannot write (a cabinet button with another). */
 static inline const char *input_combo_format(uint32_t acts, char *buf, size_t cap) {
     static const char *const names[] = { "up", "down", "left", "right", "b1", "b2", "b3", "b4", "start", "coin" };
     const uint32_t p1 = (1u << GAME_INPUT_P2_UP) - 1, p2 = ((1u << GAME_INPUT_SERVICE) - 1) & ~p1;
@@ -414,14 +423,15 @@ static inline const char *input_combo_format(uint32_t acts, char *buf, size_t ca
     if (!acts) { snprintf(buf, cap, "none"); return buf; }
     for (int a = GAME_INPUT_SERVICE; a < GAME_INPUT_COUNT; a++)   /* service, test, gearn .. gear4 */
         if (acts == 1u << a) { snprintf(buf, cap, "%s", g_input_action_names[a]); return buf; }
-    if ((acts & p1) && (acts & p2)) return buf;
     if (acts & ~(p1 | p2)) return buf;
-    int base = (acts & p1) ? GAME_INPUT_P1_UP : GAME_INPUT_P2_UP;
     size_t n = 0;
-    if (base == GAME_INPUT_P2_UP) n += (size_t)snprintf(buf, cap, "p2:");
-    for (int i = 0; i < 10 && n < cap; i++)
-        if (acts & (1u << (base + i)))
-            n += (size_t)snprintf(buf + n, cap - n, "%s%s", n && buf[n - 1] != ':' ? "+" : "", names[i]);
+    for (int base = GAME_INPUT_P1_UP; base <= GAME_INPUT_P2_UP; base += GAME_INPUT_P2_UP - GAME_INPUT_P1_UP) {
+        if (!(acts & (base == GAME_INPUT_P1_UP ? p1 : p2))) continue;
+        if (base == GAME_INPUT_P2_UP && n < cap) n += (size_t)snprintf(buf + n, cap - n, "%sp2:", n ? "+" : "");
+        for (int i = 0; i < 10 && n < cap; i++)
+            if (acts & (1u << (base + i)))
+                n += (size_t)snprintf(buf + n, cap - n, "%s%s", n && buf[n - 1] != ':' ? "+" : "", names[i]);
+    }
     return buf;
 }
 

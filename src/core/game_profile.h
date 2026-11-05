@@ -80,6 +80,11 @@ typedef enum {
  */
 typedef struct {
     uint32_t bits[GAME_INPUT_COUNT];  /* mask per abstract action */
+    /* One player's two levers (Virtual-On): P1's directions the left lever,
+     * P2's the right one. A pad's right stick is the right lever, and a key or
+     * button may press both (guard, jump), which the game only reads as one
+     * gesture when both land on the same frame (Pinboard #1940). */
+    bool     twin_levers;
 } game_input_map_t;
 
 /* ---- Quirks -------------------------------------------------------------- */

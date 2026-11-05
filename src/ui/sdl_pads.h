@@ -377,6 +377,14 @@ static void pad_actions(SDL_Gamepad *pad, bool *now) {
     now[GAME_INPUT_P1_DOWN]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN)  || ay >  dead;
     now[GAME_INPUT_P1_LEFT]  |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT)  || ax < -dead;
     now[GAME_INPUT_P1_RIGHT] |= SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || ax >  dead;
+    if (g_active_profile && g_active_profile->input.twin_levers) {   /* the right stick, the right lever */
+        int rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
+        int ry = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+        now[GAME_INPUT_P2_UP]    |= ry < -dead;
+        now[GAME_INPUT_P2_DOWN]  |= ry >  dead;
+        now[GAME_INPUT_P2_LEFT]  |= rx < -dead;
+        now[GAME_INPUT_P2_RIGHT] |= rx >  dead;
+    }
     for (int b = 0; b < PAD_BIND_COUNT; b++) {
         if (!g_pad_binds[b].acts || !SDL_GetGamepadButton(pad, g_pad_binds[b].button)) continue;
         for (int a = 0; a < GAME_INPUT_COUNT; a++)
