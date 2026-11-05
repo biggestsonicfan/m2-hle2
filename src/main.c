@@ -1165,7 +1165,7 @@ static void pads_frame(void) {
     while (SDL_PollEvent(&ev)) sdl_pads_event(&ev, &changed);
     if (multi_pads_switch()) changed = true;   /* --boards: the pads to their boards, or back */
     if (!g_pads_focused) return;
-    if (changed) pad_refresh();
+    if (changed) { pad_refresh(); input_log_pad(g_input.held, (uint32_t)g_emu_frames); }
     ffb_update();
     ffb_out_t fo = ffb_poll();
     lg4ff_update(&fo, ffb_wheel_haptic());
@@ -2049,6 +2049,7 @@ static void frame(void) {
 }
 
 static void cleanup(void) {
+    input_log_close();
     kiosk_shutdown();      /* take the tray icon down before the window goes */
 #if M2HLE_PADS
     if (g_pads_on) { lobby_pad_release(); ffb_stop_all(); lg4ff_shutdown(); fanatec_shutdown(); SDL_Quit(); g_pads_on = false; }
@@ -2131,6 +2132,12 @@ static void event(const sapp_event* ev) {
      * focus so arcade muscle-memory isn't eaten by a debug window. */
     if (ev->type == SAPP_EVENTTYPE_KEY_DOWN && !ev->key_repeat) input_key_down((int)ev->key_code);
     if (ev->type == SAPP_EVENTTYPE_KEY_UP)                      input_key_up((int)ev->key_code);
+    if (input_log_on() && (ev->type == SAPP_EVENTTYPE_KEY_DOWN || ev->type == SAPP_EVENTTYPE_KEY_UP)) {
+        char kn[32];
+        input_log_key((int)ev->key_code, input_keycode_name((int)ev->key_code, kn),
+                      ev->type == SAPP_EVENTTYPE_KEY_DOWN, ev->key_repeat,
+                      input_keycode_actions((int)ev->key_code), g_input.held, (uint32_t)g_emu_frames);
+    }
     m2lua_ui_event(ev);
     lightgun_ui_event(ev);
 #if M2HLE_PADS
@@ -2227,6 +2234,10 @@ static void parse_args(int argc, char **argv) {
             } else LOG_WARN("--comm-slave %s: expected PORT:TOKEN", argv[i]);
         } else if (i + 1 < argc && lightgun_host_option(argv[i], argv[i + 1])) {
             i++;                      /* a light gun's flash on the trigger (lightgun_host.h) */
+        } else if (strcmp(argv[i], "--input-log") == 0 && i + 1 < argc) {
+            const char *path = argv[++i];   /* key events vs the board's frames (input_log.h) */
+            if (!M2HLE_DEV_TOOLS || !input_log_open(path)) LOG_WARN("--input-log %s: cannot write it", path);
+            else LOG_INFO("--input-log: writing %s", path);
         } else if (strcmp(argv[i], "--no-pads") == 0) {
             g_no_pads = 1;            /* no gamepads or wheels */
 #if M2HLE_PADS

@@ -406,6 +406,7 @@ static inline const char *emu_state_flat_load(emu_thread_ctx_t *ctx, const void 
 #include "follow.h"
 #include "replay.h"   /* recorded online matches, and their playback (Pinboard #572) */
 #include "tas.h"      /* tool-assisted play: a movie, rewind, the greenzone (Pinboard #1462) */
+#include "input_log.h"   /* --input-log: host keys vs the frame the board reads (#617) */
 
 /* A game script's hooks (core/m2lua.h, Pinboard #958), set by a host that runs
  * scripts and called with the emu mutex held: at each vblank, and before and
@@ -916,6 +917,7 @@ static inline int64_t emu_slice_begin(emu_thread_ctx_t *ctx, int *hzone) {
     follow_slice_begin(ctx);   /* follow.h: latch or replay this slice's inputs */
     tas_slice_begin(ctx);      /* tas.h: the movie's input for this frame */
     replay_slice_begin(ctx);   /* replay.h: record a netplay match's */
+    input_log_frame((uint32_t)g_emu_frames, input_board_held());   /* --input-log (#617) */
     emu_slice_irq_stale(ctx);
     /* The cycles run outside a slice (a single step, a load). */
     emu_timers_slice_begin(ctx);
